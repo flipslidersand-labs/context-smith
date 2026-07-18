@@ -1,0 +1,110 @@
+use anyhow::{Context, Result};
+use rusqlite::{Connection, params};
+use std::path::Path;
+
+use crate::{GitRepo, Language, Symbol, SymbolExtractor};
+
+pub struct IndexDb {
+    conn: Connection,
+}
+
+impl IndexDb {
+    pub fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
+        Ok(IndexDb { conn })
+    }
+
+    pub fn init_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS files (
+                id       INTEGER PRIMARY KEY,
+                path     TEXT NOT NULL UNIQUE,
+                lang     TEXT NOT NULL,
+                blob_sha TEXT NOT NULL,
+                size     INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS symbols (
+                id      INTEGER PRIMARY KEY,
+                file_id INTEGER NOT NULL REFERENCES files(id),
+                name    TEXT NOT NULL,
+                kind    TEXT NOT NULL,
+                line    INTEGER NOT NULL,
+                snippet TEXT NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_file(&self, path: &Path, lang: Language, blob_sha: &str, size: i64) -> Result<i64> {
+        let path_str = path.to_string_lossy();
+        self.conn.execute(
+            "INSERT INTO files (path, lang, blob_sha, size)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET blob_sha=excluded.blob_sha, size=excluded.size, lang=excluded.lang",
+            params![path_str.as_ref(), lang.as_str(), blob_sha, size],
+        )?;
+        let id = self.conn.query_row(
+            "SELECT id FROM files WHERE path = ?1",
+            params![path_str.as_ref()],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn delete_symbols_for(&self, file_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    pub fn insert_symbol(&self, sym: &Symbol) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![sym.file_id, sym.name, sym.kind.as_str(), sym.line, sym.snippet],
+        )?;
+        Ok(())
+    }
+}
+
+pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
+    db.init_schema()?;
+    let files = repo.scan()?;
+    let mut stats = IndexStats::default();
+
+    for (rel_path, lang, blob_sha, size) in &files {
+        stats.files_total += 1;
+        let file_id = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
+
+        if *lang == Language::Unknown {
+            continue;
+        }
+
+        let abs_path = repo.root().join(rel_path);
+        let source = match std::fs::read_to_string(&abs_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
+        let lines: Vec<&str> = source.lines().collect();
+
+        db.delete_symbols_for(file_id)?;
+        for (name, kind, line) in raw_syms {
+            let lo = line.saturating_sub(3) as usize;
+            let hi = (line as usize + 2).min(lines.len());
+            let snippet = lines[lo..hi].join("\n");
+            let sym = Symbol { file_id, name, kind, line, snippet };
+            db.insert_symbol(&sym)?;
+            stats.symbols_total += 1;
+        }
+        stats.files_indexed += 1;
+    }
+    Ok(stats)
+}
+
+#[derive(Debug, Default)]
+pub struct IndexStats {
+    pub files_total: usize,
+    pub files_indexed: usize,
+    pub symbols_total: usize,
+}
