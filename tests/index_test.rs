@@ -22,7 +22,8 @@ fn make_git_repo(dir: &std::path::Path, files: &[(&str, &str)]) -> PathBuf {
 
     let oid = index.write_tree().unwrap();
     let tree = repo.find_tree(oid).unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
 
     dir.to_owned()
 }
@@ -42,12 +43,8 @@ impl MyStruct {
 
 pub fn add(a: i32, b: i32) -> i32 { a + b }
 "#;
-    let syms = SymbolExtractor::extract(
-        std::path::Path::new("test.rs"),
-        src,
-        Language::Rust,
-    )
-    .unwrap();
+    let syms =
+        SymbolExtractor::extract(std::path::Path::new("test.rs"), src, Language::Rust).unwrap();
 
     let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
     assert!(names.contains(&"MyStruct"), "expected struct MyStruct");
@@ -78,12 +75,8 @@ func main() {
     fmt.Println(NewPoint(1, 2))
 }
 "#;
-    let syms = SymbolExtractor::extract(
-        std::path::Path::new("main.go"),
-        src,
-        Language::Go,
-    )
-    .unwrap();
+    let syms =
+        SymbolExtractor::extract(std::path::Path::new("main.go"), src, Language::Go).unwrap();
 
     let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
     assert!(names.contains(&"NewPoint"), "expected func NewPoint");
@@ -107,12 +100,8 @@ class MyClass:
 def standalone():
     pass
 "#;
-    let syms = SymbolExtractor::extract(
-        std::path::Path::new("test.py"),
-        src,
-        Language::Python,
-    )
-    .unwrap();
+    let syms =
+        SymbolExtractor::extract(std::path::Path::new("test.py"), src, Language::Python).unwrap();
 
     let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
     assert!(names.contains(&"MyClass"), "expected class MyClass");
@@ -133,14 +122,8 @@ fn index_command_creates_db() {
                 "src/lib.rs",
                 "pub fn hello() -> &'static str { \"hello\" }\n",
             ),
-            (
-                "main.go",
-                "package main\nfunc main() {}\n",
-            ),
-            (
-                "script.py",
-                "def run(): pass\n",
-            ),
+            ("main.go", "package main\nfunc main() {}\n"),
+            ("script.py", "def run(): pass\n"),
         ],
     );
 
@@ -154,5 +137,8 @@ fn index_command_creates_db() {
     assert!(db_path.exists(), "index.db should be created");
     assert_eq!(stats.files_total, 3);
     assert_eq!(stats.files_indexed, 3);
-    assert!(stats.symbols_total > 0, "should extract at least one symbol");
+    assert!(
+        stats.symbols_total > 0,
+        "should extract at least one symbol"
+    );
 }
