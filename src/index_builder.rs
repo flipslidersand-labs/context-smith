@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
+use crate::dep_builder;
 
 pub struct IndexDb {
     conn: Connection,
@@ -13,6 +15,10 @@ impl IndexDb {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
         Ok(IndexDb { conn })
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn init_schema(&self) -> Result<()> {
@@ -31,6 +37,11 @@ impl IndexDb {
                 kind    TEXT NOT NULL,
                 line    INTEGER NOT NULL,
                 snippet TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS deps (
+                from_file INTEGER NOT NULL REFERENCES files(id),
+                to_file   INTEGER NOT NULL REFERENCES files(id),
+                PRIMARY KEY (from_file, to_file)
             );",
         )?;
         Ok(())
@@ -64,16 +75,25 @@ impl IndexDb {
         )?;
         Ok(())
     }
+
+    pub fn delete_deps_from(&self, file_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM deps WHERE from_file = ?1", params![file_id])?;
+        Ok(())
+    }
 }
 
 pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
     db.init_schema()?;
     let files = repo.scan()?;
     let mut stats = IndexStats::default();
+    let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
+    // Pass 1: upsert files + symbols
     for (rel_path, lang, blob_sha, size) in &files {
         stats.files_total += 1;
         let file_id = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
+        file_paths.insert(file_id, rel_path.clone());
 
         if *lang == Language::Unknown {
             continue;
@@ -99,6 +119,15 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
         }
         stats.files_indexed += 1;
     }
+
+    // Pass 2: resolve imports → deps table
+    dep_builder::build_deps(db.connection(), &file_paths)?;
+    stats.deps_total = db.connection().query_row(
+        "SELECT COUNT(*) FROM deps",
+        [],
+        |row| row.get(0),
+    )?;
+
     Ok(stats)
 }
 
@@ -107,4 +136,5 @@ pub struct IndexStats {
     pub files_total: usize,
     pub files_indexed: usize,
     pub symbols_total: usize,
+    pub deps_total: usize,
 }

@@ -1,3 +1,4 @@
+pub mod dep_builder;
 pub mod index_builder;
 
 use anyhow::{Context, Result};
@@ -73,6 +74,34 @@ impl GitRepo {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Unified diff of the last n_commits commits (empty string if repo has no history).
+    pub fn recent_diff(&self, n_commits: usize) -> Result<String> {
+        let repo = git2::Repository::open(&self.root)
+            .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+
+        let mut ancestor = head_commit.clone();
+        for _ in 0..n_commits {
+            if ancestor.parent_count() == 0 {
+                break;
+            }
+            ancestor = ancestor.parent(0)?;
+        }
+
+        let head_tree = head_commit.tree()?;
+        let anc_tree = ancestor.tree()?;
+        let diff = repo.diff_tree_to_tree(Some(&anc_tree), Some(&head_tree), None)?;
+
+        let mut patch = String::new();
+        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+            if let Ok(s) = std::str::from_utf8(line.content()) {
+                patch.push_str(s);
+            }
+            true
+        })?;
+        Ok(patch)
     }
 
     /// Walk all tracked files in HEAD, returning (relative_path, Language, blob_sha, size).
