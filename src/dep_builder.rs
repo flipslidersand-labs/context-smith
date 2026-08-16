@@ -6,31 +6,47 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Populate the deps table by resolving import symbols already stored in the DB.
+/// Clears the table and rebuilds atomically inside a transaction.
 pub fn build_deps(conn: &Connection, file_paths: &HashMap<i64, PathBuf>) -> Result<()> {
     let path_to_id: HashMap<PathBuf, i64> =
         file_paths.iter().map(|(id, p)| (p.clone(), *id)).collect();
 
+    // Collect import rows before starting the write transaction
     let mut stmt = conn.prepare("SELECT file_id, name FROM symbols WHERE kind = 'import'")?;
     let imports: Vec<(i64, String)> = stmt
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
 
-    for (from_id, import_str) in imports {
-        let from_path = match file_paths.get(&from_id) {
-            Some(p) => p,
-            None => continue,
-        };
-        for to_id in resolve_import(&import_str, from_path, &path_to_id) {
-            if from_id != to_id {
-                conn.execute(
-                    "INSERT OR IGNORE INTO deps (from_file, to_file) VALUES (?1, ?2)",
-                    params![from_id, to_id],
-                )?;
+    conn.execute_batch("BEGIN")?;
+    let result = (|| -> Result<()> {
+        conn.execute_batch("DELETE FROM deps")?;
+        for (from_id, import_str) in &imports {
+            let from_path = match file_paths.get(from_id) {
+                Some(p) => p,
+                None => continue,
+            };
+            for to_id in resolve_import(import_str, from_path, &path_to_id) {
+                if *from_id != to_id {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO deps (from_file, to_file) VALUES (?1, ?2)",
+                        params![from_id, to_id],
+                    )?;
+                }
             }
         }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(Into::into),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 fn resolve_import(
@@ -48,13 +64,11 @@ fn resolve_import(
 }
 
 /// Expand grouped Rust use paths: "crate::{a, b}" → ["crate::a", "crate::b"]
-/// Handles nested groups: "crate::{a::{b,c}, d}" → ["crate::a::b", "crate::a::c", "crate::d"]
 fn expand_rust_use(s: &str) -> Vec<String> {
     if let Some(brace) = s.find('{') {
         let prefix = &s[..brace];
         let inner_end = s.rfind('}').unwrap_or(s.len());
         let inner = &s[brace + 1..inner_end];
-        // Split on ',' only at brace depth 0 to handle nested groups correctly.
         split_brace_aware(inner)
             .flat_map(|part| expand_rust_use(&format!("{}{}", prefix, part.trim())))
             .collect()
@@ -90,7 +104,7 @@ fn resolve_rust(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64
     for expanded in expand_rust_use(import_str) {
         let rel = match expanded.strip_prefix("crate::") {
             Some(tail) => tail.replace("::", "/"),
-            None => continue, // external crate or super:: — skip
+            None => continue,
         };
         for candidate in [
             PathBuf::from(format!("src/{}.rs", rel)),
@@ -110,17 +124,34 @@ fn resolve_python(
     from_path: &Path,
     path_to_id: &HashMap<PathBuf, i64>,
 ) -> Vec<i64> {
-    let module = if let Some(tail) = import_str.strip_prefix("from ") {
-        tail.split_whitespace().next().unwrap_or("").trim_start_matches('.')
+    let raw_module = if let Some(tail) = import_str.strip_prefix("from ") {
+        tail.split_whitespace().next().unwrap_or("")
     } else if let Some(tail) = import_str.strip_prefix("import ") {
         tail.split_whitespace().next().unwrap_or("")
     } else {
         return vec![];
     };
 
-    let base_dir = from_path.parent().unwrap_or(Path::new(""));
-    let rel = module.replace('.', "/");
+    // Count leading dots for relative imports: `.foo` = 1 dot (current pkg), `..foo` = 2 dots (parent)
+    let dot_count = raw_module.chars().take_while(|&c| c == '.').count();
+    let module = raw_module.trim_start_matches('.');
 
+    // Compute base directory: each dot beyond the first goes up one level
+    let mut base_dir = from_path.parent().unwrap_or(Path::new(""));
+    for _ in 1..dot_count {
+        base_dir = base_dir.parent().unwrap_or(Path::new(""));
+    }
+
+    if module.is_empty() {
+        // e.g. `from .. import something` — resolve to the package itself
+        let candidate = base_dir.join("__init__.py");
+        return path_to_id
+            .get(&candidate)
+            .map(|&id| vec![id])
+            .unwrap_or_default();
+    }
+
+    let rel = module.replace('.', "/");
     for candidate in [
         base_dir.join(format!("{}.py", rel)),
         base_dir.join(format!("{}/__init__.py", rel)),
@@ -135,27 +166,48 @@ fn resolve_python(
 }
 
 fn resolve_go(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64> {
-    // "import "github.com/org/repo/pkg/foo"" → match files whose parent dir = "foo"
     let pkg = import_str
         .trim()
         .trim_start_matches("import")
         .trim()
         .trim_matches('"');
-    let last = pkg.rsplit('/').next().unwrap_or(pkg);
+    if pkg.is_empty() {
+        return vec![];
+    }
+
+    let import_segs: Vec<&str> = pkg.split('/').filter(|s| !s.is_empty()).collect();
+    if import_segs.is_empty() {
+        return vec![];
+    }
+
+    // Match against the last 2 path segments to avoid false positives from same-named dirs
+    let match_depth = import_segs.len().min(2);
+    let match_segs = &import_segs[import_segs.len() - match_depth..];
+
     path_to_id
         .iter()
         .filter(|(p, _)| {
-            p.parent()
-                .and_then(|d| d.file_name())
-                .and_then(|n| n.to_str())
-                == Some(last)
+            if let Some(parent) = p.parent() {
+                let parent_comps: Vec<String> = parent
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                if parent_comps.len() < match_segs.len() {
+                    return false;
+                }
+                let tail = &parent_comps[parent_comps.len() - match_segs.len()..];
+                tail.iter()
+                    .zip(match_segs.iter())
+                    .all(|(a, b)| a.as_str() == *b)
+            } else {
+                false
+            }
         })
         .map(|(_, &id)| id)
         .collect()
 }
 
 /// BFS-expand from seed files through the deps graph (bidirectional, score decay × 0.5/hop).
-/// Returns file_id → score for all reachable files including seeds.
 pub fn bfs_expand(
     conn: &Connection,
     seeds: &[(i64, f32)],
@@ -168,7 +220,9 @@ pub fn bfs_expand(
 
     for &(from, to) in &edges {
         for fid in [from, to] {
-            file_to_node.entry(fid).or_insert_with(|| graph.add_node(fid));
+            file_to_node
+                .entry(fid)
+                .or_insert_with(|| graph.add_node(fid));
         }
     }
     for (from, to) in edges {
@@ -216,7 +270,6 @@ fn load_all_deps(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     let mut stmt = conn.prepare("SELECT from_file, to_file FROM deps")?;
     let edges: Vec<(i64, i64)> = stmt
         .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(edges)
 }

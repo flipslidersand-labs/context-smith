@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::budget::Candidate;
@@ -59,19 +60,28 @@ pub fn write_bundle(
 
     std::fs::write(out_dir.join("task.md"), &task_md)?;
 
-    // relevant-code/{slug}.md per file
+    // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
+    let mut slug_counts: HashMap<String, usize> = HashMap::new();
     for c in selected {
-        let slug = c
-            .path
-            .to_string_lossy()
-            .replace(['/', '\\', '.'], "_");
+        let base_slug = c.path.to_string_lossy().replace(['/', '\\', '.'], "_");
+        let count = slug_counts.entry(base_slug.clone()).or_insert(0);
+        let slug = if *count == 0 {
+            base_slug
+        } else {
+            format!("{}_{}", base_slug, count)
+        };
+        *count += 1;
+
         let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
         let file_md = format!(
             "<!-- {} -->\n```{ext}\n{}\n```\n",
             c.path.display(),
             c.content,
         );
-        std::fs::write(out_dir.join("relevant-code").join(format!("{slug}.md")), file_md)?;
+        std::fs::write(
+            out_dir.join("relevant-code").join(format!("{slug}.md")),
+            file_md,
+        )?;
     }
 
     // citations.json

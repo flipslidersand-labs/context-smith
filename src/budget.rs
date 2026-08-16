@@ -19,16 +19,21 @@ impl Candidate {
 /// Greedy budget allocation: sort by score descending, include until budget exhausted.
 /// Returns selected candidates in score order.
 pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate> {
-    candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut used = 0usize;
     let mut selected = Vec::new();
 
     for c in candidates {
-        let t = c.tokens();
-        if t == 0 {
+        if c.content.is_empty() {
             continue;
         }
+        // Ensure files shorter than 4 chars still count as 1 token so they aren't silently excluded
+        let t = c.tokens().max(1);
         if used + t > budget {
             // Try fitting a smaller remaining chunk
             if used >= budget {
@@ -40,7 +45,10 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
             if tok == 0 {
                 break;
             }
-            selected.push(Candidate { content: truncated, ..c });
+            selected.push(Candidate {
+                content: truncated,
+                ..c
+            });
             break;
         }
         used += t;

@@ -1,15 +1,18 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use context_smith::GitRepo;
 use context_smith::budget::{allocate, Candidate};
 use context_smith::bundle_writer::write_bundle;
 use context_smith::dep_builder::bfs_expand;
 use context_smith::index_builder::{build_index, IndexDb};
 use context_smith::search_index::search_bm25;
+use context_smith::GitRepo;
 
 #[derive(Parser)]
-#[command(name = "contextsmith", about = "AI context compiler for Git repositories")]
+#[command(
+    name = "contextsmith",
+    about = "AI context compiler for Git repositories"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -35,6 +38,9 @@ enum Command {
         budget: usize,
         #[arg(long, default_value = "context.bundle")]
         out: String,
+        /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
+        #[arg(long)]
+        index: Option<String>,
         /// Include BM25 score annotations in task.md
         #[arg(long)]
         explain: bool,
@@ -69,9 +75,20 @@ fn main() -> anyhow::Result<()> {
             );
         }
 
-        Command::Build { repo, task, budget, out, explain, diff_commits } => {
+        Command::Build {
+            repo,
+            task,
+            budget,
+            out,
+            index,
+            explain,
+            diff_commits,
+        } => {
             let repo = GitRepo::new(&repo)?;
-            let db_path = repo.root().join(".contextsmith").join("index.db");
+            let db_path = match index {
+                Some(p) => PathBuf::from(p),
+                None => repo.root().join(".contextsmith").join("index.db"),
+            };
             if !db_path.exists() {
                 anyhow::bail!(
                     "Index not found at {}. Run `contextsmith index --repo <path>` first.",
@@ -89,24 +106,26 @@ fn main() -> anyhow::Result<()> {
 
             // Step 2: BFS expand from seeds (depth=2)
             let mut scored = bfs_expand(db.connection(), &seeds, 2)?;
-            // Merge seed scores (seeds already included in bfs_expand output)
             for (fid, s) in &seeds {
-                scored.entry(*fid).and_modify(|v| {
-                    if *s > *v {
-                        *v = *s;
-                    }
-                }).or_insert(*s);
+                scored
+                    .entry(*fid)
+                    .and_modify(|v| {
+                        if *s > *v {
+                            *v = *s;
+                        }
+                    })
+                    .or_insert(*s);
             }
 
             // Step 3: Load file paths + content from DB
             let mut candidates: Vec<Candidate> = Vec::new();
             {
                 let conn = db.connection();
-                let mut stmt = conn.prepare("SELECT id, path FROM files WHERE lang != 'unknown'")?;
+                let mut stmt =
+                    conn.prepare("SELECT id, path FROM files WHERE lang != 'unknown'")?;
                 let file_rows: Vec<(i64, String)> = stmt
                     .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
 
                 for (file_id, rel_path) in file_rows {
                     let score = match scored.get(&file_id) {

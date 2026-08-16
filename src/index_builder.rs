@@ -3,9 +3,9 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 use crate::dep_builder;
 use crate::search_index;
+use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
 pub struct IndexDb {
     conn: Connection,
@@ -56,7 +56,13 @@ impl IndexDb {
         Ok(())
     }
 
-    pub fn upsert_file(&self, path: &Path, lang: Language, blob_sha: &str, size: i64) -> Result<i64> {
+    pub fn upsert_file(
+        &self,
+        path: &Path,
+        lang: Language,
+        blob_sha: &str,
+        size: i64,
+    ) -> Result<i64> {
         let path_str = path.to_string_lossy();
         self.conn.execute(
             "INSERT INTO files (path, lang, blob_sha, size)
@@ -73,14 +79,21 @@ impl IndexDb {
     }
 
     pub fn delete_symbols_for(&self, file_id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])?;
+        self.conn
+            .execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 
     pub fn insert_symbol(&self, sym: &Symbol) -> Result<()> {
         self.conn.execute(
             "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![sym.file_id, sym.name, sym.kind.as_str(), sym.line, sym.snippet],
+            params![
+                sym.file_id,
+                sym.name,
+                sym.kind.as_str(),
+                sym.line,
+                sym.snippet
+            ],
         )?;
         Ok(())
     }
@@ -131,21 +144,24 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
             let lo = line.saturating_sub(3) as usize;
             let hi = (line as usize + 2).min(lines.len());
             let snippet = lines[lo..hi].join("\n");
-            let sym = Symbol { file_id, name, kind, line, snippet };
+            let sym = Symbol {
+                file_id,
+                name,
+                kind,
+                line,
+                snippet,
+            };
             db.insert_symbol(&sym)?;
             stats.symbols_total += 1;
         }
         stats.files_indexed += 1;
     }
 
-    // Pass 2: resolve imports → deps table (clear first to remove stale edges)
-    db.connection().execute_batch("DELETE FROM deps")?;
+    // Pass 2: resolve imports → deps table (build_deps clears and rebuilds atomically)
     dep_builder::build_deps(db.connection(), &file_paths)?;
-    stats.deps_total = db.connection().query_row(
-        "SELECT COUNT(*) FROM deps",
-        [],
-        |row| row.get(0),
-    )?;
+    stats.deps_total = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM deps", [], |row| row.get(0))?;
 
     // Pass 3: populate FTS5 tables + meta
     // fts_body reads from absolute paths; store abs paths in a temp file_paths_abs map

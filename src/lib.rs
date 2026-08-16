@@ -140,7 +140,11 @@ impl GitRepo {
 pub struct SymbolExtractor;
 
 impl SymbolExtractor {
-    pub fn extract(path: &Path, source: &str, lang: Language) -> Result<Vec<(String, SymbolKind, u32)>> {
+    pub fn extract(
+        path: &Path,
+        source: &str,
+        lang: Language,
+    ) -> Result<Vec<(String, SymbolKind, u32)>> {
         match lang {
             Language::Rust => Self::extract_rust(path, source),
             Language::Python => Self::extract_python(path, source),
@@ -209,7 +213,14 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
             }
         }
         "use_declaration" => {
-            out.push((node_text(node, src).trim_end_matches(';').trim_start_matches("use ").to_owned(), SymbolKind::Import, line));
+            out.push((
+                node_text(node, src)
+                    .trim_end_matches(';')
+                    .trim_start_matches("use ")
+                    .to_owned(),
+                SymbolKind::Import,
+                line,
+            ));
         }
         _ => {}
     }
@@ -226,7 +237,11 @@ fn collect_python_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, S
     out
 }
 
-fn collect_python_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, SymbolKind, u32)>) {
+fn collect_python_node(
+    node: tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, SymbolKind, u32)>,
+) {
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_definition" => {
