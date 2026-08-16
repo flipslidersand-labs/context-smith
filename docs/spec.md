@@ -16,16 +16,24 @@ Git リポジトリ・Issue・設計書・DB スキーマ・ログから、タ�
 ## 利用イメージ
 
 ```bash
-# インデックス構築
+# インデックス構築（.contextsmith/index.db をリポジトリ内に生成）
 contextsmith index --repo ./project
 
-# コンテキスト生成
+# コンテキスト生成（.contextsmith/index.db を自動参照）
 contextsmith build \
   --repo ./project \
   --task "認証エラーを調査" \
   --budget 30000 \
   --out context.bundle/
 ```
+
+## インデックスの格納場所
+
+`contextsmith index` は `{repo}/.contextsmith/index.db` に SQLite ファイルを生成する。
+このファイルには files / symbols / deps / meta / fts_symbols / fts_body がすべて含まれる。
+
+小規模リポジトリ（目安: ソースコード 10MB 以下）であれば `index.db` を git 管理対象にして
+チームで共有できる。大規模リポジトリの場合は `.gitignore` に追加することを推奨する。
 
 ## 出力バンドル
 
