@@ -138,7 +138,8 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
         stats.files_indexed += 1;
     }
 
-    // Pass 2: resolve imports → deps table
+    // Pass 2: resolve imports → deps table (clear first to remove stale edges)
+    db.connection().execute_batch("DELETE FROM deps")?;
     dep_builder::build_deps(db.connection(), &file_paths)?;
     stats.deps_total = db.connection().query_row(
         "SELECT COUNT(*) FROM deps",

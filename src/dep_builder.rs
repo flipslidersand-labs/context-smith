@@ -48,13 +48,14 @@ fn resolve_import(
 }
 
 /// Expand grouped Rust use paths: "crate::{a, b}" → ["crate::a", "crate::b"]
+/// Handles nested groups: "crate::{a::{b,c}, d}" → ["crate::a::b", "crate::a::c", "crate::d"]
 fn expand_rust_use(s: &str) -> Vec<String> {
     if let Some(brace) = s.find('{') {
         let prefix = &s[..brace];
         let inner_end = s.rfind('}').unwrap_or(s.len());
         let inner = &s[brace + 1..inner_end];
-        inner
-            .split(',')
+        // Split on ',' only at brace depth 0 to handle nested groups correctly.
+        split_brace_aware(inner)
             .flat_map(|part| expand_rust_use(&format!("{}{}", prefix, part.trim())))
             .collect()
     } else {
@@ -62,6 +63,26 @@ fn expand_rust_use(s: &str) -> Vec<String> {
         let clean = clean.trim_end_matches("::*");
         vec![clean.to_string()]
     }
+}
+
+/// Split `s` on ',' but ignore commas inside nested `{...}`.
+fn split_brace_aware(s: &str) -> impl Iterator<Item = &str> {
+    let mut parts = Vec::new();
+    let mut depth: usize = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts.into_iter()
 }
 
 fn resolve_rust(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64> {

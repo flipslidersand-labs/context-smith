@@ -1,3 +1,5 @@
+pub mod budget;
+pub mod bundle_writer;
 pub mod dep_builder;
 pub mod index_builder;
 pub mod search_index;
