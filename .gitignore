@@ -1,0 +1,23 @@
+# Build output
+target/
+
+# SQLite index (can be gitignored for large repos; small repos may commit it)
+.contextsmith/index.db
+*.db
+*.db-wal
+*.db-shm
+
+# Context bundles (output, not source)
+context.bundle/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.tmp
+
+# Logs
+*.log
