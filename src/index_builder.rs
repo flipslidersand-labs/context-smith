@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 use crate::dep_builder;
+use crate::search_index;
 
 pub struct IndexDb {
     conn: Connection,
@@ -42,7 +43,15 @@ impl IndexDb {
                 from_file INTEGER NOT NULL REFERENCES files(id),
                 to_file   INTEGER NOT NULL REFERENCES files(id),
                 PRIMARY KEY (from_file, to_file)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols
+                USING fts5(file_id UNINDEXED, name);
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_body
+                USING fts5(file_id UNINDEXED, content);",
         )?;
         Ok(())
     }
@@ -79,6 +88,15 @@ impl IndexDb {
     pub fn delete_deps_from(&self, file_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM deps WHERE from_file = ?1", params![file_id])?;
+        Ok(())
+    }
+
+    pub fn upsert_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
         Ok(())
     }
 }
@@ -127,6 +145,23 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
         [],
         |row| row.get(0),
     )?;
+
+    // Pass 3: populate FTS5 tables + meta
+    // fts_body reads from absolute paths; store abs paths in a temp file_paths_abs map
+    let abs_file_paths: HashMap<i64, std::path::PathBuf> = file_paths
+        .iter()
+        .map(|(&id, rel)| (id, repo.root().join(rel)))
+        .collect();
+    search_index::populate_fts_with_paths(db.connection(), &abs_file_paths)?;
+
+    let repo_root = repo.root().to_string_lossy().to_string();
+    db.upsert_meta("repo_root", &repo_root)?;
+    let indexed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    db.upsert_meta("indexed_at", &indexed_at)?;
 
     Ok(stats)
 }

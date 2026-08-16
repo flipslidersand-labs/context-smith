@@ -1,5 +1,7 @@
 pub mod dep_builder;
 pub mod index_builder;
+pub mod search_index;
+pub mod tokenizer;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
