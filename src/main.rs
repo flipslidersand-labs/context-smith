@@ -107,19 +107,22 @@ fn main() -> anyhow::Result<()> {
                 db_path.display(),
             );
 
-            // Optional: generate semantic embeddings via the remote embedding service.
+            // Optional: generate semantic embeddings via the remote embedding
+            // service. Non-fatal — a failure here leaves the BM25 index usable.
             #[cfg(feature = "remote-embed")]
             match context_smith::embed::RemoteEmbedder::from_env() {
                 Some(embedder) => {
-                    let n = context_smith::embed::populate_embeddings(
+                    match context_smith::embed::populate_embeddings(
                         db.connection(),
                         repo.root(),
                         &embedder,
-                    )?;
-                    println!("embeddings: {n} files (remote-embed)");
+                    ) {
+                        Ok(n) => println!("embeddings: {n} files (remote-embed)"),
+                        Err(e) => eprintln!("warning: embedding generation failed: {e}"),
+                    }
                 }
                 None => eprintln!(
-                    "note: remote-embed built but CONTEXTSMITH_EMBED_URL unset; skipping embeddings"
+                    "note: remote-embed built but EMBEDDING_SVC_URL unset; skipping embeddings"
                 ),
             }
         }
@@ -147,13 +150,15 @@ fn main() -> anyhow::Result<()> {
             }
             let db = IndexDb::open(&db_path)?;
 
-            // Step 1: BM25 search → top-20 seeds, optionally RRF-fused with semantic vectors
+            // Step 1: BM25 search → top-20 seeds, optionally RRF-fused with semantic
+            // vectors. Fusion can surface files with zero lexical overlap, so the
+            // empty check happens after fusion (semantic may rescue an empty BM25).
             let bm25 = search_bm25(db.connection(), &task, 20)?;
-            if bm25.is_empty() {
+            let seeds = build_seeds(db.connection(), &task, bm25, no_embed)?;
+            if seeds.is_empty() {
                 eprintln!("No matching files found for task: {}", task);
                 std::process::exit(1);
             }
-            let seeds = build_seeds(db.connection(), &task, bm25, no_embed)?;
 
             // Step 2: BFS expand from seeds (depth=2)
             let mut scored = bfs_expand(db.connection(), &seeds, 2)?;

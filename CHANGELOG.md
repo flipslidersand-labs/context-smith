@@ -14,7 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reciprocal Rank Fusion. An `Embedder` trait with a feature-gated
   `RemoteEmbedder` (`remote-embed`, off by default), an `embeddings` BLOB table,
   cosine vector search, and a `--no-embed` build flag. Backward compatible:
-  without the feature or stored vectors, seeding stays BM25-only.
+  without the feature or stored vectors, seeding stays BM25-only. Semantic seeds
+  can now surface files with zero lexical overlap (fusion runs even when BM25
+  returns nothing). Verified live against the embedding service (e5, 768-dim):
+  Recall@1 improved from 0/3 to 2/3 on a zero-overlap task set.
+
+### Fixed
+- `RemoteEmbedder` now matches the real embedding-svc contract: `X-API-Key`
+  auth, `{collection, texts, mode: index|search}` request, `{vectors}` response,
+  and `EMBEDDING_SVC_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_COLLECTION` env vars
+  (aligned with the memory-ingest ecosystem). Embedding failures during `index`
+  are non-fatal (the BM25 index stays usable).
 
 ## [0.1.0] - 2026-08-17
 

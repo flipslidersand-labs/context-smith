@@ -8,11 +8,31 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
+/// Embedding intent. e5-style models embed documents and queries differently;
+/// the embedding service applies the right prefix based on this mode, so callers
+/// pass raw text (no manual `passage:` / `query:` prefixing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedMode {
+    /// Documents being indexed.
+    Index,
+    /// A search query.
+    Search,
+}
+
+impl EmbedMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbedMode::Index => "index",
+            EmbedMode::Search => "search",
+        }
+    }
+}
+
 /// Produces dense vectors for a batch of texts. Implementations may be remote
 /// (HTTP embedding service) or, in the future, local (ONNX).
 pub trait Embedder {
     /// Embed each input text, returning one vector per input in the same order.
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    fn embed(&self, texts: &[String], mode: EmbedMode) -> Result<Vec<Vec<f32>>>;
 }
 
 /// Serialize a vector as little-endian f32 bytes for BLOB storage.
@@ -70,8 +90,8 @@ const EMBED_CHAR_LIMIT: usize = 8000;
 const EMBED_BATCH: usize = 256;
 
 /// Embed every indexed source file and store vectors in the `embeddings` table.
-/// Documents are prefixed with `passage: ` per the e5 convention. Returns the
-/// number of files embedded.
+/// Files are sent with mode `index` (the service applies the e5 document prefix).
+/// Returns the number of files embedded.
 pub fn populate_embeddings(
     conn: &Connection,
     repo_root: &std::path::Path,
@@ -92,7 +112,7 @@ pub fn populate_embeddings(
         };
         let truncated: String = content.chars().take(EMBED_CHAR_LIMIT).collect();
         ids.push(id);
-        texts.push(format!("passage: {}", truncated));
+        texts.push(truncated);
     }
     if ids.is_empty() {
         return Ok(0);
@@ -103,7 +123,7 @@ pub fn populate_embeddings(
         conn.execute_batch("DELETE FROM embeddings")?;
         let mut written = 0;
         for (id_chunk, text_chunk) in ids.chunks(EMBED_BATCH).zip(texts.chunks(EMBED_BATCH)) {
-            let vecs = embedder.embed(text_chunk)?;
+            let vecs = embedder.embed(text_chunk, EmbedMode::Index)?;
             for (id, v) in id_chunk.iter().zip(vecs.iter()) {
                 conn.execute(
                     "INSERT OR REPLACE INTO embeddings (file_id, vector) VALUES (?1, ?2)",
@@ -158,7 +178,7 @@ pub fn fuse_seeds(
         return Ok(bm25.to_vec());
     }
     let query_vec = embedder
-        .embed(&[format!("query: {}", task)])?
+        .embed(&[task.to_string()], EmbedMode::Search)?
         .into_iter()
         .next()
         .unwrap_or_default();
@@ -166,50 +186,68 @@ pub fn fuse_seeds(
     Ok(rrf_fuse(&[bm25, &vector], 60.0, top_n))
 }
 
-/// HTTP embedding client (e.g. the MINIPC embedding-svc, e5 on :9092).
+/// HTTP embedding client for the MINIPC embedding-svc (e5, :9092).
 ///
-/// API contract: `POST {url}/embed/batch` with `{"texts": [..]}` returning
-/// `{"embeddings": [[..], ..]}`. Configure via env:
-///   - `CONTEXTSMITH_EMBED_URL`     (required, e.g. http://192.0.2.10:9092)
-///   - `CONTEXTSMITH_EMBED_API_KEY` (optional, sent as `Authorization: Bearer`)
+/// API contract: `POST {url}/embed/batch` with
+/// `{"collection": <str>, "texts": [..], "mode": "index"|"search"}` returning
+/// `{"vectors": [[..], ..], "dim", "model", ...}`. Auth via `X-API-Key`.
+///
+/// Configure via env (aligned with the memory-ingest / search-engine ecosystem):
+///   - `EMBEDDING_SVC_URL`     (required, e.g. http://192.0.2.10:9092)
+///   - `EMBEDDING_API_KEY`     (optional, sent as `X-API-Key`)
+///   - `EMBEDDING_COLLECTION`  (optional, default `context-smith`; must be a
+///     collection registered on the service)
 #[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     url: String,
     api_key: Option<String>,
+    collection: String,
 }
 
 #[cfg(feature = "remote-embed")]
 impl RemoteEmbedder {
-    /// Construct from env; returns `None` if `CONTEXTSMITH_EMBED_URL` is unset.
+    /// Construct from env; returns `None` if `EMBEDDING_SVC_URL` is unset.
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("CONTEXTSMITH_EMBED_URL").ok()?;
-        let api_key = std::env::var("CONTEXTSMITH_EMBED_API_KEY").ok();
+        let url = std::env::var("EMBEDDING_SVC_URL").ok()?;
         Some(RemoteEmbedder {
             url: url.trim_end_matches('/').to_string(),
-            api_key,
+            api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+            collection: std::env::var("EMBEDDING_COLLECTION")
+                .unwrap_or_else(|_| "context-smith".to_string()),
         })
     }
 }
 
 #[cfg(feature = "remote-embed")]
 impl Embedder for RemoteEmbedder {
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&self, texts: &[String], mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
         #[derive(serde::Deserialize)]
         struct EmbedResponse {
-            embeddings: Vec<Vec<f32>>,
+            vectors: Vec<Vec<f32>>,
         }
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(EMBED_BATCH) {
             let mut req = ureq::post(&format!("{}/embed/batch", self.url));
             if let Some(key) = &self.api_key {
-                req = req.set("Authorization", &format!("Bearer {}", key));
+                req = req.set("X-API-Key", key);
             }
             let resp: EmbedResponse = req
-                .send_json(ureq::json!({ "texts": chunk }))
+                .send_json(ureq::json!({
+                    "collection": self.collection,
+                    "texts": chunk,
+                    "mode": mode.as_str(),
+                }))
                 .map_err(|e| anyhow::anyhow!("embedding request failed: {e}"))?
                 .into_json()
                 .map_err(|e| anyhow::anyhow!("embedding response decode failed: {e}"))?;
-            out.extend(resp.embeddings);
+            if resp.vectors.len() != chunk.len() {
+                anyhow::bail!(
+                    "embedding service returned {} vectors for {} texts",
+                    resp.vectors.len(),
+                    chunk.len()
+                );
+            }
+            out.extend(resp.vectors);
         }
         Ok(out)
     }
@@ -224,7 +262,7 @@ mod tests {
     /// vectors so tests need no network.
     struct MockEmbedder;
     impl Embedder for MockEmbedder {
-        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
             Ok(texts
                 .iter()
                 .map(|t| {
