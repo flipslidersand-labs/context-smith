@@ -1,75 +1,83 @@
 # context-smith
 
-**AI context compiler** — Git リポジトリからタスクに必要なコードだけを選び出し、トークン予算内に収まるコンテキストバンドルを生成する CLI ツール。
+[![crates.io](https://img.shields.io/crates/v/context-smith.svg)](https://crates.io/crates/context-smith)
+[![docs.rs](https://docs.rs/context-smith/badge.svg)](https://docs.rs/context-smith)
+[![CI](https://github.com/flipslidersand/context-smith/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand/context-smith/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/context-smith.svg)](./LICENSE)
+
+**English**: this page | **日本語**: [README.ja.md](./README.ja.md)
+
+**AI context compiler** — a CLI that selects only the code relevant to your task from a Git repository and emits a context bundle that fits within a token budget.
 
 ```
-大規模リポジトリ全体をそのまま渡す → 関係ないコードで AI の精度が落ちる
+Feeding a whole large repository → irrelevant code degrades the AI's accuracy
               ↓
-contextsmith が BM25 + 依存グラフ で関連ファイルを自動選択
+context-smith auto-selects relevant files via BM25 + a dependency graph
               ↓
-トークン予算に収まるバンドルを出力 → 精度とコスト両方を改善
+Emits a bundle that fits the token budget → improves both accuracy and cost
 ```
 
-## インストール
+## Installation
 
 ```bash
-# crates.io から（推奨）
+# from crates.io (recommended)
 cargo install context-smith
 
-# ソースから
+# from source
 cargo install --path .
 ```
 
-依存ライブラリ（`bundled` フィーチャーで自動ビルド）: libgit2, SQLite, tree-sitter
+Bundled dependencies (built automatically via the `bundled` feature): libgit2, SQLite, tree-sitter.
 
-## 使い方
+## Usage
 
-### 1. インデックス構築
+### 1. Build the index
 
 ```bash
 contextsmith index --repo ./my-project
 ```
 
-`./my-project/.contextsmith/index.db` に SQLite インデックスを生成する。
-ファイル一覧・シンボル・依存関係・BM25 全文インデックスがすべて 1 ファイルに収まる。
+Generates a SQLite index at `./my-project/.contextsmith/index.db`. The file list,
+symbols, dependencies, and the BM25 full-text index all live in a single file.
 
-小規模リポジトリ（目安: ソース 10MB 以下）なら `index.db` を git 管理してチーム共有できる。
+For small repositories (rule of thumb: source under 10 MB) you can commit `index.db`
+to share it with your team.
 
-| オプション | デフォルト | 説明 |
+| Option | Default | Description |
 |---|---|---|
-| `--repo <PATH>` | 必須 | 対象リポジトリのパス |
-| `--out <PATH>` | `.contextsmith/index.db` | 出力先の上書き |
+| `--repo <PATH>` | required | Path to the target repository |
+| `--out <PATH>` | `.contextsmith/index.db` | Override the output location |
 
-### 2. コンテキストバンドル生成
+### 2. Generate a context bundle
 
 ```bash
 contextsmith build \
   --repo ./my-project \
-  --task "認証エラーを調査したい" \
+  --task "Investigate the authentication error" \
   --budget 30000
 ```
 
-`context.bundle/` ディレクトリにバンドルを出力する。
+Writes the bundle to the `context.bundle/` directory.
 
-| オプション | デフォルト | 説明 |
+| Option | Default | Description |
 |---|---|---|
-| `--repo <PATH>` | 必須 | 対象リポジトリのパス |
-| `--task <TEXT>` | 必須 | タスクの説明 |
-| `--budget <N>` | `30000` | トークン上限 |
-| `--out <PATH>` | `context.bundle` | 出力ディレクトリ |
-| `--explain` | off | task.md に BM25 スコアを表示 |
-| `--diff-commits <N>` | `3` | 差分に含める直近コミット数 |
+| `--repo <PATH>` | required | Path to the target repository |
+| `--task <TEXT>` | required | Task description |
+| `--budget <N>` | `30000` | Token limit |
+| `--out <PATH>` | `context.bundle` | Output directory |
+| `--explain` | off | Show BM25 scores in `task.md` |
+| `--diff-commits <N>` | `3` | Number of recent commits to include in the diff |
 
-### バンドルの構造
+### Bundle layout
 
 ```
 context.bundle/
-├── task.md           # タスク説明 + 選択ファイル一覧 + 直近 Git 差分
-├── relevant-code/    # 選択されたファイルの内容（Markdown コードブロック）
-└── citations.json    # ファイルごとのスコア・トークン数（機械可読）
+├── task.md           # Task description + selected file list + recent Git diff
+├── relevant-code/    # Contents of the selected files (Markdown code blocks)
+└── citations.json    # Per-file scores and token counts (machine-readable)
 ```
 
-## アーキテクチャ
+## Architecture
 
 ```
 contextsmith index          contextsmith build
@@ -82,40 +90,56 @@ contextsmith index          contextsmith build
       │
       ▼
  .contextsmith/index.db (SQLite)
- ├── files        — パス・言語・blob SHA
- ├── symbols      — 関数/構造体/クラス名・行番号・スニペット
- ├── deps         — ファイル間の import 依存グラフ
- ├── meta         — repo_root・indexed_at
- ├── fts_symbols  — FTS5 (pre-tokenized、BM25 weight ×2)
- └── fts_body     — FTS5 (ファイル本文、BM25 weight ×1)
+ ├── files        — path, language, blob SHA
+ ├── symbols      — function/struct/class names, line numbers, snippets
+ ├── deps         — inter-file import dependency graph
+ ├── meta         — repo_root, indexed_at
+ ├── fts_symbols  — FTS5 (pre-tokenized, BM25 weight ×2)
+ └── fts_body     — FTS5 (file bodies, BM25 weight ×1)
 ```
 
-### スコアリングパイプライン
+### Scoring pipeline
 
-1. **BM25 検索** — タスク文字列で `fts_symbols`（重み×2）と `fts_body`（重み×1）を UNION ALL で検索、上位 20 件を seed として取得
-2. **依存グラフ BFS** — seed ファイルから bidirectional BFS（depth=2）でスコアを伝播（hop ごとに ×0.5 減衰）
-3. **greedy 配分** — スコア降順に token 数を積み上げ、budget を超えたら打ち切り
-4. **バンドル出力** — 選択ファイルを Markdown に展開し、直近 Git 差分とともに出力
+1. **BM25 search** — search `fts_symbols` (weight ×2) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds.
+2. **Dependency BFS** — propagate scores from seed files via bidirectional BFS (depth=2), decaying ×0.5 per hop.
+3. **Greedy allocation** — accumulate token counts in descending score order, stopping once the budget is exceeded.
+4. **Bundle output** — expand the selected files into Markdown alongside the recent Git diff.
 
-## 対応言語
+## Supported languages
 
-| 言語 | シンボル抽出 | import 依存解析 |
+| Language | Symbol extraction | Import dependency analysis |
 |---|---|---|
-| Rust | ✅ 関数/構造体/impl/use | ✅ `crate::` パス解決 |
-| Python | ✅ 関数/クラス/import | ✅ モジュールパス解決 |
-| Go | ✅ 関数/型/import | ✅ パッケージパス解決 |
+| Rust | ✅ functions/structs/impl/use | ✅ `crate::` path resolution |
+| Python | ✅ functions/classes/import | ✅ module path resolution |
+| Go | ✅ functions/types/import | ✅ package path resolution |
 
-## ステータス
+## Status
 
-| Phase | 内容 | 状態 |
+| Phase | Content | Status |
 |---|---|---|
-| 1 | Git 走査・ファイル一覧取得 | ✅ |
-| 2 | Tree-sitter シンボル抽出 (Rust/Python/Go) | ✅ |
-| 3 | 依存グラフ構築 (petgraph BFS) | ✅ |
-| 4 | BM25 全文検索 (SQLite FTS5) | ✅ |
-| 5 | 予算配分 + バンドル出力 | ✅ |
-| 6 | ローカル埋め込みモデル + RRF 統合 | 🔲 計画中 |
+| 1 | Git scan / file listing | ✅ |
+| 2 | Tree-sitter symbol extraction (Rust/Python/Go) | ✅ |
+| 3 | Dependency graph construction (petgraph BFS) | ✅ |
+| 4 | BM25 full-text search (SQLite FTS5) | ✅ |
+| 5 | Budget allocation + bundle output | ✅ |
+| 6 | Local embedding model + RRF fusion | 🔲 planned |
 
-## ライセンス
+## Development
 
-MIT
+```bash
+cargo test           # run the test suite
+cargo clippy --all-targets
+cargo fmt --all --check
+```
+
+### Release flow
+
+1. Bump `version` in `Cargo.toml` and update [CHANGELOG.md](./CHANGELOG.md).
+2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. Publish: `cargo publish` (requires a crates.io token via `cargo login`; the account email must be verified).
+
+See [CHANGELOG.md](./CHANGELOG.md) for release history.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
