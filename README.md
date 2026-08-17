@@ -13,6 +13,10 @@ contextsmith が BM25 + 依存グラフ で関連ファイルを自動選択
 ## インストール
 
 ```bash
+# crates.io から（推奨）
+cargo install context-smith
+
+# ソースから
 cargo install --path .
 ```
 
