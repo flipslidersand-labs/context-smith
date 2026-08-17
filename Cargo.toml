@@ -3,6 +3,13 @@ name = "context-smith"
 version = "0.1.0"
 edition = "2021"
 description = "AI context compiler — extract task-relevant code from Git repos"
+license = "MIT"
+repository = "https://github.com/flipslidersand/context-smith"
+homepage = "https://github.com/flipslidersand/context-smith"
+readme = "README.md"
+keywords = ["context", "llm", "bm25", "code-search", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["errors/", "docs/", ".claude/"]
 
 [lib]
 name = "context_smith"
