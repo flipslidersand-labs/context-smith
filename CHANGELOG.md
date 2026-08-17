@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - English `README.md` as the primary readme; Japanese moved to `README.ja.md` (#32).
 - `CHANGELOG.md` and status badges (crates.io / docs.rs / CI / license) (#33).
+- Semantic search (Phase 6, #26): optional dense embeddings fused with BM25 via
+  Reciprocal Rank Fusion. An `Embedder` trait with a feature-gated
+  `RemoteEmbedder` (`remote-embed`, off by default), an `embeddings` BLOB table,
+  cosine vector search, and a `--no-embed` build flag. Backward compatible:
+  without the feature or stored vectors, seeding stays BM25-only.
 
 ## [0.1.0] - 2026-08-17
 

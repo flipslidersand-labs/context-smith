@@ -51,7 +51,11 @@ impl IndexDb {
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols
                 USING fts5(file_id UNINDEXED, name);
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_body
-                USING fts5(file_id UNINDEXED, content);",
+                USING fts5(file_id UNINDEXED, content);
+            CREATE TABLE IF NOT EXISTS embeddings (
+                file_id INTEGER PRIMARY KEY REFERENCES files(id),
+                vector  BLOB NOT NULL
+            );",
         )?;
         Ok(())
     }

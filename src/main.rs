@@ -47,7 +47,40 @@ enum Command {
         /// Number of recent commits to include as diff context
         #[arg(long, default_value_t = 3)]
         diff_commits: usize,
+        /// Disable semantic (embedding) seeds even when the index has them; BM25 only
+        #[arg(long)]
+        no_embed: bool,
     },
+}
+
+/// Compute seed files for a task. With the `remote-embed` feature and a
+/// configured embedder, RRF-fuse BM25 with semantic (vector) seeds; otherwise
+/// return the BM25 seeds unchanged (backward compatible).
+fn build_seeds(
+    conn: &rusqlite::Connection,
+    task: &str,
+    bm25: Vec<(i64, f32)>,
+    no_embed: bool,
+) -> anyhow::Result<Vec<(i64, f32)>> {
+    #[cfg(feature = "remote-embed")]
+    {
+        if !no_embed {
+            if let Some(embedder) = context_smith::embed::RemoteEmbedder::from_env() {
+                match context_smith::embed::fuse_seeds(conn, &embedder, task, &bm25, 20) {
+                    Ok(fused) => {
+                        eprintln!("semantic: RRF-fused BM25 with embedding seeds");
+                        return Ok(fused);
+                    }
+                    Err(e) => {
+                        eprintln!("semantic: embedding failed ({e}); falling back to BM25")
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "remote-embed"))]
+    let _ = (conn, task, no_embed);
+    Ok(bm25)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -73,6 +106,22 @@ fn main() -> anyhow::Result<()> {
                 stats.deps_total,
                 db_path.display(),
             );
+
+            // Optional: generate semantic embeddings via the remote embedding service.
+            #[cfg(feature = "remote-embed")]
+            match context_smith::embed::RemoteEmbedder::from_env() {
+                Some(embedder) => {
+                    let n = context_smith::embed::populate_embeddings(
+                        db.connection(),
+                        repo.root(),
+                        &embedder,
+                    )?;
+                    println!("embeddings: {n} files (remote-embed)");
+                }
+                None => eprintln!(
+                    "note: remote-embed built but CONTEXTSMITH_EMBED_URL unset; skipping embeddings"
+                ),
+            }
         }
 
         Command::Build {
@@ -83,6 +132,7 @@ fn main() -> anyhow::Result<()> {
             index,
             explain,
             diff_commits,
+            no_embed,
         } => {
             let repo = GitRepo::new(&repo)?;
             let db_path = match index {
@@ -97,12 +147,13 @@ fn main() -> anyhow::Result<()> {
             }
             let db = IndexDb::open(&db_path)?;
 
-            // Step 1: BM25 search → top 20 seed files
-            let seeds = search_bm25(db.connection(), &task, 20)?;
-            if seeds.is_empty() {
+            // Step 1: BM25 search → top-20 seeds, optionally RRF-fused with semantic vectors
+            let bm25 = search_bm25(db.connection(), &task, 20)?;
+            if bm25.is_empty() {
                 eprintln!("No matching files found for task: {}", task);
                 std::process::exit(1);
             }
+            let seeds = build_seeds(db.connection(), &task, bm25, no_embed)?;
 
             // Step 2: BFS expand from seeds (depth=2)
             let mut scored = bfs_expand(db.connection(), &seeds, 2)?;
