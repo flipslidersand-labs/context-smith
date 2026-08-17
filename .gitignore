@@ -21,3 +21,6 @@ context.bundle/
 
 # Logs
 *.log
+
+# Claude Code local state / worktrees
+.claude/
