@@ -36,7 +36,7 @@ fn split_identifier(s: &str) -> Vec<&str> {
         if i > start && b.is_ascii_uppercase() {
             // lookahead: if next is lowercase, this starts a new word
             let prev_lower = bytes[i - 1].is_ascii_lowercase() || bytes[i - 1].is_ascii_digit();
-            let next_lower = bytes.get(i + 1).map_or(false, |c| c.is_ascii_lowercase());
+            let next_lower = bytes.get(i + 1).is_some_and(|c| c.is_ascii_lowercase());
             if prev_lower || (next_lower && i > start) {
                 result.push(&s[start..i]);
                 start = i;
