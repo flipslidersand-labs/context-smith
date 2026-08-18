@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- TypeScript and JavaScript language support (#27): symbol extraction
+  (functions/classes/interfaces/types/enums/arrow functions/methods) and
+  dependency resolution for ES `import` and CommonJS `require()` with extension
+  and `index.*` inference. Covers `.ts/.tsx/.mts/.cts` and `.js/.jsx/.mjs/.cjs`.
 - English `README.md` as the primary readme; Japanese moved to `README.ja.md` (#32).
 - `CHANGELOG.md` and status badges (crates.io / docs.rs / CI / license) (#33).
 - Semantic search (Phase 6, #26): optional dense embeddings fused with BM25 via
@@ -18,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can now surface files with zero lexical overlap (fusion runs even when BM25
   returns nothing). Verified live against the embedding service (e5, 768-dim):
   Recall@1 improved from 0/3 to 2/3 on a zero-overlap task set.
+
+### Changed
+- Token estimation is now CJK-aware and conservative (#30): ASCII keeps the
+  `chars / 4` rate while multi-byte characters count as one token each, so
+  Japanese-heavy files no longer under-count and overflow the budget. Bundle
+  truncation uses the same weighting to cut on a token (and UTF-8) boundary.
+  Kept dependency-free (no tiktoken) to preserve the offline design.
 
 ### Fixed
 - `RemoteEmbedder` now matches the real embedding-svc contract: `X-API-Key`

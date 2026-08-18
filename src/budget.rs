@@ -10,10 +10,61 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    /// Rough token count: chars / 4.
+    /// Estimated token count of the file content (see [`estimate_tokens`]).
     pub fn tokens(&self) -> usize {
-        self.content.chars().count() / 4
+        estimate_tokens(&self.content)
     }
+}
+
+/// Estimate the token count of a string with a conservative, model-agnostic heuristic.
+///
+/// English and source code (ASCII) average roughly 4 characters per token, so ASCII
+/// characters are counted at 1/4 each — matching the previous `chars / 4` behaviour.
+/// Multi-byte characters (CJK, emoji, …) tokenize far more densely — frequently around
+/// one token per character — so each is counted as a full token. Biasing the non-ASCII
+/// case upward keeps the estimate on the safe side of the budget, so bundles containing
+/// Japanese comments or identifiers never silently overflow the real token limit.
+///
+/// This intentionally avoids a model-specific BPE tokenizer (e.g. tiktoken) to preserve
+/// context-smith's offline, zero-heavy-dependency design; the goal here is a safe upper
+/// bound for budget allocation, not exact per-model counts.
+pub fn estimate_tokens(content: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut wide = 0usize;
+    for ch in content.chars() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            wide += 1;
+        }
+    }
+    ascii / 4 + wide
+}
+
+/// Take the longest prefix of `content` whose estimated token count does not exceed
+/// `max_tokens`. Cuts on a UTF-8 char boundary and uses the same weighting as
+/// [`estimate_tokens`], so ASCII and multi-byte content are truncated consistently.
+fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 {
+        return String::new();
+    }
+    let mut ascii = 0usize;
+    let mut wide = 0usize;
+    let mut end = 0usize;
+    for (i, ch) in content.char_indices() {
+        let (na, nw) = if ch.is_ascii() {
+            (ascii + 1, wide)
+        } else {
+            (ascii, wide + 1)
+        };
+        if na / 4 + nw > max_tokens {
+            break;
+        }
+        ascii = na;
+        wide = nw;
+        end = i + ch.len_utf8();
+    }
+    content[..end].to_string()
 }
 
 /// Greedy budget allocation: sort by score descending, include until budget exhausted.
@@ -39,9 +90,8 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
             if used >= budget {
                 break;
             }
-            let remaining_chars = (budget - used) * 4;
-            let truncated: String = c.content.chars().take(remaining_chars).collect();
-            let tok = truncated.chars().count() / 4;
+            let truncated = truncate_to_tokens(&c.content, budget - used);
+            let tok = estimate_tokens(&truncated);
             if tok == 0 {
                 break;
             }
@@ -93,5 +143,44 @@ mod tests {
         let cs = vec![make(1.0, 400)];
         let out = allocate(cs, 0);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn ascii_estimate_matches_chars_over_four() {
+        // Regression guard: ASCII content must keep the historic chars/4 behaviour.
+        assert_eq!(estimate_tokens(&"a".repeat(400)), 100);
+        assert_eq!(estimate_tokens("abc"), 0); // <4 chars rounds down (allocate() guards with max(1))
+    }
+
+    #[test]
+    fn cjk_estimate_exceeds_chars_over_four() {
+        // 100 Japanese chars: old chars/4 said 25 tokens; the real count is ~100+.
+        let jp = "あ".repeat(100);
+        let est = estimate_tokens(&jp);
+        assert_eq!(est, 100, "each multi-byte char counts as one token");
+        assert!(
+            est > jp.chars().count() / 4,
+            "must exceed the old chars/4 estimate"
+        );
+    }
+
+    #[test]
+    fn cjk_allocation_never_overflows_budget() {
+        // A large Japanese file against a small budget must be truncated so the
+        // selected token total stays within budget (the pre-fix bug over-selected).
+        let jp = Candidate {
+            file_id: 1,
+            path: PathBuf::from("notes.md"),
+            score: 1.0,
+            content: "日本語のコメント。".repeat(500),
+        };
+        let budget = 200;
+        let out = allocate(vec![jp], budget);
+        assert_eq!(out.len(), 1);
+        let total: usize = out.iter().map(|c| c.tokens()).sum();
+        assert!(
+            total <= budget,
+            "selected tokens {total} must not exceed budget {budget}"
+        );
     }
 }
