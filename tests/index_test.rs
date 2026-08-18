@@ -143,6 +143,111 @@ def standalone():
 }
 
 #[test]
+fn typescript_symbols_extracted() {
+    let src = r#"import { readFile } from "fs";
+
+export interface User {
+    id: number;
+    name: string;
+}
+
+type Id = number;
+
+export class Service {
+    fetch(id: Id): User {
+        return { id, name: "x" };
+    }
+}
+
+export function standalone(): void {}
+
+const arrow = (x: number): number => x + 1;
+"#;
+    let syms = SymbolExtractor::extract(std::path::Path::new("svc.ts"), src, Language::TypeScript)
+        .unwrap();
+
+    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert!(names.contains(&"User"), "expected interface User");
+    assert!(names.contains(&"Id"), "expected type alias Id");
+    assert!(names.contains(&"Service"), "expected class Service");
+    assert!(names.contains(&"fetch"), "expected method fetch");
+    assert!(names.contains(&"standalone"), "expected fn standalone");
+    assert!(names.contains(&"arrow"), "expected arrow-fn const arrow");
+
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    assert!(kinds.contains(&&SymbolKind::Import), "expected es import");
+    assert!(kinds.contains(&&SymbolKind::Class));
+    assert!(kinds.contains(&&SymbolKind::Struct), "interface -> struct");
+}
+
+#[test]
+fn javascript_symbols_extracted() {
+    let src = r#"const path = require("path");
+
+export class Widget {
+    render() {}
+}
+
+function main() {}
+
+const handler = () => {};
+"#;
+    let syms = SymbolExtractor::extract(std::path::Path::new("app.js"), src, Language::JavaScript)
+        .unwrap();
+
+    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert!(names.contains(&"Widget"), "expected class Widget");
+    assert!(names.contains(&"render"), "expected method render");
+    assert!(names.contains(&"main"), "expected fn main");
+    assert!(names.contains(&"handler"), "expected arrow-fn handler");
+
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    assert!(
+        kinds.contains(&&SymbolKind::Import),
+        "expected require import"
+    );
+}
+
+/// #27: ES import specifiers resolve to the imported file (with extension inference
+/// and directory index files).
+#[test]
+fn ts_es_import_resolves_edge() {
+    let (_tmp, db) = build_index_for(&[
+        (
+            "src/index.ts",
+            "import { greet } from './util';\nimport { CONST } from './config/index';\ngreet();\n",
+        ),
+        ("src/util.ts", "export function greet() {}\n"),
+        ("src/config/index.ts", "export const CONST = 1;\n"),
+    ]);
+
+    let edges = dep_edges(&db);
+    assert!(
+        edges.contains(&("src/index.ts".into(), "src/util.ts".into())),
+        "expected index.ts -> util.ts, got {edges:?}"
+    );
+    assert!(
+        edges.contains(&("src/index.ts".into(), "src/config/index.ts".into())),
+        "expected index.ts -> config/index.ts, got {edges:?}"
+    );
+}
+
+/// #27: CommonJS require() with a relative parent path resolves correctly.
+#[test]
+fn js_require_parent_resolves_edge() {
+    let (_tmp, db) = build_index_for(&[
+        ("src/app.js", "const lib = require('../lib/helper');\n"),
+        ("lib/helper.js", "module.exports = {};\n"),
+    ]);
+
+    let edges = dep_edges(&db);
+    assert!(
+        edges.contains(&("src/app.js".into(), "lib/helper.js".into())),
+        "expected app.js -> lib/helper.js, got {edges:?}"
+    );
+}
+
+#[test]
 fn index_command_creates_db() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");

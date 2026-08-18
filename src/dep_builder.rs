@@ -59,8 +59,72 @@ fn resolve_import(
         "rs" => resolve_rust(import_str, path_to_id),
         "py" => resolve_python(import_str, from_path, path_to_id),
         "go" => resolve_go(import_str, path_to_id),
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
+            resolve_ts_js(import_str, from_path, path_to_id)
+        }
         _ => vec![],
     }
+}
+
+/// Resolve an ES `import ... from './x'` or CommonJS `require('./x')` to a file id.
+/// Only relative specifiers (`./` or `../`) are resolved; bare package imports are ignored.
+fn resolve_ts_js(
+    import_str: &str,
+    from_path: &Path,
+    path_to_id: &HashMap<PathBuf, i64>,
+) -> Vec<i64> {
+    let spec = match extract_module_specifier(import_str) {
+        Some(s) if s.starts_with('.') => s,
+        _ => return vec![],
+    };
+
+    let base_dir = from_path.parent().unwrap_or(Path::new(""));
+    let joined = normalize_path(&base_dir.join(&spec));
+
+    // Try the specifier as-is (it may already carry an extension), then common
+    // TS/JS source extensions and directory index files.
+    const EXTS: [&str; 8] = ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"];
+    let mut candidates: Vec<PathBuf> = vec![joined.clone()];
+    for ext in EXTS {
+        candidates.push(PathBuf::from(format!("{}.{}", joined.display(), ext)));
+    }
+    for ext in EXTS {
+        candidates.push(joined.join(format!("index.{}", ext)));
+    }
+
+    for candidate in candidates {
+        if let Some(&id) = path_to_id.get(&candidate) {
+            return vec![id];
+        }
+    }
+    vec![]
+}
+
+/// Pull the quoted module path out of an import/require statement.
+/// `import { a } from "./b"` → `./b`,  `require('./c')` → `./c`
+fn extract_module_specifier(s: &str) -> Option<String> {
+    let start = s.find(['"', '\'', '`'])?;
+    let quote = s.as_bytes()[start] as char;
+    let rest = &s[start + 1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+/// Collapse `.` and `..` segments in a path lexically (no filesystem access),
+/// so `a/./b/../c` becomes `a/c`.
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Expand grouped Rust use paths: "crate::{a, b}" → ["crate::a", "crate::b"]

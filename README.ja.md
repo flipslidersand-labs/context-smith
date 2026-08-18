@@ -106,6 +106,11 @@ contextsmith index          contextsmith build
 | Rust | ✅ 関数/構造体/impl/use | ✅ `crate::` パス解決 |
 | Python | ✅ 関数/クラス/import | ✅ モジュールパス解決 |
 | Go | ✅ 関数/型/import | ✅ パッケージパス解決 |
+| TypeScript | ✅ 関数/クラス/interface/type/enum/arrow/import | ✅ ES import 相対パス解決(拡張子・index.ts 補完) |
+| JavaScript | ✅ 関数/クラス/arrow/import/require | ✅ ES import + CommonJS `require()` 相対パス解決 |
+
+TypeScript は `.ts` / `.tsx` / `.mts` / `.cts`、JavaScript は `.js` / `.jsx` / `.mjs` / `.cjs` を対象とする。
+bare import(`react` など node_modules パッケージ)は依存グラフには含めない。
 
 ## ステータス
 

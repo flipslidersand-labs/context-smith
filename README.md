@@ -112,13 +112,18 @@ contextsmith index          contextsmith build
 | Rust | ✅ functions/structs/impl/use | ✅ `crate::` path resolution |
 | Python | ✅ functions/classes/import | ✅ module path resolution |
 | Go | ✅ functions/types/import | ✅ package path resolution |
+| TypeScript | ✅ functions/classes/interface/type/enum/arrow/import | ✅ ES import relative-path resolution (extension & `index.ts` inference) |
+| JavaScript | ✅ functions/classes/arrow/import/require | ✅ ES import + CommonJS `require()` relative-path resolution |
+
+TypeScript targets `.ts` / `.tsx` / `.mts` / `.cts`; JavaScript targets `.js` / `.jsx` / `.mjs` / `.cjs`.
+Bare imports (node_modules packages such as `react`) are excluded from the dependency graph.
 
 ## Status
 
 | Phase | Content | Status |
 |---|---|---|
 | 1 | Git scan / file listing | ✅ |
-| 2 | Tree-sitter symbol extraction (Rust/Python/Go) | ✅ |
+| 2 | Tree-sitter symbol extraction (Rust/Python/Go/TS/JS) | ✅ |
 | 3 | Dependency graph construction (petgraph BFS) | ✅ |
 | 4 | BM25 full-text search (SQLite FTS5) | ✅ |
 | 5 | Budget allocation + bundle output | ✅ |

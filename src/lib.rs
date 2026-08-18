@@ -14,6 +14,8 @@ pub enum Language {
     Rust,
     Python,
     Go,
+    TypeScript,
+    JavaScript,
     Unknown,
 }
 
@@ -23,6 +25,8 @@ impl Language {
             Some("rs") => Language::Rust,
             Some("py") => Language::Python,
             Some("go") => Language::Go,
+            Some("ts" | "tsx" | "mts" | "cts") => Language::TypeScript,
+            Some("js" | "jsx" | "mjs" | "cjs") => Language::JavaScript,
             _ => Language::Unknown,
         }
     }
@@ -32,6 +36,8 @@ impl Language {
             Language::Rust => "rust",
             Language::Python => "python",
             Language::Go => "go",
+            Language::TypeScript => "typescript",
+            Language::JavaScript => "javascript",
             Language::Unknown => "unknown",
         }
     }
@@ -150,6 +156,8 @@ impl SymbolExtractor {
             Language::Rust => Self::extract_rust(path, source),
             Language::Python => Self::extract_python(path, source),
             Language::Go => Self::extract_go(path, source),
+            Language::TypeScript => Self::extract_typescript(path, source),
+            Language::JavaScript => Self::extract_javascript(path, source),
             Language::Unknown => Ok(vec![]),
         }
     }
@@ -182,6 +190,31 @@ impl SymbolExtractor {
         let tree = parser.parse(source, None).context("Go parse failed")?;
         let root = tree.root_node();
         Ok(collect_go_symbols(root, source.as_bytes()))
+    }
+
+    fn extract_typescript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
+        let mut parser = tree_sitter::Parser::new();
+        // The TSX grammar is a superset of TS, so it parses both .ts and .tsx.
+        parser
+            .set_language(&tree_sitter_typescript::language_tsx())
+            .with_context(|| format!("Failed to load TypeScript grammar for {:?}", path))?;
+        let tree = parser
+            .parse(source, None)
+            .context("TypeScript parse failed")?;
+        let root = tree.root_node();
+        Ok(collect_ecma_symbols(root, source.as_bytes()))
+    }
+
+    fn extract_javascript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::language())
+            .with_context(|| format!("Failed to load JavaScript grammar for {:?}", path))?;
+        let tree = parser
+            .parse(source, None)
+            .context("JavaScript parse failed")?;
+        let root = tree.root_node();
+        Ok(collect_ecma_symbols(root, source.as_bytes()))
     }
 }
 
@@ -263,6 +296,74 @@ fn collect_python_node(
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             collect_python_node(child, src, out);
+        }
+    }
+}
+
+/// Symbol collector shared by TypeScript and JavaScript (TS is a superset of the
+/// JS node kinds; unknown kinds are simply ignored).
+fn collect_ecma_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, SymbolKind, u32)> {
+    let mut out = Vec::new();
+    collect_ecma_node(root, src, &mut out);
+    out
+}
+
+fn collect_ecma_node(
+    node: tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, SymbolKind, u32)>,
+) {
+    let line = node.start_position().row as u32 + 1;
+    match node.kind() {
+        "function_declaration"
+        | "generator_function_declaration"
+        | "function_signature"
+        | "method_definition" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+            }
+        }
+        "class_declaration" | "abstract_class_declaration" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                out.push((node_text(name, src).to_owned(), SymbolKind::Class, line));
+            }
+        }
+        // TypeScript-only type declarations map to Struct.
+        "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                out.push((node_text(name, src).to_owned(), SymbolKind::Struct, line));
+            }
+        }
+        // `const foo = () => {}` / `const foo = function () {}`
+        "variable_declarator" => {
+            if let (Some(name), Some(value)) = (
+                node.child_by_field_name("name"),
+                node.child_by_field_name("value"),
+            ) {
+                if matches!(
+                    value.kind(),
+                    "arrow_function" | "function" | "function_expression"
+                ) {
+                    out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                }
+            }
+        }
+        "import_statement" => {
+            out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+        }
+        // CommonJS `require('./x')` — recorded as an import for dependency resolution.
+        "call_expression" => {
+            if let Some(func) = node.child_by_field_name("function") {
+                if node_text(func, src) == "require" {
+                    out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+                }
+            }
+        }
+        _ => {}
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_ecma_node(child, src, out);
         }
     }
 }
