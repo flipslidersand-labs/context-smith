@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `query` subcommand (#28): runs the same selection pipeline as `build` but
+  prints to stdout and writes nothing to disk. `--format json` emits
+  `{ task, budget, used_tokens, files: [{ path, score, tokens }] }`; `--format md`
+  emits the task.md-style summary (`--explain` adds BM25 scores). Designed for
+  CI and shell pipelines.
 - TypeScript and JavaScript language support (#27): symbol extraction
   (functions/classes/interfaces/types/enums/arrow functions/methods) and
   dependency resolution for ES `import` and CommonJS `require()` with extension

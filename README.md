@@ -77,6 +77,30 @@ context.bundle/
 └── citations.json    # Per-file scores and token counts (machine-readable)
 ```
 
+### 3. Query (stdout, for scripts and pipelines)
+
+`query` runs the same selection pipeline as `build` but prints to stdout and
+writes nothing to disk — handy for CI or shell scripting.
+
+```bash
+# Machine-readable file selection
+contextsmith query --repo . --task "auth error" --format json | jq '.files[].path'
+
+# task.md-style summary
+contextsmith query --repo . --task "auth error" --format md --explain
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--repo <PATH>` | required | Path to the target repository |
+| `--task <TEXT>` | required | Task description |
+| `--budget <N>` | `30000` | Token limit |
+| `--format <json\|md>` | `json` | Output format |
+| `--explain` | off | Show BM25 scores (md format only) |
+| `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override |
+
+The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens }] }`.
+
 ## Architecture
 
 ```

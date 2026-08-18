@@ -247,6 +247,62 @@ fn js_require_parent_resolves_edge() {
     );
 }
 
+/// #28: `query` prints machine-readable JSON to stdout and writes nothing to disk.
+#[test]
+fn query_json_stdout_no_files_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    make_git_repo(
+        &repo_dir,
+        &[(
+            "src/budget.rs",
+            "pub fn allocate_budget(tokens: usize) -> usize { tokens }\n",
+        )],
+    );
+
+    let db_path = tmp.path().join("index.db");
+    let repo = GitRepo::new(&repo_dir).unwrap();
+    let db = IndexDb::open(&db_path).unwrap();
+    build_index(&repo, &db).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_contextsmith"))
+        .args([
+            "query",
+            "--repo",
+            repo_dir.to_str().unwrap(),
+            "--task",
+            "budget tokens",
+            "--budget",
+            "5000",
+            "--index",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run contextsmith query");
+
+    assert!(
+        out.status.success(),
+        "query exited non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(doc["budget"], 5000);
+    let files = doc["files"].as_array().expect("files array");
+    assert!(!files.is_empty(), "expected at least one selected file");
+    assert_eq!(files[0]["path"], "src/budget.rs");
+    assert!(files[0]["tokens"].as_u64().unwrap() > 0);
+
+    // query must not create a bundle directory anywhere.
+    assert!(
+        !repo_dir.join("context.bundle").exists(),
+        "query must not write a bundle to disk"
+    );
+}
+
 #[test]
 fn index_command_creates_db() {
     let tmp = tempfile::tempdir().unwrap();

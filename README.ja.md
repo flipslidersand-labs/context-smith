@@ -71,6 +71,30 @@ context.bundle/
 └── citations.json    # ファイルごとのスコア・トークン数（機械可読）
 ```
 
+### 3. クエリ（stdout・スクリプト/パイプ向け）
+
+`query` は `build` と同じ選択パイプラインを実行するが、ディスクに書き込まず
+stdout に出力する。CI やシェルスクリプトからの利用に適する。
+
+```bash
+# 機械可読なファイル選択結果
+contextsmith query --repo . --task "認証エラー" --format json | jq '.files[].path'
+
+# task.md 相当のサマリー
+contextsmith query --repo . --task "認証エラー" --format md --explain
+```
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--repo <PATH>` | 必須 | 対象リポジトリのパス |
+| `--task <TEXT>` | 必須 | タスクの説明 |
+| `--budget <N>` | `30000` | トークン上限 |
+| `--format <json\|md>` | `json` | 出力フォーマット |
+| `--explain` | off | BM25 スコア表示（md のみ） |
+| `--index <PATH>` | `{repo}/.contextsmith/index.db` | インデックスパス上書き |
+
+JSON 出力は `{ task, budget, used_tokens, files: [{ path, score, tokens }] }` 形式。
+
 ## アーキテクチャ
 
 ```
