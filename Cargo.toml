@@ -1,6 +1,6 @@
 [package]
 name = "context-smith"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "AI context compiler — extract task-relevant code from Git repos"
 license = "MIT"
