@@ -27,7 +27,7 @@ tree-sitter-python = "0.23"
 tree-sitter-go     = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.23"
-rusqlite     = { version = "0.31", features = ["bundled"] }
+rusqlite     = { version = "0.31" }
 petgraph     = "0.6"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
@@ -38,6 +38,11 @@ ureq         = { version = "2", features = ["json"], optional = true }
 tree-sitter-ruby = "0.23"
 
 [features]
+# bundled-sqlite: compile SQLite from source (zero system deps, works everywhere).
+# Disable with --no-default-features if you have libsqlite3-dev installed and want
+# faster incremental builds (avoids recompiling ~300 kLOC of C on cold builds).
+default = ["bundled-sqlite"]
+bundled-sqlite = ["rusqlite/bundled"]
 # Enable remote embedding-service integration (semantic search + RRF fusion).
 # Off by default so the standard build stays lean and works offline (BM25 only).
 remote-embed = ["dep:ureq"]
