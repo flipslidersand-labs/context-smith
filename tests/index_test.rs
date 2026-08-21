@@ -486,3 +486,75 @@ fn regression_20_slug_collision_distinct_files() {
         "two same-path candidates must yield two distinct files, got {names:?}"
     );
 }
+
+/// Rust extractor now covers enum, trait, and type alias in addition to struct/fn/impl.
+#[test]
+fn rust_enum_trait_type_extracted() {
+    let src = r#"
+pub enum Color { Red, Green, Blue }
+
+pub trait Shape {
+    fn area(&self) -> f64;
+}
+
+pub type Result<T> = std::result::Result<T, String>;
+"#;
+    let syms =
+        SymbolExtractor::extract(std::path::Path::new("test.rs"), src, Language::Rust).unwrap();
+
+    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert!(names.contains(&"Color"), "expected enum Color");
+    assert!(names.contains(&"Shape"), "expected trait Shape");
+    assert!(names.contains(&"Result"), "expected type alias Result");
+
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    assert!(
+        kinds.contains(&&SymbolKind::Struct),
+        "enum/type should be Struct kind"
+    );
+    assert!(
+        kinds.contains(&&SymbolKind::Class),
+        "trait should be Class kind"
+    );
+}
+
+/// Ruby: method, class, module, and require are extracted correctly.
+#[test]
+fn ruby_symbols_extracted() {
+    let src = r#"
+require 'json'
+require_relative './helper'
+
+module Util
+  class Parser
+    def initialize(input)
+      @input = input
+    end
+
+    def parse
+      JSON.parse(@input)
+    end
+  end
+end
+"#;
+    let syms =
+        SymbolExtractor::extract(std::path::Path::new("parser.rb"), src, Language::Ruby).unwrap();
+
+    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert!(names.contains(&"Parser"), "expected class Parser");
+    assert!(names.contains(&"Util"), "expected module Util");
+    assert!(names.contains(&"initialize"), "expected method initialize");
+    assert!(names.contains(&"parse"), "expected method parse");
+
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    assert!(
+        kinds.contains(&&SymbolKind::Import),
+        "expected require as Import"
+    );
+    assert!(kinds.contains(&&SymbolKind::Class));
+    assert!(
+        kinds.contains(&&SymbolKind::Struct),
+        "module should be Struct kind"
+    );
+    assert!(kinds.contains(&&SymbolKind::Function));
+}
