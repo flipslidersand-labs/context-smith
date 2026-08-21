@@ -48,6 +48,8 @@ impl IndexDb {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_path
+                USING fts5(file_id UNINDEXED, path);
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols
                 USING fts5(file_id UNINDEXED, name);
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_body
@@ -173,7 +175,7 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
         .iter()
         .map(|(&id, rel)| (id, repo.root().join(rel)))
         .collect();
-    search_index::populate_fts_with_paths(db.connection(), &abs_file_paths)?;
+    search_index::populate_fts_with_paths(db.connection(), &file_paths, &abs_file_paths)?;
 
     let repo_root = repo.root().to_string_lossy().to_string();
     db.upsert_meta("repo_root", &repo_root)?;

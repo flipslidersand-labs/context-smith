@@ -558,3 +558,54 @@ end
     );
     assert!(kinds.contains(&&SymbolKind::Function));
 }
+
+/// Path-based BM25 boost: a file whose name matches the task query should rank
+/// higher than a file whose path does not match, even if both contain the keyword.
+#[test]
+fn bm25_path_weight_boosts_matching_filename() {
+    use context_smith::search_index::search_bm25;
+
+    let (_tmp, db) = build_index_for(&[
+        // auth.rs — path matches "auth"; also contains the word
+        (
+            "src/auth.rs",
+            "pub fn authenticate(token: &str) -> bool { true }\n",
+        ),
+        // util.rs — path does NOT match "auth"; but content contains "authenticate"
+        ("src/util.rs", "pub fn helper_authenticate_call() {}\n"),
+    ]);
+
+    let results = search_bm25(db.connection(), "auth", 10).unwrap();
+    assert!(
+        !results.is_empty(),
+        "expected at least one BM25 result for 'auth'"
+    );
+
+    // Find scores for each file
+    let conn = db.connection();
+    let auth_id: i64 = conn
+        .query_row("SELECT id FROM files WHERE path = 'src/auth.rs'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let util_id: i64 = conn
+        .query_row("SELECT id FROM files WHERE path = 'src/util.rs'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+
+    let score_of = |id: i64| {
+        results
+            .iter()
+            .find(|(fid, _)| *fid == id)
+            .map(|(_, s)| *s)
+            .unwrap_or(0.0)
+    };
+
+    let auth_score = score_of(auth_id);
+    let util_score = score_of(util_id);
+    assert!(
+        auth_score > util_score,
+        "auth.rs (path match) should outscore util.rs: {auth_score} vs {util_score}"
+    );
+}

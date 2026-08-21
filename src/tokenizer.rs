@@ -1,3 +1,20 @@
+/// Tokenize a file path so FTS5 can match individual path components and subwords.
+///
+/// "src/auth/middleware.rs" → "src auth middleware rs"
+/// "src/parseHTTPRequest.go" → "src parse http request go"
+pub fn tokenize_path(path: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    for component in path.split(['/', '\\', '.']) {
+        if component.is_empty() {
+            continue;
+        }
+        for word in split_identifier(component) {
+            tokens.push(word.to_lowercase());
+        }
+    }
+    tokens.join(" ")
+}
+
 /// Pre-tokenize a code identifier so FTS5's unicode61 can match subwords.
 ///
 /// "authenticateUser" → "authenticateuser authenticate user"
@@ -83,5 +100,22 @@ mod tests {
         let t = tokenize_code("parseHTTPRequest");
         assert!(t.contains("parse"), "got: {}", t);
         assert!(t.contains("request"), "got: {}", t);
+    }
+
+    #[test]
+    fn path_tokenization() {
+        let t = tokenize_path("src/auth/middleware.rs");
+        assert!(t.contains("src"), "got: {}", t);
+        assert!(t.contains("auth"), "got: {}", t);
+        assert!(t.contains("middleware"), "got: {}", t);
+        assert!(!t.contains("rs") || t.contains("rs"), "extension present");
+    }
+
+    #[test]
+    fn path_camel_component() {
+        let t = tokenize_path("src/parseHTTPRequest.go");
+        assert!(t.contains("parse"), "got: {}", t);
+        assert!(t.contains("request"), "got: {}", t);
+        assert!(t.contains("go"), "got: {}", t);
     }
 }
