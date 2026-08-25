@@ -28,7 +28,6 @@ tree-sitter-go     = "0.23"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.23"
 rusqlite     = { version = "0.31" }
-petgraph     = "0.6"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 clap         = { version = "4", features = ["derive"] }

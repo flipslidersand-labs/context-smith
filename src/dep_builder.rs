@@ -1,8 +1,6 @@
 use anyhow::Result;
-use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::Direction;
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Build a directory-to-file-ids index from `file_paths` for O(1) Go import resolution.
@@ -287,57 +285,40 @@ fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Ve
 }
 
 /// BFS-expand from seed files through the deps graph (bidirectional, score decay × 0.5/hop).
+///
+/// Instead of loading all edges into memory and building a petgraph `DiGraph`, each BFS
+/// frontier is expanded by targeted SQL queries (`SELECT … WHERE from_file IN (…)` and
+/// the reverse). For `max_depth=2` this means at most 4 SQL round-trips (2 outgoing + 2
+/// incoming), avoiding the O(E) memory cost of a full graph load.
 pub fn bfs_expand(
     conn: &Connection,
     seeds: &[(i64, f32)],
     max_depth: u8,
 ) -> Result<HashMap<i64, f32>> {
-    let edges = load_all_deps(conn)?;
-
-    let mut graph: DiGraph<i64, ()> = DiGraph::new();
-    let mut file_to_node: HashMap<i64, NodeIndex> = HashMap::new();
-
-    for &(from, to) in &edges {
-        for fid in [from, to] {
-            file_to_node
-                .entry(fid)
-                .or_insert_with(|| graph.add_node(fid));
-        }
-    }
-    for (from, to) in edges {
-        let a = file_to_node[&from];
-        let b = file_to_node[&to];
-        graph.add_edge(a, b, ());
-    }
-
     let mut scores: HashMap<i64, f32> = HashMap::new();
-    let mut queue: VecDeque<(NodeIndex, f32, u8)> = VecDeque::new();
+    // queue entries: (file_id, score, depth)
+    let mut queue: VecDeque<(i64, f32, u8)> = VecDeque::new();
 
     for &(file_id, score) in seeds {
         let prev = scores.entry(file_id).or_insert(0.0);
         if score > *prev {
             *prev = score;
         }
-        if let Some(&node) = file_to_node.get(&file_id) {
-            queue.push_back((node, score, 0));
-        }
+        queue.push_back((file_id, score, 0));
     }
 
-    while let Some((node, score, depth)) = queue.pop_front() {
+    while let Some((file_id, score, depth)) = queue.pop_front() {
         if depth >= max_depth {
             continue;
         }
         let decayed = score * 0.5;
-        let neighbors: Vec<NodeIndex> = graph
-            .neighbors_directed(node, Direction::Outgoing)
-            .chain(graph.neighbors_directed(node, Direction::Incoming))
-            .collect();
-        for neighbor in neighbors {
-            let fid = graph[neighbor];
-            let prev = scores.entry(fid).or_insert(0.0);
+        // Fetch direct neighbors via SQL: outgoing (file_id → X) and incoming (X → file_id).
+        let neighbors = query_neighbors(conn, file_id)?;
+        for neighbor_id in neighbors {
+            let prev = scores.entry(neighbor_id).or_insert(0.0);
             if decayed > *prev {
                 *prev = decayed;
-                queue.push_back((neighbor, decayed, depth + 1));
+                queue.push_back((neighbor_id, decayed, depth + 1));
             }
         }
     }
@@ -345,10 +326,24 @@ pub fn bfs_expand(
     Ok(scores)
 }
 
-fn load_all_deps(conn: &Connection) -> Result<Vec<(i64, i64)>> {
-    let mut stmt = conn.prepare("SELECT from_file, to_file FROM deps")?;
-    let edges: Vec<(i64, i64)> = stmt
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+/// Return all file IDs reachable from `file_id` in one hop (outgoing or incoming edges),
+/// deduplicating so the BFS queue does not inflate.
+fn query_neighbors(conn: &Connection, file_id: i64) -> Result<Vec<i64>> {
+    let mut neighbors: HashSet<i64> = HashSet::new();
+
+    // Outgoing: file_id → X
+    let mut stmt = conn.prepare_cached("SELECT to_file FROM deps WHERE from_file = ?1")?;
+    let out: Vec<i64> = stmt
+        .query_map(params![file_id], |row| row.get::<_, i64>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(edges)
+    neighbors.extend(out);
+
+    // Incoming: X → file_id
+    let mut stmt = conn.prepare_cached("SELECT from_file FROM deps WHERE to_file = ?1")?;
+    let inc: Vec<i64> = stmt
+        .query_map(params![file_id], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    neighbors.extend(inc);
+
+    Ok(neighbors.into_iter().collect())
 }
