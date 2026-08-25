@@ -83,6 +83,8 @@ pub struct GitRepo {
 impl GitRepo {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref().canonicalize()?;
+        git2::Repository::open(&root)
+            .with_context(|| format!("'{}' is not a git repository", root.display()))?;
         Ok(GitRepo { root })
     }
 

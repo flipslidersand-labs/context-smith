@@ -1,6 +1,15 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Clap value_parser: reject empty strings early with a clear error message.
+fn non_empty_string(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("value must not be empty".to_owned())
+    } else {
+        Ok(s.to_owned())
+    }
+}
+
 use context_smith::budget::{allocate, Candidate};
 use context_smith::bundle_writer::{render_task_md, write_bundle};
 use context_smith::dep_builder::bfs_expand;
@@ -22,7 +31,7 @@ struct Cli {
 enum Command {
     /// Build index for a repository (saved to {repo}/.contextsmith/index.db)
     Index {
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         repo: String,
         /// Override the default output path (.contextsmith/index.db inside the repo)
         #[arg(long)]
@@ -30,9 +39,9 @@ enum Command {
     },
     /// Build a context bundle for a task
     Build {
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         repo: String,
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         task: String,
         #[arg(long, default_value_t = 30000)]
         budget: usize,
@@ -55,9 +64,9 @@ enum Command {
     /// Designed for scripts and pipelines: `--format json` for machine-readable
     /// output, `--format md` for the task.md-style summary.
     Query {
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         repo: String,
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         task: String,
         #[arg(long, default_value_t = 30000)]
         budget: usize,
