@@ -150,19 +150,69 @@ pub fn populate_embeddings(
 }
 
 /// Cosine-rank stored file vectors against a query vector, best-first.
+///
+/// Streams rows from the DB one at a time and maintains a min-heap of size
+/// `top_n` to avoid loading the full `embeddings` table into RAM.
+/// At 768 dims (e5) each vector is ~3 KiB; a 100 k-file repo would otherwise
+/// consume ~300 MB in a single allocation. The heap keeps peak memory
+/// proportional to `top_n`, not to the total number of stored embeddings.
+///
+/// **Upper bound**: `top_n` is capped internally at `SEARCH_VECTORS_MAX` so
+/// callers cannot accidentally request unbounded results. Use
+/// `fuse_seeds`, which sets `top_n * 3`, for higher-recall RRF pre-filtering.
 pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<Vec<(i64, f32)>> {
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    // Ordered by score ascending so the smallest score is always at the top
+    // of the min-heap, making eviction O(log top_n) instead of O(n).
+    #[derive(PartialEq)]
+    struct MinEntry(f32, i64); // (score, file_id)
+    impl Eq for MinEntry {}
+    impl PartialOrd for MinEntry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for MinEntry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            // Reverse: smaller score → higher priority in BinaryHeap (min-heap).
+            other
+                .0
+                .partial_cmp(&self.0)
+                .unwrap_or(Ordering::Equal)
+                .then(self.1.cmp(&other.1))
+        }
+    }
+
+    // Cap `top_n` to prevent pathologically large heaps.
+    let effective_n = top_n.min(SEARCH_VECTORS_MAX);
+    let mut heap: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(effective_n + 1);
+
     let mut stmt = conn.prepare("SELECT file_id, vector FROM embeddings")?;
-    let rows: Vec<(i64, Vec<u8>)> = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut scored: Vec<(i64, f32)> = rows
-        .into_iter()
-        .map(|(fid, blob)| (fid, cosine(query, &blob_to_vec(&blob))))
-        .collect();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let fid: i64 = row.get(0)?;
+        let blob: Vec<u8> = row.get(1)?;
+        let score = cosine(query, &blob_to_vec(&blob));
+        heap.push(MinEntry(score, fid));
+        if heap.len() > effective_n {
+            heap.pop(); // evict the lowest-score entry
+        }
+    }
+
+    // Drain into a vec and sort descending (best first).
+    let mut scored: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.1, e.0)).collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(top_n);
     Ok(scored)
 }
+
+/// Maximum number of results `search_vectors` will return.
+///
+/// This guards against callers requesting unbounded top-k results; at 768
+/// dims each heap slot costs ~3 KiB so 3 000 entries ≈ 9 MB — well within
+/// reason while still giving RRF plenty of candidates to fuse.
+const SEARCH_VECTORS_MAX: usize = 3_000;
 
 /// Fuse BM25 seeds with vector-search seeds via RRF.
 ///
@@ -184,7 +234,11 @@ pub fn fuse_seeds(
         .into_iter()
         .next()
         .unwrap_or_default();
-    let vector = search_vectors(conn, &query_vec, top_n)?;
+    // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
+    // files that sit just outside `top_n` in the vector list still participate
+    // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
+    let vec_candidates = top_n.saturating_mul(3);
+    let vector = search_vectors(conn, &query_vec, vec_candidates)?;
     Ok(rrf_fuse(&[bm25, &vector], 60.0, top_n))
 }
 
