@@ -14,7 +14,8 @@ const W_SYMBOLS: f64 = 2.0;
 const W_BODY: f64 = 1.0;
 
 /// Strip FTS5 operator characters that would cause a syntax error in MATCH queries.
-fn sanitize_fts_query(query: &str) -> String {
+/// Returns a string that may be empty or whitespace-only; callers must guard against that.
+pub(crate) fn sanitize_fts_query(query: &str) -> String {
     query.replace(['(', ')', '"', '*', '-', ':', '^', '{', '}', '~', '!'], " ")
 }
 
@@ -90,8 +91,12 @@ pub fn populate_fts_with_paths(
 
 /// BM25 search across fts_path (×3), fts_symbols (×2) and fts_body (×1).
 /// Sanitizes the query before passing to FTS5 MATCH to prevent SQL syntax errors.
+/// Returns an empty list when the sanitized query is blank (e.g. `--task '()'`).
 pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(i64, f32)>> {
     let sanitized = sanitize_fts_query(query);
+    if sanitized.trim().is_empty() {
+        return Ok(vec![]);
+    }
     let mut stmt = conn.prepare(
         "SELECT file_id, SUM(score) AS total
          FROM (
@@ -112,4 +117,38 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_fts_query;
+
+    #[test]
+    fn sanitize_removes_fts5_operators() {
+        let result = sanitize_fts_query("foo(bar)*baz");
+        // operator chars become spaces; words survive
+        assert!(result.contains("foo"));
+        assert!(result.contains("bar"));
+        assert!(result.contains("baz"));
+        assert!(!result.contains('('));
+        assert!(!result.contains('*'));
+    }
+
+    #[test]
+    fn sanitize_all_operators_returns_whitespace() {
+        // These inputs must NOT reach the SQLite MATCH clause
+        assert!(sanitize_fts_query("()").trim().is_empty());
+        assert!(sanitize_fts_query("***").trim().is_empty());
+        assert!(sanitize_fts_query("(\"*\")").trim().is_empty());
+    }
+
+    #[test]
+    fn sanitize_empty_input() {
+        assert!(sanitize_fts_query("").trim().is_empty());
+    }
+
+    #[test]
+    fn sanitize_plain_word_unchanged() {
+        assert_eq!(sanitize_fts_query("hello").trim(), "hello");
+    }
 }
