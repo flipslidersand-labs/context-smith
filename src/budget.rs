@@ -38,7 +38,12 @@ pub fn estimate_tokens(content: &str) -> usize {
             wide += 1;
         }
     }
-    ascii / 4 + wide
+    let tokens = ascii / 4 + wide;
+    if content.is_empty() {
+        0
+    } else {
+        tokens.max(1)
+    }
 }
 
 /// Take the longest prefix of `content` whose estimated token count does not exceed
@@ -149,7 +154,24 @@ mod tests {
     fn ascii_estimate_matches_chars_over_four() {
         // Regression guard: ASCII content must keep the historic chars/4 behaviour.
         assert_eq!(estimate_tokens(&"a".repeat(400)), 100);
-        assert_eq!(estimate_tokens("abc"), 0); // <4 chars rounds down (allocate() guards with max(1))
+        // 1-3 ASCII chars are fewer than 4, but estimate_tokens now returns at least 1
+        // for any non-empty content so that short files are never invisible to the budget.
+        assert_eq!(estimate_tokens("abc"), 1);
+        assert_eq!(estimate_tokens("a"), 1);
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn short_ascii_never_zero_tokens() {
+        // Regression for #60: 1-3 ASCII chars must not estimate as 0 tokens.
+        for n in 1..=3 {
+            let s = "a".repeat(n);
+            assert_eq!(
+                estimate_tokens(&s),
+                1,
+                "{n}-char ASCII string must estimate as 1 token, not 0"
+            );
+        }
     }
 
     #[test]
