@@ -15,6 +15,12 @@ impl IndexDb {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA foreign_keys=ON;",
+        )
+        .with_context(|| "Failed to apply SQLite PRAGMAs")?;
         Ok(IndexDb { conn })
     }
 
@@ -126,41 +132,58 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
     let mut stats = IndexStats::default();
     let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
-    // Pass 1: upsert files + symbols
-    for (rel_path, lang, blob_sha, size) in &files {
-        stats.files_total += 1;
-        let file_id = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
-        file_paths.insert(file_id, rel_path.clone());
+    // Pass 1: upsert files + symbols — wrapped in a single transaction to
+    // avoid N+1 fsync calls (autocommit) and reduce SQLITE_BUSY risk.
+    db.connection()
+        .execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin Pass-1 transaction")?;
+    let pass1_result = (|| -> Result<()> {
+        for (rel_path, lang, blob_sha, size) in &files {
+            stats.files_total += 1;
+            let file_id = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
+            file_paths.insert(file_id, rel_path.clone());
 
-        if *lang == Language::Unknown {
-            continue;
-        }
+            if *lang == Language::Unknown {
+                continue;
+            }
 
-        let abs_path = repo.root().join(rel_path);
-        let source = match std::fs::read_to_string(&abs_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
-        let lines: Vec<&str> = source.lines().collect();
-
-        db.delete_symbols_for(file_id)?;
-        for (name, kind, line) in raw_syms {
-            let lo = line.saturating_sub(3) as usize;
-            let hi = (line as usize + 2).min(lines.len());
-            let snippet = lines[lo..hi].join("\n");
-            let sym = Symbol {
-                file_id,
-                name,
-                kind,
-                line,
-                snippet,
+            let abs_path = repo.root().join(rel_path);
+            let source = match std::fs::read_to_string(&abs_path) {
+                Ok(s) => s,
+                Err(_) => continue,
             };
-            db.insert_symbol(&sym)?;
-            stats.symbols_total += 1;
+
+            let raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
+            let lines: Vec<&str> = source.lines().collect();
+
+            db.delete_symbols_for(file_id)?;
+            for (name, kind, line) in raw_syms {
+                let lo = line.saturating_sub(3) as usize;
+                let hi = (line as usize + 2).min(lines.len());
+                let snippet = lines[lo..hi].join("\n");
+                let sym = Symbol {
+                    file_id,
+                    name,
+                    kind,
+                    line,
+                    snippet,
+                };
+                db.insert_symbol(&sym)?;
+                stats.symbols_total += 1;
+            }
+            stats.files_indexed += 1;
         }
-        stats.files_indexed += 1;
+        Ok(())
+    })();
+    match pass1_result {
+        Ok(()) => db
+            .connection()
+            .execute_batch("COMMIT")
+            .context("Failed to commit Pass-1 transaction")?,
+        Err(e) => {
+            let _ = db.connection().execute_batch("ROLLBACK");
+            return Err(e);
+        }
     }
 
     // Pass 2: resolve imports → deps table (build_deps clears and rebuilds atomically)
