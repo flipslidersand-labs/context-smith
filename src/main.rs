@@ -114,8 +114,8 @@ fn build_seeds(
 
 /// Run the selection pipeline for a task: BM25 (optionally RRF-fused with
 /// semantic seeds) → dependency BFS → load content → greedy budget allocation.
-/// Returns the selected candidates in score order. Exits with code 1 (after a
-/// stderr message) when no files match, so both `build` and `query` behave alike.
+/// Returns the selected candidates in score order, or an error when no files
+/// match (so the caller decides how to exit, preserving RAII drop order).
 fn select_candidates(
     repo: &GitRepo,
     db: &IndexDb,
@@ -129,8 +129,7 @@ fn select_candidates(
     let bm25 = search_bm25(db.connection(), task, 20)?;
     let seeds = build_seeds(db.connection(), task, bm25, no_embed)?;
     if seeds.is_empty() {
-        eprintln!("No matching files found for task: {}", task);
-        std::process::exit(1);
+        anyhow::bail!("No matching files found for task: {}", task);
     }
 
     // Step 2: BFS expand from seeds (depth=2)
