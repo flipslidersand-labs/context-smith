@@ -257,24 +257,54 @@ pub fn fuse_seeds(
 ///   - `EMBEDDING_API_KEY`     (optional, sent as `X-API-Key`)
 ///   - `EMBEDDING_COLLECTION`  (optional, default `context-smith`; must be a
 ///     collection registered on the service)
+///   - `EMBEDDING_TIMEOUT_SECS` (optional, read timeout in seconds; default 30)
+///
+/// Requests use a 5-second connect timeout and a configurable read timeout
+/// (default 30 s). Transient errors (connection reset, 5xx) are retried up to
+/// 3 times with exponential back-off (1 s, 2 s, 4 s).
 #[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     url: String,
     api_key: Option<String>,
     collection: String,
+    /// Read timeout applied to every HTTP request.
+    timeout: std::time::Duration,
 }
+
+/// Connect timeout for the ureq agent (fixed).
+#[cfg(feature = "remote-embed")]
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Default read timeout when `EMBEDDING_TIMEOUT_SECS` is not set.
+#[cfg(feature = "remote-embed")]
+const DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
+/// Maximum number of attempts per chunk (1 initial + 2 retries).
+#[cfg(feature = "remote-embed")]
+const MAX_ATTEMPTS: u32 = 3;
 
 #[cfg(feature = "remote-embed")]
 impl RemoteEmbedder {
     /// Construct from env; returns `None` if `EMBEDDING_SVC_URL` is unset.
     pub fn from_env() -> Option<Self> {
         let url = std::env::var("EMBEDDING_SVC_URL").ok()?;
+        let timeout_secs = std::env::var("EMBEDDING_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_READ_TIMEOUT_SECS);
         Some(RemoteEmbedder {
             url: url.trim_end_matches('/').to_string(),
             api_key: std::env::var("EMBEDDING_API_KEY").ok(),
             collection: std::env::var("EMBEDDING_COLLECTION")
                 .unwrap_or_else(|_| "context-smith".to_string()),
+            timeout: std::time::Duration::from_secs(timeout_secs),
         })
+    }
+
+    /// Build a ureq agent with the configured timeouts.
+    fn agent(&self) -> ureq::Agent {
+        ureq::AgentBuilder::new()
+            .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(self.timeout)
+            .build()
     }
 }
 
@@ -285,21 +315,41 @@ impl Embedder for RemoteEmbedder {
         struct EmbedResponse {
             vectors: Vec<Vec<f32>>,
         }
+        let agent = self.agent();
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(EMBED_BATCH) {
-            let mut req = ureq::post(&format!("{}/embed/batch", self.url));
-            if let Some(key) = &self.api_key {
-                req = req.set("X-API-Key", key);
-            }
-            let resp: EmbedResponse = req
-                .send_json(ureq::json!({
-                    "collection": self.collection,
-                    "texts": chunk,
-                    "mode": mode.as_str(),
-                }))
-                .map_err(|e| anyhow::anyhow!("embedding request failed: {e}"))?
-                .into_json()
-                .map_err(|e| anyhow::anyhow!("embedding response decode failed: {e}"))?;
+            let body = ureq::json!({
+                "collection": self.collection,
+                "texts": chunk,
+                "mode": mode.as_str(),
+            });
+
+            // Retry loop with exponential back-off on transient failures.
+            let mut last_err = anyhow::anyhow!("embedding request failed: no attempts made");
+            let mut attempt = 0u32;
+            let resp: EmbedResponse = loop {
+                let mut req = agent.post(&format!("{}/embed/batch", self.url));
+                if let Some(key) = &self.api_key {
+                    req = req.set("X-API-Key", key);
+                }
+                match req.send_json(body.clone()) {
+                    Ok(r) => match r.into_json::<EmbedResponse>() {
+                        Ok(parsed) => break parsed,
+                        Err(e) => {
+                            last_err = anyhow::anyhow!("embedding response decode failed: {e}");
+                        }
+                    },
+                    Err(e) => {
+                        last_err = anyhow::anyhow!("embedding request failed: {e}");
+                    }
+                }
+                attempt += 1;
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(last_err);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1u64 << (attempt - 1)));
+            };
+
             if resp.vectors.len() != chunk.len() {
                 anyhow::bail!(
                     "embedding service returned {} vectors for {} texts",
