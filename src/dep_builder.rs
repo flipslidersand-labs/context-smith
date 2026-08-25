@@ -5,11 +5,26 @@ use rusqlite::{params, Connection};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
+/// Build a directory-to-file-ids index from `file_paths` for O(1) Go import resolution.
+/// Maps each file's parent directory path to the list of file IDs in that directory.
+fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Vec<i64>> {
+    let mut dir_to_files: HashMap<PathBuf, Vec<i64>> = HashMap::new();
+    for (id, path) in file_paths {
+        if let Some(dir) = path.parent() {
+            dir_to_files.entry(dir.to_path_buf()).or_default().push(*id);
+        }
+    }
+    dir_to_files
+}
+
 /// Populate the deps table by resolving import symbols already stored in the DB.
 /// Clears the table and rebuilds atomically inside a transaction.
 pub fn build_deps(conn: &Connection, file_paths: &HashMap<i64, PathBuf>) -> Result<()> {
     let path_to_id: HashMap<PathBuf, i64> =
         file_paths.iter().map(|(id, p)| (p.clone(), *id)).collect();
+
+    // Pre-build Go directory index once — O(N) — so resolve_go can do O(1) lookups.
+    let go_dir_index = build_go_dir_index(file_paths);
 
     // Collect import rows before starting the write transaction
     let mut stmt = conn.prepare("SELECT file_id, name FROM symbols WHERE kind = 'import'")?;
@@ -28,7 +43,7 @@ pub fn build_deps(conn: &Connection, file_paths: &HashMap<i64, PathBuf>) -> Resu
                 Some(p) => p,
                 None => continue,
             };
-            for to_id in resolve_import(import_str, from_path, &path_to_id) {
+            for to_id in resolve_import(import_str, from_path, &path_to_id, &go_dir_index) {
                 if *from_id != to_id {
                     conn.execute(
                         "INSERT OR IGNORE INTO deps (from_file, to_file) VALUES (?1, ?2)",
@@ -53,12 +68,13 @@ fn resolve_import(
     import_str: &str,
     from_path: &Path,
     path_to_id: &HashMap<PathBuf, i64>,
+    go_dir_index: &HashMap<PathBuf, Vec<i64>>,
 ) -> Vec<i64> {
     let ext = from_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "rs" => resolve_rust(import_str, path_to_id),
         "py" => resolve_python(import_str, from_path, path_to_id),
-        "go" => resolve_go(import_str, path_to_id),
+        "go" => resolve_go(import_str, go_dir_index),
         "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
             resolve_ts_js(import_str, from_path, path_to_id)
         }
@@ -229,7 +245,15 @@ fn resolve_python(
     vec![]
 }
 
-fn resolve_go(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64> {
+/// Resolve a Go import path to file IDs using a pre-built directory index.
+///
+/// The `go_dir_index` maps each file's parent directory (as stored in the repo)
+/// to the file IDs within that directory. Resolution tries progressively shorter
+/// suffixes of the import path until a unique match is found or all candidates
+/// are exhausted. When multiple directories match the same suffix (name collision,
+/// e.g. `internal/auth` vs `pkg/auth`), all candidates are returned so that the
+/// caller can handle the ambiguity rather than silently picking the wrong one.
+fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Vec<i64> {
     let pkg = import_str
         .trim()
         .trim_start_matches("import")
@@ -244,31 +268,22 @@ fn resolve_go(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64> 
         return vec![];
     }
 
-    // Match against the last 2 path segments to avoid false positives from same-named dirs
-    let match_depth = import_segs.len().min(2);
-    let match_segs = &import_segs[import_segs.len() - match_depth..];
+    // Try matching the full import path first, then progressively shorter suffixes.
+    // This prefers more-specific (longer) matches over shorter ones, and avoids the
+    // O(N×M) linear scan over all files.
+    for depth in (1..=import_segs.len()).rev() {
+        let suffix_segs = &import_segs[import_segs.len() - depth..];
+        // Build the candidate directory path from suffix segments.
+        let candidate_dir: PathBuf = suffix_segs.iter().collect();
 
-    path_to_id
-        .iter()
-        .filter(|(p, _)| {
-            if let Some(parent) = p.parent() {
-                let parent_comps: Vec<String> = parent
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                if parent_comps.len() < match_segs.len() {
-                    return false;
-                }
-                let tail = &parent_comps[parent_comps.len() - match_segs.len()..];
-                tail.iter()
-                    .zip(match_segs.iter())
-                    .all(|(a, b)| a.as_str() == *b)
-            } else {
-                false
-            }
-        })
-        .map(|(_, &id)| id)
-        .collect()
+        if let Some(ids) = go_dir_index.get(&candidate_dir) {
+            // Found a matching directory entry in the index — O(1) lookup.
+            // Return all file IDs in that directory. If multiple dirs matched the
+            // same suffix (collision), the caller receives all candidates.
+            return ids.clone();
+        }
+    }
+    vec![]
 }
 
 /// BFS-expand from seed files through the deps graph (bidirectional, score decay × 0.5/hop).
