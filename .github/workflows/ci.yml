@@ -25,10 +25,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -39,7 +42,19 @@ jobs:
       - name: Test
         run: cargo test --all
 
-      - name: Build (system SQLite)
+      - name: Coverage (default features, fail-under 60%)
+        run: cargo llvm-cov --all --lcov --output-path lcov.info --fail-under-lines 60
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+
+      - name: Test (no-default-features / system SQLite)
         run: |
           sudo apt-get install -y libsqlite3-dev
-          cargo build --no-default-features
+          cargo test --all --no-default-features
+
+      - name: Build (no-default-features / system SQLite)
+        run: cargo build --no-default-features
