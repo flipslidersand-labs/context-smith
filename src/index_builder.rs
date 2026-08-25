@@ -150,7 +150,11 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
             let abs_path = repo.root().join(rel_path);
             let source = match std::fs::read_to_string(&abs_path) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("warn: skip {:?}: {e}", abs_path);
+                    stats.files_skipped += 1;
+                    continue;
+                }
             };
 
             let raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
@@ -216,6 +220,7 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb) -> Result<IndexStats> {
 pub struct IndexStats {
     pub files_total: usize,
     pub files_indexed: usize,
+    pub files_skipped: usize,
     pub symbols_total: usize,
     pub deps_total: usize,
 }

@@ -108,9 +108,13 @@ pub fn populate_embeddings(
     let mut ids: Vec<i64> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
     for (id, rel) in files {
-        let content = match std::fs::read_to_string(repo_root.join(&rel)) {
+        let abs_path = repo_root.join(&rel);
+        let content = match std::fs::read_to_string(&abs_path) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("warn: skip {:?}: {e}", abs_path);
+                continue;
+            }
         };
         let truncated: String = content.chars().take(EMBED_CHAR_LIMIT).collect();
         ids.push(id);

@@ -217,9 +217,10 @@ fn main() -> anyhow::Result<()> {
             let db = IndexDb::open(&db_path)?;
             let stats = build_index(&repo, &db)?;
             println!(
-                "indexed: {} files ({} with symbols), {} symbols, {} deps → {}",
+                "indexed: {} files ({} with symbols, {} skipped), {} symbols, {} deps → {}",
                 stats.files_total,
                 stats.files_indexed,
+                stats.files_skipped,
                 stats.symbols_total,
                 stats.deps_total,
                 db_path.display(),

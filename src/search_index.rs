@@ -59,7 +59,10 @@ pub fn populate_fts_with_paths(
         for (&file_id, abs_path) in abs_file_paths {
             let content = match std::fs::read_to_string(abs_path) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("warn: skip {:?}: {e}", abs_path);
+                    continue;
+                }
             };
             // Truncate at a safe char boundary to avoid UTF-8 panics on multi-byte characters
             let truncated = if content.len() > 512 * 1024 {
