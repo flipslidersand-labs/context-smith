@@ -36,6 +36,9 @@ enum Command {
         /// Override the default output path (.contextsmith/index.db inside the repo)
         #[arg(long)]
         out: Option<String>,
+        /// Force a full re-index even for files whose content has not changed
+        #[arg(long)]
+        force: bool,
     },
     /// Build a context bundle for a task
     Build {
@@ -204,7 +207,7 @@ fn resolve_index_path(repo: &GitRepo, index: Option<String>) -> anyhow::Result<P
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Index { repo, out } => {
+        Command::Index { repo, out, force } => {
             let repo = GitRepo::new(&repo)?;
             let db_path = match out {
                 Some(p) => PathBuf::from(p),
@@ -215,12 +218,13 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             let db = IndexDb::open(&db_path)?;
-            let stats = build_index(&repo, &db)?;
+            let stats = build_index(&repo, &db, force)?;
             println!(
-                "indexed: {} files ({} with symbols, {} skipped), {} symbols, {} deps → {}",
+                "indexed: {} files ({} re-indexed, {} skipped, {} deleted), {} symbols, {} deps → {}",
                 stats.files_total,
                 stats.files_indexed,
                 stats.files_skipped,
+                stats.files_deleted,
                 stats.symbols_total,
                 stats.deps_total,
                 db_path.display(),

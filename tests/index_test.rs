@@ -13,7 +13,7 @@ fn build_index_for(files: &[(&str, &str)]) -> (tempfile::TempDir, IndexDb) {
 
     let repo = GitRepo::new(&repo_dir).unwrap();
     let db = IndexDb::open(&tmp.path().join("index.db")).unwrap();
-    build_index(&repo, &db).unwrap();
+    build_index(&repo, &db, false).unwrap();
     (tmp, db)
 }
 
@@ -264,7 +264,7 @@ fn query_json_stdout_no_files_written() {
     let db_path = tmp.path().join("index.db");
     let repo = GitRepo::new(&repo_dir).unwrap();
     let db = IndexDb::open(&db_path).unwrap();
-    build_index(&repo, &db).unwrap();
+    build_index(&repo, &db, false).unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_contextsmith"))
         .args([
@@ -326,7 +326,7 @@ fn index_command_creates_db() {
 
     use context_smith::index_builder::{build_index, IndexDb};
     let db = IndexDb::open(&db_path).unwrap();
-    let stats = build_index(&repo, &db).unwrap();
+    let stats = build_index(&repo, &db, false).unwrap();
 
     assert!(db_path.exists(), "index.db should be created");
     assert_eq!(stats.files_total, 3);
