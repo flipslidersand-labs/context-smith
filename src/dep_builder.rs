@@ -1,13 +1,31 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// Return true if the file name matches Go generated/test file patterns that
+/// should be excluded from BFS traversal to avoid inflating the token budget.
+///
+/// Excluded patterns: `*_test.go`, `*.pb.go`, `mock_*.go`. (#91)
+fn is_go_generated_or_test(path: &Path) -> bool {
+    let name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    name.ends_with("_test.go") || name.ends_with(".pb.go") || name.starts_with("mock_")
+}
 
 /// Build a directory-to-file-ids index from `file_paths` for O(1) Go import resolution.
 /// Maps each file's parent directory path to the list of file IDs in that directory.
+///
+/// Go test and generated files (`*_test.go`, `*.pb.go`, `mock_*.go`) are excluded so
+/// they do not inflate the BFS frontier when `resolve_go` returns IDs for a directory. (#91)
 fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Vec<i64>> {
     let mut dir_to_files: HashMap<PathBuf, Vec<i64>> = HashMap::new();
     for (id, path) in file_paths {
+        if is_go_generated_or_test(path) {
+            continue;
+        }
         if let Some(dir) = path.parent() {
             dir_to_files.entry(dir.to_path_buf()).or_default().push(*id);
         }
@@ -82,6 +100,12 @@ fn resolve_import(
 
 /// Resolve an ES `import ... from './x'` or CommonJS `require('./x')` to a file id.
 /// Only relative specifiers (`./` or `../`) are resolved; bare package imports are ignored.
+///
+/// # Security (#87)
+/// `normalize_path` performs only lexical `..` collapsing without filesystem access.
+/// To prevent path-traversal attacks (e.g. `require('../../../etc/shadow')`), the
+/// resolved path is checked to remain within `repo_root`. Resolution is aborted and
+/// an empty result returned if the normalized path escapes the repo root.
 fn resolve_ts_js(
     import_str: &str,
     from_path: &Path,
@@ -94,6 +118,19 @@ fn resolve_ts_js(
 
     let base_dir = from_path.parent().unwrap_or(Path::new(""));
     let joined = normalize_path(&base_dir.join(&spec));
+
+    // #87: Guard against `..` traversal escaping the repo root.
+    // The repo root is the first non-RootDir/Prefix component's ancestor, which
+    // for relative paths stored in the index is simply "". Paths that still
+    // start with ".." after normalisation have escaped the root.
+    if joined
+        .components()
+        .next()
+        .map(|c| c.as_os_str() == "..")
+        .unwrap_or(false)
+    {
+        return vec![];
+    }
 
     // Try the specifier as-is (it may already carry an extension), then common
     // TS/JS source extensions and directory index files.
@@ -251,6 +288,10 @@ fn resolve_python(
 /// are exhausted. When multiple directories match the same suffix (name collision,
 /// e.g. `internal/auth` vs `pkg/auth`), all candidates are returned so that the
 /// caller can handle the ambiguity rather than silently picking the wrong one.
+///
+/// # Generated-file exclusion (#91)
+/// `*_test.go`, `*.pb.go`, and `mock_*.go` files are excluded from the returned
+/// IDs so they do not inflate the BFS frontier and consume token budget.
 fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Vec<i64> {
     let pkg = import_str
         .trim()
@@ -276,8 +317,7 @@ fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Ve
 
         if let Some(ids) = go_dir_index.get(&candidate_dir) {
             // Found a matching directory entry in the index — O(1) lookup.
-            // Return all file IDs in that directory. If multiple dirs matched the
-            // same suffix (collision), the caller receives all candidates.
+            // Return all file IDs in that directory, excluding generated/test files.
             return ids.clone();
         }
     }
@@ -286,64 +326,119 @@ fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Ve
 
 /// BFS-expand from seed files through the deps graph (bidirectional, score decay × 0.5/hop).
 ///
-/// Instead of loading all edges into memory and building a petgraph `DiGraph`, each BFS
-/// frontier is expanded by targeted SQL queries (`SELECT … WHERE from_file IN (…)` and
-/// the reverse). For `max_depth=2` this means at most 4 SQL round-trips (2 outgoing + 2
-/// incoming), avoiding the O(E) memory cost of a full graph load.
+/// # Batch query strategy (#91)
+/// Instead of calling `query_neighbors` once per node (N×2 queries per depth level),
+/// each BFS depth level collects the entire frontier and issues exactly 2 SQL queries
+/// per level (one `IN` for outgoing edges, one `IN` for incoming edges). For
+/// `max_depth=2` this means at most 4 SQL round-trips regardless of frontier size,
+/// avoiding the O(frontier) N+1 problem of the original per-node approach.
 pub fn bfs_expand(
     conn: &Connection,
     seeds: &[(i64, f32)],
     max_depth: u8,
 ) -> Result<HashMap<i64, f32>> {
     let mut scores: HashMap<i64, f32> = HashMap::new();
-    // queue entries: (file_id, score, depth)
-    let mut queue: VecDeque<(i64, f32, u8)> = VecDeque::new();
+
+    // frontier entries: (file_id, score) — all at the same BFS depth.
+    let mut frontier: Vec<(i64, f32)> = Vec::new();
 
     for &(file_id, score) in seeds {
         let prev = scores.entry(file_id).or_insert(0.0);
         if score > *prev {
             *prev = score;
         }
-        queue.push_back((file_id, score, 0));
+        frontier.push((file_id, score));
     }
 
-    while let Some((file_id, score, depth)) = queue.pop_front() {
-        if depth >= max_depth {
-            continue;
+    for _depth in 0..max_depth {
+        if frontier.is_empty() {
+            break;
         }
-        let decayed = score * 0.5;
-        // Fetch direct neighbors via SQL: outgoing (file_id → X) and incoming (X → file_id).
-        let neighbors = query_neighbors(conn, file_id)?;
+
+        // Collect all node IDs in this frontier for batch IN-clause queries.
+        let ids: Vec<i64> = frontier.iter().map(|&(id, _)| id).collect();
+        // Build a score map for the current frontier so each neighbor gets the
+        // decayed score of its best parent.
+        let frontier_scores: HashMap<i64, f32> =
+            frontier.iter().map(|&(id, s)| (id, s * 0.5)).collect();
+        let decayed_default = frontier
+            .iter()
+            .map(|&(_, s)| s * 0.5)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        // Batch-fetch all neighbors for the entire frontier in 2 queries.
+        let neighbors = query_neighbors_batch(conn, &ids)?;
+
+        let mut next_frontier: Vec<(i64, f32)> = Vec::new();
         for neighbor_id in neighbors {
+            // Use the maximum decayed score from any parent in this frontier.
+            let decayed = frontier_scores
+                .get(&neighbor_id)
+                .copied()
+                .unwrap_or(decayed_default);
             let prev = scores.entry(neighbor_id).or_insert(0.0);
             if decayed > *prev {
                 *prev = decayed;
-                queue.push_back((neighbor_id, decayed, depth + 1));
+                next_frontier.push((neighbor_id, decayed));
             }
         }
+
+        frontier = next_frontier;
     }
 
     Ok(scores)
 }
 
-/// Return all file IDs reachable from `file_id` in one hop (outgoing or incoming edges),
-/// deduplicating so the BFS queue does not inflate.
-fn query_neighbors(conn: &Connection, file_id: i64) -> Result<Vec<i64>> {
+/// Batch-fetch all neighbors for a set of node IDs in 2 SQL queries (one outgoing,
+/// one incoming), returning a deduplicated list of neighbor IDs.
+///
+/// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
+/// that issued 2N queries for a frontier of N nodes. (#91)
+fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Build the IN-clause placeholder string: "?1,?2,...,?N"
+    let placeholders: String = (1..=ids.len())
+        .map(|i| format!("?{}", i))
+        .collect::<Vec<_>>()
+        .join(",");
+
     let mut neighbors: HashSet<i64> = HashSet::new();
 
-    // Outgoing: file_id → X
-    let mut stmt = conn.prepare_cached("SELECT to_file FROM deps WHERE from_file = ?1")?;
-    let out: Vec<i64> = stmt
-        .query_map(params![file_id], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    neighbors.extend(out);
+    // Outgoing: any id → X
+    let out_sql = format!(
+        "SELECT to_file FROM deps WHERE from_file IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare_cached(&out_sql)?;
+    let out_ids: Vec<i64> = {
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        stmt.query_map(params_refs.as_slice(), |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    neighbors.extend(out_ids);
 
-    // Incoming: X → file_id
-    let mut stmt = conn.prepare_cached("SELECT from_file FROM deps WHERE to_file = ?1")?;
-    let inc: Vec<i64> = stmt
-        .query_map(params![file_id], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    neighbors.extend(inc);
+    // Incoming: X → any id
+    let inc_sql = format!(
+        "SELECT from_file FROM deps WHERE to_file IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare_cached(&inc_sql)?;
+    let inc_ids: Vec<i64> = {
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        stmt.query_map(params_refs.as_slice(), |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    neighbors.extend(inc_ids);
 
-    Ok(neighbors.into_iter().collect())
+    // Exclude the input ids themselves so the BFS does not re-visit them.
+    let id_set: HashSet<i64> = ids.iter().copied().collect();
+    Ok(neighbors
+        .into_iter()
+        .filter(|n| !id_set.contains(n))
+        .collect())
 }
