@@ -14,10 +14,21 @@ const W_SYMBOLS: f64 = 2.0;
 const W_BODY: f64 = 1.0;
 
 /// Strip FTS5 operator characters that would cause a syntax error in MATCH queries.
+/// Additionally, FTS5 boolean keywords (AND, OR, NOT, NEAR) are recognised only in
+/// uppercase; downcasing them neutralises their operator role so they are treated as
+/// plain search terms instead of query syntax.
 /// Returns an empty string (which callers should reject before issuing MATCH) if the
 /// result contains no non-whitespace characters.
 pub(crate) fn sanitize_fts_query(query: &str) -> String {
-    query.replace(['(', ')', '"', '*', '-', ':', '^', '{', '}', '~', '!'], " ")
+    let stripped = query.replace(['(', ')', '"', '*', '-', ':', '^', '{', '}', '~', '!'], " ");
+    stripped
+        .split_whitespace()
+        .map(|w| match w {
+            "AND" | "OR" | "NOT" | "NEAR" => w.to_lowercase(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Populate fts_path, fts_symbols and fts_body inside a single transaction.
@@ -186,5 +197,50 @@ mod tests {
     #[test]
     fn sanitize_plain_word_unchanged() {
         assert_eq!(sanitize_fts_query("hello").trim(), "hello");
+    }
+
+    #[test]
+    fn sanitize_downcases_fts5_boolean_keywords() {
+        // AND/OR/NOT/NEAR must be lowercased so FTS5 treats them as plain terms
+        let result = sanitize_fts_query("authentication OR 1=1");
+        assert!(
+            !result.contains("OR"),
+            "OR should be downcased, got: {result}"
+        );
+        assert!(
+            result.contains("or"),
+            "OR should become 'or', got: {result}"
+        );
+
+        let result = sanitize_fts_query("foo AND bar");
+        assert!(
+            !result.contains("AND"),
+            "AND should be downcased, got: {result}"
+        );
+
+        let result = sanitize_fts_query("foo NOT bar");
+        assert!(
+            !result.contains("NOT"),
+            "NOT should be downcased, got: {result}"
+        );
+
+        let result = sanitize_fts_query("NEAR(foo bar)");
+        // parens are stripped, NEAR is lowercased
+        assert!(
+            !result.contains("NEAR"),
+            "NEAR should be downcased, got: {result}"
+        );
+    }
+
+    #[test]
+    fn sanitize_preserves_mixed_case_non_keywords() {
+        // Words that are not exactly AND/OR/NOT/NEAR should survive unchanged
+        let result = sanitize_fts_query("And Oregon Notify");
+        assert!(
+            result.contains("And"),
+            "mixed-case 'And' should be preserved, got: {result}"
+        );
+        assert!(result.contains("Oregon"), "got: {result}");
+        assert!(result.contains("Notify"), "got: {result}");
     }
 }
