@@ -17,9 +17,22 @@ impl IndexDb {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
-             PRAGMA foreign_keys=ON;",
+             PRAGMA foreign_keys=ON;
+             PRAGMA busy_timeout=5000;",
         )
         .with_context(|| "Failed to apply SQLite PRAGMAs")?;
+
+        // Verify the DB is not corrupt after an abnormal WAL termination.
+        let integrity: String = conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .with_context(|| "Failed to run PRAGMA quick_check")?;
+        if integrity != "ok" {
+            anyhow::bail!(
+                "Index DB is corrupt. Delete {} and re-run 'contextsmith index'.",
+                path.display()
+            );
+        }
+
         Ok(IndexDb { conn })
     }
 
