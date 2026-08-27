@@ -10,6 +10,18 @@ fn non_empty_string(s: &str) -> Result<String, String> {
     }
 }
 
+/// Clap value_parser: reject zero budget with a clear error message.
+fn positive_usize(s: &str) -> Result<usize, String> {
+    let v: usize = s
+        .parse()
+        .map_err(|_| format!("'{}' is not a valid integer", s))?;
+    if v == 0 {
+        Err("--budget must be \u{2265} 1".to_owned())
+    } else {
+        Ok(v)
+    }
+}
+
 use context_smith::budget::{allocate, Candidate};
 use context_smith::bundle_writer::{render_task_md, write_bundle};
 use context_smith::dep_builder::bfs_expand;
@@ -46,7 +58,7 @@ enum Command {
         repo: String,
         #[arg(long, value_parser = non_empty_string)]
         task: String,
-        #[arg(long, default_value_t = 30000)]
+        #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
         #[arg(long, default_value = "context.bundle")]
         out: String,
@@ -71,7 +83,7 @@ enum Command {
         repo: String,
         #[arg(long, value_parser = non_empty_string)]
         task: String,
-        #[arg(long, default_value_t = 30000)]
+        #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
         /// Path to index db (default: {repo}/.contextsmith/index.db)
         #[arg(long)]
