@@ -234,11 +234,20 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
         .map(|(p, _, _, _)| p.to_string_lossy().to_string())
         .collect();
 
+    // --- Begin a single transaction covering both cleanup and Pass 1 ---
+    // Moving BEGIN IMMEDIATE before the stale-file deletion ensures that
+    // delete_file_records() and the Pass-1 upserts/FTS updates are atomic.
+    // If the process crashes between cleanup and COMMIT the WAL is simply
+    // rolled back on next open, leaving the DB in its previous consistent state.
+    db.connection()
+        .execute_batch("BEGIN IMMEDIATE")
+        .context("Failed to begin cleanup+Pass-1 transaction")?;
+
     // --- Cleanup: remove DB entries for files no longer in git ---
     let db_files = db.all_file_ids_and_paths()?;
-    for (file_id, path) in db_files {
-        if !git_paths.contains(&path) {
-            db.delete_file_records(file_id)?;
+    for (file_id, path) in &db_files {
+        if !git_paths.contains(path) {
+            db.delete_file_records(*file_id)?;
             stats.files_deleted += 1;
         }
     }
@@ -246,11 +255,8 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
     // --- Pass 1: upsert files + incremental symbol / FTS update ---
     let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
-    // Pass 1: upsert files + symbols — wrapped in a single transaction to
-    // avoid N+1 fsync calls (autocommit) and reduce SQLITE_BUSY risk.
-    db.connection()
-        .execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin Pass-1 transaction")?;
+    // Pass 1: upsert files + symbols — part of the same transaction started
+    // above (covers cleanup + upserts to avoid N+1 fsync and SQLITE_BUSY risk).
     let pass1_result = (|| -> Result<()> {
         for (rel_path, lang, blob_sha, size) in &files {
             stats.files_total += 1;
@@ -355,8 +361,10 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
         Ok(()) => db
             .connection()
             .execute_batch("COMMIT")
-            .context("Failed to commit Pass-1 transaction")?,
+            .context("Failed to commit cleanup+Pass-1 transaction")?,
         Err(e) => {
+            // Roll back both the stale-file deletions and any Pass-1 writes so
+            // the DB is never left in a half-cleaned state.
             let _ = db.connection().execute_batch("ROLLBACK");
             return Err(e);
         }
