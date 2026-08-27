@@ -111,7 +111,17 @@ impl GitRepo {
     }
 
     /// Unified diff of the last n_commits commits (empty string if repo has no history).
+    ///
+    /// The accumulated patch is capped at `DIFF_MAX_BYTES` (512 KiB). Any content
+    /// beyond that limit is dropped and a `[diff truncated]` marker is appended so
+    /// callers always receive a valid (possibly incomplete) UTF-8 string that fits
+    /// within the token budget.
+    ///
+    /// When the ancestor is the root commit (no parents) the diff is computed
+    /// against the empty tree so the initial commit's files are included.
     pub fn recent_diff(&self, n_commits: usize) -> Result<String> {
+        const DIFF_MAX_BYTES: usize = 512 * 1024; // 512 KiB
+
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head_commit = repo.head()?.peel_to_commit()?;
@@ -125,16 +135,35 @@ impl GitRepo {
         }
 
         let head_tree = head_commit.tree()?;
-        let anc_tree = ancestor.tree()?;
-        let diff = repo.diff_tree_to_tree(Some(&anc_tree), Some(&head_tree), None)?;
+        // When ancestor == head (root commit with no parents after the loop),
+        // diff against the empty tree so the initial files are visible.
+        let anc_tree_opt = if ancestor.id() != head_commit.id() {
+            Some(ancestor.tree()?)
+        } else if ancestor.parent_count() == 0 {
+            None // empty tree → shows full initial commit
+        } else {
+            Some(ancestor.tree()?)
+        };
+        let diff = repo.diff_tree_to_tree(anc_tree_opt.as_ref(), Some(&head_tree), None)?;
 
         let mut patch = String::new();
+        let mut truncated = false;
         diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+            if truncated {
+                return true;
+            }
             if let Ok(s) = std::str::from_utf8(line.content()) {
-                patch.push_str(s);
+                if patch.len() + s.len() > DIFF_MAX_BYTES {
+                    truncated = true;
+                } else {
+                    patch.push_str(s);
+                }
             }
             true
         })?;
+        if truncated {
+            patch.push_str("\n[diff truncated]\n");
+        }
         Ok(patch)
     }
 
