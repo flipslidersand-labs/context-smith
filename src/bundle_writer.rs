@@ -65,6 +65,29 @@ pub(crate) fn make_slug(base: &str, count: usize) -> String {
     }
 }
 
+/// Return the shortest backtick fence string (minimum length 3) that does not
+/// appear as a standalone fence sequence in `content`.
+///
+/// GFM spec §4.5: a code fence opening consists of ≥3 backticks; a closing
+/// fence must be at least as long as the opener.  By using one more backtick
+/// than the longest consecutive run of backticks found in the content we
+/// guarantee the fence cannot be prematurely closed by content.
+pub(crate) fn safe_fence(content: &str) -> String {
+    let max_run = content
+        .chars()
+        .fold((0usize, 0usize), |(max, cur), ch| {
+            if ch == '`' {
+                let next = cur + 1;
+                (max.max(next), next)
+            } else {
+                (max, 0)
+            }
+        })
+        .0;
+    let len = max_run.max(2) + 1; // at least 3 backticks
+    "`".repeat(len)
+}
+
 /// Write a context bundle to `out_dir`.
 ///
 /// Layout:
@@ -95,8 +118,9 @@ pub fn write_bundle(
         *count += 1;
 
         let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+        let fence = safe_fence(&c.content);
         let file_md = format!(
-            "<!-- {} -->\n```{ext}\n{}\n```\n",
+            "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
             c.path.display(),
             c.content,
         );
@@ -133,6 +157,45 @@ mod tests {
             score,
             content: content.into(),
         }
+    }
+
+    #[test]
+    fn safe_fence_plain_content_uses_triple_backticks() {
+        assert_eq!(safe_fence("fn main() {}"), "```");
+    }
+
+    #[test]
+    fn safe_fence_content_with_triple_backtick_uses_four() {
+        assert_eq!(safe_fence("before\n```\nafter"), "````");
+    }
+
+    #[test]
+    fn safe_fence_content_with_four_backticks_uses_five() {
+        assert_eq!(safe_fence("````"), "`````");
+    }
+
+    #[test]
+    fn write_bundle_codefence_injection_not_possible() {
+        // A file whose content contains a triple-backtick block.
+        // The rendered .md must not have a bare ``` line that closes the fence early.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let malicious_content = "before\n```\ninjected: bad content\n```\nafter";
+        let selected = vec![cand("src/attack.rs", 0.9, malicious_content)];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+
+        let md =
+            std::fs::read_to_string(out.join("relevant-code").join("src_attack_rs.md")).unwrap();
+        // The fence must use ≥4 backticks because the content has ```.
+        assert!(
+            md.starts_with("<!-- src/attack.rs -->\n````"),
+            "fence must be longer than content's backtick run; got:\n{md}"
+        );
+        // The full content must be preserved verbatim between the fences.
+        assert!(
+            md.contains(malicious_content),
+            "original content must appear unchanged"
+        );
     }
 
     #[test]
