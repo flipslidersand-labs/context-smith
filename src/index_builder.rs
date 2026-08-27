@@ -36,6 +36,16 @@ impl IndexDb {
         Ok(IndexDb { conn })
     }
 
+    /// Open an in-memory database; intended for tests only.
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self> {
+        let conn =
+            Connection::open_in_memory().with_context(|| "Failed to open in-memory SQLite")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .with_context(|| "Failed to apply SQLite PRAGMAs")?;
+        Ok(IndexDb { conn })
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -93,7 +103,46 @@ impl IndexDb {
             self.conn
                 .execute_batch("ALTER TABLE files ADD COLUMN indexed_sha TEXT;")?;
         }
+
+        // Migration: add content_sha column to embeddings table (idempotent).
+        // Tracks the blob_sha at embed time so we can skip re-embedding unchanged files.
+        let has_content_sha: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('embeddings') WHERE name = 'content_sha'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        if !has_content_sha {
+            self.conn
+                .execute_batch("ALTER TABLE embeddings ADD COLUMN content_sha TEXT;")?;
+        }
+
         Ok(())
+    }
+
+    /// Return `(file_id, path, blob_sha)` for files that need (re-)embedding:
+    /// those where no embedding exists yet, or where `content_sha != blob_sha`.
+    pub fn files_needing_embed(&self) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.path, f.blob_sha
+             FROM files f
+             LEFT JOIN embeddings e ON e.file_id = f.id
+             WHERE f.lang != 'unknown'
+               AND (e.file_id IS NULL OR e.content_sha IS NULL OR e.content_sha != f.blob_sha)",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Upsert a file record and return `(file_id, sha_changed)`.

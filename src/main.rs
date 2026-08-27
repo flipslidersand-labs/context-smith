@@ -263,6 +263,7 @@ fn main() -> anyhow::Result<()> {
                         db.connection(),
                         repo.root(),
                         &embedder,
+                        &db,
                     ) {
                         Ok(n) => println!("embeddings: {n} files (remote-embed)"),
                         Err(e) => eprintln!("warning: embedding generation failed: {e}"),

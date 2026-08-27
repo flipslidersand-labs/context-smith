@@ -86,69 +86,92 @@ pub fn has_embeddings(conn: &Connection) -> Result<bool> {
 
 /// Max characters of file content fed to the embedder (e5 context budget).
 const EMBED_CHAR_LIMIT: usize = 8000;
-/// Batch size cap for the embedding service (matches embedding-svc MAX=256).
-const EMBED_BATCH: usize = 256;
+/// Batch size for incremental streaming — files are read and embedded in
+/// chunks of this size so peak RSS stays bounded at `EMBED_BATCH × EMBED_CHAR_LIMIT`
+/// (≈ 64 × 8 000 chars ≈ 512 KB of text) rather than growing with repo size.
+const EMBED_BATCH: usize = 64;
 
-/// Embed every indexed source file and store vectors in the `embeddings` table.
-/// Files are sent with mode `index` (the service applies the e5 document prefix).
-/// Returns the number of files embedded.
+/// Incrementally embed source files whose content SHA has changed and store
+/// vectors in the `embeddings` table.
+///
+/// Only files where `embeddings.content_sha IS NULL OR content_sha != blob_sha`
+/// are re-embedded; unchanged files are left untouched. Files are processed in
+/// chunks of [`EMBED_BATCH`] to cap peak RAM usage. Returns the number of files
+/// actually embedded (skipped files are not counted).
 pub fn populate_embeddings(
     conn: &Connection,
     repo_root: &std::path::Path,
     embedder: &dyn Embedder,
+    db: &crate::index_builder::IndexDb,
 ) -> Result<usize> {
-    let mut stmt = conn.prepare("SELECT id, path FROM files WHERE lang != 'unknown'")?;
-    let files: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    let mut ids: Vec<i64> = Vec::new();
-    let mut texts: Vec<String> = Vec::new();
-    for (id, rel) in files {
-        let abs_path = repo_root.join(&rel);
-        let content = match std::fs::read_to_string(&abs_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("warn: skip {:?}: {e}", abs_path);
-                continue;
-            }
-        };
-        let truncated: String = content.chars().take(EMBED_CHAR_LIMIT).collect();
-        ids.push(id);
-        texts.push(truncated);
-    }
-    if ids.is_empty() {
+    // Query only the files that actually need (re-)embedding — avoids the
+    // full-table DELETE and re-insert of the previous implementation.
+    let stale_files = db.files_needing_embed()?;
+    if stale_files.is_empty() {
         return Ok(0);
     }
 
-    conn.execute_batch("BEGIN")?;
-    let result = (|| -> Result<usize> {
-        conn.execute_batch("DELETE FROM embeddings")?;
-        let mut written = 0;
-        for (id_chunk, text_chunk) in ids.chunks(EMBED_BATCH).zip(texts.chunks(EMBED_BATCH)) {
-            let vecs = embedder.embed(text_chunk, EmbedMode::Index)?;
-            for (id, v) in id_chunk.iter().zip(vecs.iter()) {
+    let mut written = 0usize;
+
+    // Stream through stale files in chunks so we never allocate more than
+    // EMBED_BATCH file contents at once.
+    for chunk in stale_files.chunks(EMBED_BATCH) {
+        // Build (id, sha, text) triples, skipping unreadable files.
+        let mut ids: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut shas: Vec<String> = Vec::with_capacity(chunk.len());
+        let mut texts: Vec<String> = Vec::with_capacity(chunk.len());
+
+        for (id, rel, sha) in chunk {
+            let abs_path = repo_root.join(rel);
+            let content = match std::fs::read_to_string(&abs_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("warn: skip {:?}: {e}", abs_path);
+                    continue;
+                }
+            };
+            let truncated: String = content.chars().take(EMBED_CHAR_LIMIT).collect();
+            ids.push(*id);
+            shas.push(sha.clone());
+            texts.push(truncated);
+        }
+
+        if ids.is_empty() {
+            continue;
+        }
+
+        // Embed this batch.
+        let vecs = embedder.embed(&texts, EmbedMode::Index)?;
+
+        // Persist each vector with its content_sha in a single transaction.
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<()> {
+            for ((id, sha), v) in ids.iter().zip(shas.iter()).zip(vecs.iter()) {
                 conn.execute(
-                    "INSERT OR REPLACE INTO embeddings (file_id, vector) VALUES (?1, ?2)",
-                    params![id, vec_to_blob(v)],
+                    "INSERT INTO embeddings (file_id, vector, content_sha)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(file_id) DO UPDATE
+                       SET vector      = excluded.vector,
+                           content_sha = excluded.content_sha",
+                    params![id, vec_to_blob(v), sha],
                 )?;
-                written += 1;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                written += ids.len();
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
             }
         }
-        Ok(written)
-    })();
-
-    match result {
-        Ok(n) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(n)
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
     }
+
+    Ok(written)
 }
 
 /// Cosine-rank stored file vectors against a query vector, best-first.
@@ -413,8 +436,15 @@ mod tests {
     fn mem_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT, lang TEXT);
-             CREATE TABLE embeddings (file_id INTEGER PRIMARY KEY, vector BLOB NOT NULL);",
+            "CREATE TABLE files (
+                 id INTEGER PRIMARY KEY, path TEXT, lang TEXT,
+                 blob_sha TEXT NOT NULL DEFAULT '', indexed_sha TEXT, size INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE embeddings (
+                 file_id INTEGER PRIMARY KEY,
+                 vector  BLOB NOT NULL,
+                 content_sha TEXT
+             );",
         )
         .unwrap();
         conn
@@ -438,5 +468,51 @@ mod tests {
         let bm25 = vec![(7i64, 1.0f32)];
         let out = fuse_seeds(&conn, &MockEmbedder, "task", &bm25, 10).unwrap();
         assert_eq!(out, bm25, "no embeddings → BM25 seeds unchanged");
+    }
+
+    /// Build an in-memory [`crate::index_builder::IndexDb`] and populate it
+    /// with `files` rows so `files_needing_embed` has something to return.
+    fn index_db_with_files(file_rows: &[(&str, &str)]) -> crate::index_builder::IndexDb {
+        let db = crate::index_builder::IndexDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        for (path, sha) in file_rows {
+            db.connection()
+                .execute(
+                    "INSERT INTO files (path, lang, blob_sha, size) VALUES (?1, 'rust', ?2, 0)",
+                    rusqlite::params![path, sha],
+                )
+                .unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn populate_embeddings_skips_unchanged_files() {
+        // Write two temp files so populate_embeddings can read them.
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("a.rs");
+        let path_b = dir.path().join("b.rs");
+        std::fs::write(&path_a, "fn a() {}").unwrap();
+        std::fs::write(&path_b, "fn bb() {}").unwrap();
+
+        let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
+
+        // First run: both files need embedding.
+        let n = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        assert_eq!(n, 2, "both files should be embedded on first run");
+
+        // Second run: sha unchanged → nothing re-embedded.
+        let n2 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        assert_eq!(n2, 0, "no files re-embedded when sha is unchanged");
+
+        // Simulate a content change by updating blob_sha.
+        db.connection()
+            .execute(
+                "UPDATE files SET blob_sha = 'sha-a-v2' WHERE path = 'a.rs'",
+                [],
+            )
+            .unwrap();
+        let n3 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        assert_eq!(n3, 1, "only the changed file should be re-embedded");
     }
 }
