@@ -157,19 +157,28 @@ fn select_candidates(
             .or_insert(*s);
     }
 
-    // Step 3: Load file paths + content from DB
+    // Step 3: Load paths for scored files only, then read content.
+    // Filter in the SQL query so we never fetch rows for unscored files,
+    // avoiding the O(all-files) read_to_string that wastes RAM (#80).
     let mut candidates: Vec<Candidate> = Vec::new();
     {
         let conn = db.connection();
-        let mut stmt = conn.prepare("SELECT id, path FROM files WHERE lang != 'unknown'")?;
-        let file_rows: Vec<(i64, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Collect only the file IDs that have a positive score; the DB query
+        // is restricted to this set so we read at most len(scored) rows.
+        let scored_ids: Vec<i64> = scored
+            .iter()
+            .filter_map(|(&id, &s)| if s > 0.0 { Some(id) } else { None })
+            .collect();
 
-        for (file_id, rel_path) in file_rows {
-            let score = match scored.get(&file_id) {
-                Some(&s) if s > 0.0 => s,
-                _ => continue,
+        for file_id in scored_ids {
+            let score = scored[&file_id];
+            let rel_path: String = {
+                let mut stmt = conn
+                    .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
+                match stmt.query_row([file_id], |row| row.get(0)) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                }
             };
             let abs = repo.root().join(&rel_path);
             let content = match std::fs::read_to_string(&abs) {
