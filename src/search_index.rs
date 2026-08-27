@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,26 +105,34 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     let sanitized = sanitize_fts_query(query);
     // Guard: an empty MATCH expression is a SQLite FTS5 syntax error.
     if sanitized.trim().is_empty() {
-        return Ok(Vec::new());
+        bail!(
+            "task string is empty or contains only punctuation — please provide at least one word"
+        );
     }
 
     // Each sub-query: normalize raw BM25 rank to [0,1] then apply the weight.
     // `rank` in FTS5 is ≤ 0 (more negative = better); dividing by MIN(rank) (the most
     // negative value, i.e. best match) yields a [0,1] ratio that is table-agnostic, so
     // the configured weights are not dominated by the size of fts_body.
+    //
+    // NULLIF(MIN(rank) OVER (), 0) prevents NULL propagation when MIN(rank) = 0
+    // (SQLite treats x / 0 as NULL, which then silently drops rows from SUM and ORDER BY).
+    // COALESCE(SUM(score), 0) provides an additional defence so that a sub-query
+    // returning no rows still contributes 0 rather than NULL to the aggregate.
+    //
     // Sub-queries are wrapped in derived tables so LIMIT applies before UNION ALL,
     // preventing intermediate memory explosion.
     let sub_limit = (top_n * 3) as i64;
     let mut stmt = conn.prepare(
-        "SELECT file_id, SUM(score) AS total
+        "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
-             SELECT file_id, (rank / MIN(rank) OVER ()) * ?1 AS score
+             SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
              FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 LIMIT ?5)
              UNION ALL
-             SELECT file_id, (rank / MIN(rank) OVER ()) * ?2 AS score
+             SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
              FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 LIMIT ?5)
              UNION ALL
-             SELECT file_id, (rank / MIN(rank) OVER ()) * ?3 AS score
+             SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
              FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 LIMIT ?5)
          )
          GROUP BY file_id
