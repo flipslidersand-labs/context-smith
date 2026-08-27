@@ -112,7 +112,18 @@ pub fn write_bundle(
     // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     for c in selected {
-        let base_slug = c.path.to_string_lossy().replace(['/', '\\', '.'], "_");
+        let base_slug: String = c
+            .path
+            .to_string_lossy()
+            .chars()
+            .map(|ch| {
+                if ch.is_alphanumeric() || ch == '-' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         let count = slug_counts.entry(base_slug.clone()).or_insert(0);
         let slug = make_slug(&base_slug, *count);
         *count += 1;
@@ -271,5 +282,43 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(entries.len(), 3, "exactly three slug files: {entries:?}");
+    }
+
+    #[test]
+    fn write_bundle_slug_sanitizes_special_chars() {
+        // Paths containing null bytes, Windows reserved chars, and other
+        // non-alphanumeric characters must be replaced by '_' so the resulting
+        // filename is safe on all platforms.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle2");
+        // Use a path string that contains characters the old denylist missed.
+        let path = "src/foo\x00bar<baz>.rs";
+        let selected = vec![cand(path, 0.9, "fn f() {}")];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+
+        let rc = out.join("relevant-code");
+        // The slug must not contain the null byte or '<'/'>' — every
+        // non-alphanumeric/non-hyphen char is replaced by '_'.
+        let entries: Vec<_> = std::fs::read_dir(&rc)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let name = &entries[0];
+        assert!(
+            !name.contains('\x00'),
+            "slug must not contain null byte: {name:?}"
+        );
+        assert!(
+            !name.contains('<') && !name.contains('>'),
+            "slug must not contain angle brackets: {name:?}"
+        );
+        // All chars in the stem (before .md) must be alphanumeric, '-', or '_'.
+        let stem = name.trim_end_matches(".md");
+        assert!(
+            stem.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+            "slug contains unexpected char: {name:?}"
+        );
     }
 }
