@@ -174,7 +174,10 @@ fn select_candidates(
             let abs = repo.root().join(&rel_path);
             let content = match std::fs::read_to_string(&abs) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("warn: skip {:?}: {e}", abs);
+                    continue;
+                }
             };
             candidates.push(Candidate {
                 file_id,
@@ -267,7 +270,13 @@ fn main() -> anyhow::Result<()> {
             let selected = select_candidates(&repo, &db, &task, budget, no_embed)?;
 
             // Recent diff, then write the bundle to disk.
-            let diff_summary = repo.recent_diff(diff_commits).unwrap_or_default();
+            let diff_summary = match repo.recent_diff(diff_commits) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("warn: recent_diff failed ({e}); omitting diff from bundle");
+                    String::new()
+                }
+            };
             let out_path = PathBuf::from(&out);
             let used: usize = selected.iter().map(|c| c.tokens()).sum();
             write_bundle(&task, budget, &selected, &diff_summary, &out_path, explain)?;
