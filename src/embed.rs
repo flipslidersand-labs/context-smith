@@ -263,7 +263,7 @@ pub fn fuse_seeds(
 #[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     url: String,
-    api_key: Option<String>,
+    api_key: Option<zeroize::Zeroizing<String>>,
     collection: String,
     /// Read timeout applied to every HTTP request.
     timeout: std::time::Duration,
@@ -290,7 +290,9 @@ impl RemoteEmbedder {
             .unwrap_or(DEFAULT_READ_TIMEOUT_SECS);
         Some(RemoteEmbedder {
             url: url.trim_end_matches('/').to_string(),
-            api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+            api_key: std::env::var("EMBEDDING_API_KEY")
+                .ok()
+                .map(zeroize::Zeroizing::new),
             collection: std::env::var("EMBEDDING_COLLECTION")
                 .unwrap_or_else(|_| "context-smith".to_string()),
             timeout: std::time::Duration::from_secs(timeout_secs),
@@ -328,7 +330,7 @@ impl Embedder for RemoteEmbedder {
             let resp: EmbedResponse = loop {
                 let mut req = agent.post(&format!("{}/embed/batch", self.url));
                 if let Some(key) = &self.api_key {
-                    req = req.set("X-API-Key", key);
+                    req = req.set("X-API-Key", key.as_str());
                 }
                 match req.send_json(body.clone()) {
                     Ok(r) => match r.into_json::<EmbedResponse>() {
