@@ -274,7 +274,7 @@ pub fn fuse_seeds(
 /// `{"vectors": [[..], ..], "dim", "model", ...}`. Auth via `X-API-Key`.
 ///
 /// Configure via env (aligned with the memory-ingest / search-engine ecosystem):
-///   - `EMBEDDING_SVC_URL`     (required, e.g. http://192.0.2.10:9092)
+///   - `EMBEDDING_SVC_URL`     (required, e.g. http://embedding-svc.local:9092)
 ///   - `EMBEDDING_API_KEY`     (optional, sent as `X-API-Key`)
 ///   - `EMBEDDING_COLLECTION`  (optional, default `context-smith`; must be a
 ///     collection registered on the service)
