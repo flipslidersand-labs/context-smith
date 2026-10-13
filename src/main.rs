@@ -32,6 +32,7 @@ use context_smith::GitRepo;
 #[derive(Parser)]
 #[command(
     name = "contextsmith",
+    version,
     about = "AI context compiler for Git repositories"
 )]
 struct Cli {
