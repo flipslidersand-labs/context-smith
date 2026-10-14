@@ -25,6 +25,8 @@ jobs:
     uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@main
     with:
       coverage-threshold: 75
+      # linux-general runner には OpenSSL 開発ヘッダが無い (openssl-sys のビルドに必要)
+      system-deps: libssl-dev pkg-config
 
   # reusable は feature 切替を渡せないため、system SQLite 構成だけローカルに残す
   test-no-default:
@@ -41,8 +43,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install system SQLite
-        run: sudo apt-get install -y libsqlite3-dev
+      - name: Install system SQLite / OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev libssl-dev pkg-config
 
       - name: Test (no-default-features)
         run: cargo test --all --no-default-features
