@@ -17,6 +17,8 @@ const W_BODY: f64 = 1.0;
 /// Additionally, FTS5 boolean keywords (AND, OR, NOT, NEAR) are recognised only in
 /// uppercase; downcasing them neutralises their operator role so they are treated as
 /// plain search terms instead of query syntax.
+/// Terms are joined with an explicit `OR` (FTS5's implicit AND returned no files for
+/// multi-word tasks); BM25 ranks files matching more terms higher.
 /// Returns an empty string (which callers should reject before issuing MATCH) if the
 /// result contains no non-whitespace characters.
 pub(crate) fn sanitize_fts_query(query: &str) -> String {
@@ -28,7 +30,7 @@ pub(crate) fn sanitize_fts_query(query: &str) -> String {
             other => other.to_string(),
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" OR ")
 }
 
 /// Populate fts_path, fts_symbols and fts_body inside a single transaction.
@@ -195,41 +197,32 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_joins_terms_with_or() {
+        assert_eq!(sanitize_fts_query("decoder error"), "decoder OR error");
+    }
+
+    #[test]
     fn sanitize_plain_word_unchanged() {
         assert_eq!(sanitize_fts_query("hello").trim(), "hello");
     }
 
     #[test]
     fn sanitize_downcases_fts5_boolean_keywords() {
-        // AND/OR/NOT/NEAR must be lowercased so FTS5 treats them as plain terms
-        let result = sanitize_fts_query("authentication OR 1=1");
-        assert!(
-            !result.contains("OR"),
-            "OR should be downcased, got: {result}"
+        // User-supplied AND/OR/NOT/NEAR must become plain lowercase terms; the only
+        // uppercase `OR` left is the joiner between terms.
+        let terms = |q: &str| -> Vec<String> {
+            sanitize_fts_query(q)
+                .split(" OR ")
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            terms("authentication OR 1=1"),
+            ["authentication", "or", "1=1"]
         );
-        assert!(
-            result.contains("or"),
-            "OR should become 'or', got: {result}"
-        );
-
-        let result = sanitize_fts_query("foo AND bar");
-        assert!(
-            !result.contains("AND"),
-            "AND should be downcased, got: {result}"
-        );
-
-        let result = sanitize_fts_query("foo NOT bar");
-        assert!(
-            !result.contains("NOT"),
-            "NOT should be downcased, got: {result}"
-        );
-
-        let result = sanitize_fts_query("NEAR(foo bar)");
-        // parens are stripped, NEAR is lowercased
-        assert!(
-            !result.contains("NEAR"),
-            "NEAR should be downcased, got: {result}"
-        );
+        assert_eq!(terms("foo AND bar"), ["foo", "and", "bar"]);
+        assert_eq!(terms("foo NOT bar"), ["foo", "not", "bar"]);
+        assert_eq!(terms("NEAR(foo bar)"), ["near", "foo", "bar"]);
     }
 
     #[test]
