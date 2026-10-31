@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::tokenizer::{tokenize_code, tokenize_path};
@@ -45,6 +45,61 @@ pub(crate) fn sanitize_fts_query(query: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+/// Upper bound on distinct terms in one MATCH. With a plain OR-join a long task (an issue
+/// title + body) is dominated by common words, so the files the task is really about drop
+/// out of the top results (#135: recall 0.00 on 302-file axum with title+body tasks).
+pub(crate) const MAX_QUERY_TERMS: usize = 8;
+
+/// Number of (file, table) rows matching `term` across the three FTS tables — a cheap
+/// document-frequency proxy. `term` must be a sanitized bareword.
+fn term_doc_freq(conn: &Connection, term: &str) -> Result<i64> {
+    let mut total = 0;
+    for table in ["fts_path", "fts_symbols", "fts_body"] {
+        total += conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
+            params![term],
+            |row| row.get::<_, i64>(0),
+        )?;
+    }
+    Ok(total)
+}
+
+/// Reduce a sanitized `a OR b OR ...` query to its `k` rarest terms (lowest document
+/// frequency; ties broken by longer term, then alphabetically, so the result is stable).
+/// Duplicates are folded case-insensitively and terms that match nothing are dropped.
+/// Queries with at most `k` distinct terms are returned unchanged.
+pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Result<String> {
+    let mut seen = HashSet::new();
+    let terms: Vec<&str> = sanitized
+        .split(" OR ")
+        .filter(|t| seen.insert(t.to_lowercase()))
+        .collect();
+    if terms.len() <= k {
+        return Ok(sanitized.to_string());
+    }
+    let mut scored: Vec<(i64, &str)> = Vec::with_capacity(terms.len());
+    for t in terms {
+        let df = term_doc_freq(conn, t)?;
+        if df > 0 {
+            scored.push((df, t));
+        }
+    }
+    if scored.is_empty() {
+        return Ok(sanitized.to_string());
+    }
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.len().cmp(&a.1.len()))
+            .then(a.1.cmp(b.1))
+    });
+    Ok(scored
+        .into_iter()
+        .take(k)
+        .map(|(_, t)| t)
+        .collect::<Vec<_>>()
+        .join(" OR "))
 }
 
 /// Populate fts_path, fts_symbols and fts_body inside a single transaction.
@@ -136,6 +191,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
             "task string is empty or contains only punctuation — please provide at least one word"
         );
     }
+    let sanitized = rarest_terms(conn, &sanitized, MAX_QUERY_TERMS)?;
 
     // Each sub-query: normalize raw BM25 rank to [0,1] then apply the weight.
     // `rank` in FTS5 is ≤ 0 (more negative = better); dividing by MIN(rank) (the most
@@ -149,18 +205,20 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     //
     // Sub-queries are wrapped in derived tables so LIMIT applies before UNION ALL,
     // preventing intermediate memory explosion.
+    // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
+    // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
     let sub_limit = (top_n * 3) as i64;
     let mut stmt = conn.prepare(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
-             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
-             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank LIMIT ?5)
          )
          GROUP BY file_id
          ORDER BY total DESC
@@ -294,6 +352,75 @@ mod tests {
             let res = super::search_bm25(&conn, &task, 10);
             proptest::prop_assert_eq!(res.is_err(), blank, "task {:?}: {:?}", task, res.err());
         }
+    }
+
+    fn fts_conn(docs: &[(i64, &str)]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
+             CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
+             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);",
+        )
+        .unwrap();
+        for (id, text) in docs {
+            conn.execute(
+                "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
+                rusqlite::params![id, text],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// #135: a long task is dominated by common words under a plain OR-join. Only the
+    /// rarest MAX_QUERY_TERMS terms may be queried, so the file with the rare term ranks.
+    #[test]
+    fn rarest_terms_keeps_rare_terms_of_a_long_task() {
+        use super::{rarest_terms, MAX_QUERY_TERMS};
+        let mut docs: Vec<(i64, String)> = (1..=30)
+            .map(|i| {
+                (
+                    i,
+                    "the common words appear in every single file here".to_string(),
+                )
+            })
+            .collect();
+        docs.push((99, "zanzibar handler".to_string()));
+        let refs: Vec<(i64, &str)> = docs.iter().map(|(i, t)| (*i, t.as_str())).collect();
+        let conn = fts_conn(&refs);
+        let task = "the common words appear in every single file here and zanzibar handler too";
+        let kept = rarest_terms(&conn, &super::sanitize_fts_query(task), MAX_QUERY_TERMS).unwrap();
+        let n = kept.split(" OR ").count();
+        assert!(n <= MAX_QUERY_TERMS, "kept {n} terms: {kept}");
+        assert!(kept.contains("zanzibar"), "rare term dropped: {kept}");
+        assert!(kept.contains("handler"), "rare term dropped: {kept}");
+        let hits = super::search_bm25(&conn, task, 5).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.0),
+            Some(99),
+            "rare-term file must rank first: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn rarest_terms_leaves_short_tasks_unchanged() {
+        use super::{rarest_terms, MAX_QUERY_TERMS};
+        let conn = fts_conn(&[(1, "alpha beta gamma")]);
+        let q = super::sanitize_fts_query("alpha beta gamma");
+        assert_eq!(rarest_terms(&conn, &q, MAX_QUERY_TERMS).unwrap(), q);
+    }
+
+    #[test]
+    fn rarest_terms_is_deterministic_and_dedups() {
+        use super::rarest_terms;
+        let conn = fts_conn(&[(1, "aa bb cc dd ee ff gg hh ii jj")]);
+        let q = super::sanitize_fts_query("aa AA bb cc dd ee ff gg hh ii jj");
+        let a = rarest_terms(&conn, &q, 4).unwrap();
+        let b = rarest_terms(&conn, &q, 4).unwrap();
+        assert_eq!(a, b);
+        let lower: Vec<String> = a.split(" OR ").map(str::to_lowercase).collect();
+        let uniq: std::collections::HashSet<_> = lower.iter().collect();
+        assert_eq!(lower.len(), uniq.len(), "duplicate terms kept: {a}");
     }
 
     #[test]
