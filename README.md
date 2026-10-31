@@ -7,15 +7,17 @@
 
 **English**: this page | **日本語**: [README.ja.md](./README.ja.md)
 
-**AI context compiler** — a CLI that selects only the code relevant to your task from a Git repository and emits a context bundle that fits within a token budget.
+**AI context compiler** — a CLI that ranks the files of a Git repository against your task description (BM25 + a dependency graph) and emits a context bundle that fits within a token budget.
 
 ```
-Feeding a whole large repository → irrelevant code degrades the AI's accuracy
+Feeding a whole large repository → many tokens, most of them unrelated to the task
               ↓
-context-smith auto-selects relevant files via BM25 + a dependency graph
+context-smith ranks files via BM25 + a dependency graph
               ↓
-Emits a bundle that fits the token budget → improves both accuracy and cost
+Emits a bundle that fits the token budget → far fewer tokens than the whole repository
 ```
+
+Whether the bundle improves an AI's answers has **not** been measured. How well the ranking finds the right files is measured below (see [Accuracy](#accuracy)).
 
 ## Installation
 
@@ -118,13 +120,14 @@ contextsmith index          contextsmith build
  ├── symbols      — function/struct/class names, line numbers, snippets
  ├── deps         — inter-file import dependency graph
  ├── meta         — repo_root, indexed_at
+ ├── fts_path     — FTS5 (tokenized file paths, BM25 weight ×3)
  ├── fts_symbols  — FTS5 (pre-tokenized, BM25 weight ×2)
  └── fts_body     — FTS5 (file bodies, BM25 weight ×1)
 ```
 
 ### Scoring pipeline
 
-1. **BM25 search** — search `fts_symbols` (weight ×2) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds.
+1. **BM25 search** — search `fts_path` (weight ×3), `fts_symbols` (weight ×2) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds. A task with more than 8 distinct words is first reduced to its 8 rarest words (fewest files containing them), so common words do not drown out the specific ones.
 2. **Dependency BFS** — propagate scores from seed files via bidirectional BFS (depth=2), decaying ×0.5 per hop.
 3. **Greedy allocation** — accumulate token counts in descending score order, stopping once the budget is exceeded.
 4. **Bundle output** — expand the selected files into Markdown alongside the recent Git diff.
@@ -141,6 +144,18 @@ contextsmith index          contextsmith build
 
 TypeScript targets `.ts` / `.tsx` / `.mts` / `.cts`; JavaScript targets `.js` / `.jsx` / `.mjs` / `.cjs`.
 Bare imports (node_modules packages such as `react`) are excluded from the dependency graph.
+
+## Accuracy
+
+Measured on merged fix PRs of three public Rust repositories. Task = the title of the issue the PR closed; truth = the `src/**/*.rs` files the PR changed; the index is built fresh at the PR's **base** commit (no leakage from the fix). A file counts as found only if at least 50% of its content is in the bundle. The baseline is a naive keyword match: rank files by how many task words they contain (path matches weighted ×3) and fill the same token budget. Recall, averaged over tasks:
+
+| repo (tasks) | budget | context-smith | naive keyword match |
+|---|---|---|---|
+| axum (54) | 4k / 8k / 16k | 0.23 / 0.33 / 0.45 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.08 / 0.15 / 0.28 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.08 / 0.08 / 0.10 | 0.18 / 0.24 / 0.42 |
+
+In these settings context-smith does **not** beat naive keyword matching, except at the smallest budget on axum. On bat, 88% of the right files are retrieved but ranked too low to fit the budget. Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. Details, scripts and open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
 
 ## Status
 
