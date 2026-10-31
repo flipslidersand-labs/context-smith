@@ -7,10 +7,11 @@ use crate::tokenizer::{tokenize_code, tokenize_path};
 
 // BM25 signal weights (higher = stronger signal).
 // path: file-name/directory match is the strongest localization cue.
-// symbols: function/type names match the task vocabulary directly.
+// symbols: function/type names match the task vocabulary directly. Kept low (0.5): symbol
+//   matches are plentiful and noisy; at the old 2.0 they pushed the right file down (#135).
 // body: full-text fallback, broadest but noisiest.
 const W_PATH: f64 = 3.0;
-const W_SYMBOLS: f64 = 2.0;
+const W_SYMBOLS: f64 = 0.5;
 const W_BODY: f64 = 1.0;
 
 /// Keep only bareword characters (alphanumerics and `_`); everything else could be
@@ -175,7 +176,7 @@ pub fn populate_fts_with_paths(
     }
 }
 
-/// BM25 search across fts_path (×3), fts_symbols (×2) and fts_body (×1).
+/// BM25 search across fts_path (×3), fts_symbols (×0.5, best match per file) and fts_body (×1).
 ///
 /// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MAX(rank)` so
 /// that the absolute magnitude difference between small path tables and large body tables
@@ -205,6 +206,9 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     //
     // Sub-queries are wrapped in derived tables so LIMIT applies before UNION ALL,
     // preventing intermediate memory explosion.
+    // fts_symbols has one row per symbol while fts_path / fts_body have one row per file, so its
+    // rows are collapsed to the best match per file (`MIN(rank)`); summing them let a file with many
+    // symbols outrank the file that matches the task best (#135).
     // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
     // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
     let sub_limit = (top_n * 3) as i64;
@@ -215,7 +219,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
              FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 ORDER BY rank LIMIT ?5)
+             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
              FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank LIMIT ?5)
@@ -399,6 +403,43 @@ mod tests {
             hits.first().map(|h| h.0),
             Some(99),
             "rare-term file must rank first: {hits:?}"
+        );
+    }
+
+    /// #135: `fts_symbols` holds one row per symbol, so summing per-row scores per file made a
+    /// file with many symbols that merely contain one common word outrank the file whose single
+    /// symbol matches the task's specific terms. Scores must be aggregated per file.
+    #[test]
+    fn many_symbol_rows_do_not_outrank_the_better_matching_file() {
+        let conn = fts_conn(&[]);
+        // 100 unrelated files so that "handler" is moderately rare (a word present in every
+        // document has ~zero BM25 weight and would never inflate a sum)
+        for id in 10..110 {
+            conn.execute(
+                "INSERT INTO fts_symbols (file_id, name) VALUES (?1, 'unrelated')",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        // file 1: 40 symbols, each containing the word "handler"
+        for i in 0..40 {
+            conn.execute(
+                "INSERT INTO fts_symbols (file_id, name) VALUES (1, ?1)",
+                rusqlite::params![format!("handler{i} handler")],
+            )
+            .unwrap();
+        }
+        // file 2: one symbol that matches both the specific and the common term
+        conn.execute(
+            "INSERT INTO fts_symbols (file_id, name) VALUES (2, 'zanzibar handler')",
+            [],
+        )
+        .unwrap();
+        let hits = super::search_bm25(&conn, "zanzibar handler", 5).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.0),
+            Some(2),
+            "file with one precise symbol match must rank first: {hits:?}"
         );
     }
 
