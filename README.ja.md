@@ -145,11 +145,11 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 
 | リポ(タスク数) | 予算 | context-smith | 素朴な単語一致 |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.23 / 0.33 / 0.45 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.08 / 0.15 / 0.28 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.08 / 0.08 / 0.10 | 0.18 / 0.24 / 0.42 |
+| axum (54) | 4k / 8k / 16k | 0.22 / 0.40 / 0.46 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.13 / 0.28 / 0.38 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.13 / 0.30 / 0.41 | 0.18 / 0.24 / 0.42 |
 
-この条件では、axum の最小予算を除き、context-smith は素朴な単語一致に**勝てていません**。bat では正しいファイルの 88% を検索で拾えているが、順位が低く予算に入らない。限界: Rust リポジトリ 3 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング、他の言語は未測定。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
+context-smith は、clap と bat の 8k〜16k では素朴な単語一致と**同程度**(1 タスクは約 0.02 なので、0.01 の差は誤差)、axum の 8k・16k と clap・bat の 4k では下回り、上回るのは axum の 4k だけです。素朴な単語一致には**勝てていません**。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分と順位づけの修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143))が入っていません。限界: Rust リポジトリ 3 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング、他の言語は未測定。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
 
 ## ステータス
 
