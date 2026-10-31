@@ -242,7 +242,9 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_fts_query;
+    use super::*;
+    use crate::index_builder::IndexDb;
+    use tempfile::TempDir;
 
     #[test]
     fn sanitize_removes_fts5_operators() {
@@ -433,5 +435,222 @@ mod tests {
         );
         assert!(result.contains("Oregon"), "got: {result}");
         assert!(result.contains("Notify"), "got: {result}");
+    }
+
+    // ---- populate_fts_with_paths / search_bm25 ----
+
+    struct Fixture {
+        db: IndexDb,
+        dir: TempDir,
+        rel: HashMap<i64, PathBuf>,
+        abs: HashMap<i64, PathBuf>,
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Files: auth/login.rs (symbol authenticate_user), db/store.rs (symbol open_pool).
+    fn fixture() -> Fixture {
+        let db = IndexDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        let dir = TempDir::new().unwrap();
+        let mut rel = HashMap::new();
+        let mut abs = HashMap::new();
+        let specs = [
+            (
+                "auth/login.rs",
+                "authenticate_user",
+                "fn authenticate_user() { check password }",
+            ),
+            (
+                "db/store.rs",
+                "open_pool",
+                "fn open_pool() { connect database }",
+            ),
+        ];
+        for (path, sym, body) in specs {
+            let id: i64 = db
+                .upsert_file(std::path::Path::new(path), crate::Language::Rust, "sha", 1)
+                .unwrap()
+                .0;
+            db.connection()
+                .execute(
+                    "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, 'function', 1, '')",
+                    params![id, sym],
+                )
+                .unwrap();
+            let abs_path = dir.path().join(path.replace('/', "_"));
+            std::fs::write(&abs_path, body).unwrap();
+            rel.insert(id, PathBuf::from(path));
+            abs.insert(id, abs_path);
+        }
+        db.connection()
+            .execute(
+                "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (1, 'use std::io', 'import', 1, '')",
+                [],
+            )
+            .unwrap();
+        Fixture { db, dir, rel, abs }
+    }
+
+    #[test]
+    fn populate_fills_all_three_fts_tables() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let c = f.db.connection();
+        assert_eq!(count(c, "fts_path"), 2);
+        // import symbols are excluded
+        assert_eq!(count(c, "fts_symbols"), 2);
+        assert_eq!(count(c, "fts_body"), 2);
+    }
+
+    #[test]
+    fn populate_twice_does_not_duplicate_rows() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert_eq!(count(f.db.connection(), "fts_path"), 2);
+        assert_eq!(count(f.db.connection(), "fts_body"), 2);
+    }
+
+    #[test]
+    fn populate_with_empty_maps_clears_fts() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(count(f.db.connection(), "fts_path"), 0);
+        assert_eq!(count(f.db.connection(), "fts_body"), 0);
+    }
+
+    #[test]
+    fn populate_skips_unreadable_body_but_keeps_rest() {
+        let mut f = fixture();
+        let id = *f.abs.keys().next().unwrap();
+        f.abs.insert(id, f.dir.path().join("does_not_exist.rs"));
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert_eq!(count(f.db.connection(), "fts_body"), 1);
+        assert_eq!(count(f.db.connection(), "fts_path"), 2);
+    }
+
+    #[test]
+    fn populate_truncates_large_body_on_char_boundary() {
+        let f = fixture();
+        let id = *f.abs.keys().next().unwrap();
+        std::fs::write(&f.abs[&id], "あ".repeat(200_000)).unwrap();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let bytes: i64 =
+            f.db.connection()
+                .query_row(
+                    "SELECT length(CAST(content AS BLOB)) FROM fts_body WHERE file_id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert!(bytes <= 512 * 1024 && bytes > 512 * 1024 - 3, "{bytes}");
+    }
+
+    #[test]
+    fn populate_error_rolls_back_transaction() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        f.db.connection()
+            .execute_batch("DROP TABLE fts_symbols")
+            .unwrap();
+        let res = populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs);
+        assert!(res.is_err());
+        // Transaction must have been closed and earlier data restored.
+        assert!(f.db.connection().is_autocommit());
+        assert_eq!(count(f.db.connection(), "fts_path"), 2);
+    }
+
+    #[test]
+    fn search_finds_file_by_path_term() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let hits = search_bm25(f.db.connection(), "login", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        let login_id = *f
+            .rel
+            .iter()
+            .find(|(_, p)| p.ends_with("login.rs"))
+            .unwrap()
+            .0;
+        assert_eq!(hits[0].0, login_id);
+        assert!(hits[0].1 > 0.0);
+    }
+
+    #[test]
+    fn search_finds_file_by_symbol_and_body_terms() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let store_id = *f
+            .rel
+            .iter()
+            .find(|(_, p)| p.ends_with("store.rs"))
+            .unwrap()
+            .0;
+        let by_symbol = search_bm25(f.db.connection(), "pool", 5).unwrap();
+        assert_eq!(by_symbol[0].0, store_id);
+        let by_body = search_bm25(f.db.connection(), "database", 5).unwrap();
+        assert_eq!(by_body[0].0, store_id);
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert!(search_bm25(f.db.connection(), "zzzzqqqq", 5)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn search_respects_top_n() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        // "fn" appears in both bodies
+        let all = search_bm25(f.db.connection(), "fn", 10).unwrap();
+        assert_eq!(all.len(), 2);
+        let one = search_bm25(f.db.connection(), "fn", 1).unwrap();
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn search_results_sorted_by_score_descending() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let hits = search_bm25(f.db.connection(), "fn authenticate", 10).unwrap();
+        assert!(hits.windows(2).all(|w| w[0].1 >= w[1].1), "{hits:?}");
+    }
+
+    #[test]
+    fn search_empty_query_is_error() {
+        let f = fixture();
+        let err = search_bm25(f.db.connection(), "", 5).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn search_punctuation_only_query_is_error() {
+        let f = fixture();
+        assert!(search_bm25(f.db.connection(), "(*) - \"", 5).is_err());
+    }
+
+    #[test]
+    fn search_with_fts_operators_in_query_does_not_error() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert!(search_bm25(f.db.connection(), "login OR (x) AND \"y\" *", 5).is_ok());
+    }
+
+    #[test]
+    fn search_on_empty_index_returns_empty() {
+        let db = IndexDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        assert!(search_bm25(db.connection(), "anything", 3)
+            .unwrap()
+            .is_empty());
     }
 }
