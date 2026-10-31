@@ -121,13 +121,13 @@ contextsmith index          contextsmith build
  ├── deps         — inter-file import dependency graph
  ├── meta         — repo_root, indexed_at
  ├── fts_path     — FTS5 (tokenized file paths, BM25 weight ×3)
- ├── fts_symbols  — FTS5 (pre-tokenized, BM25 weight ×2)
+ ├── fts_symbols  — FTS5 (pre-tokenized, one row per symbol, BM25 weight ×0.5)
  └── fts_body     — FTS5 (file bodies, BM25 weight ×1)
 ```
 
 ### Scoring pipeline
 
-1. **BM25 search** — search `fts_path` (weight ×3), `fts_symbols` (weight ×2) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds. A task with more than 8 distinct words is first reduced to its 8 rarest words (fewest files containing them), so common words do not drown out the specific ones.
+1. **BM25 search** — search `fts_path` (weight ×3), `fts_symbols` (weight ×0.5, best match per file) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds. A task with more than 8 distinct words is first reduced to its 8 rarest words (fewest files containing them), so common words do not drown out the specific ones.
 2. **Dependency BFS** — propagate scores from seed files via bidirectional BFS (depth=2), decaying ×0.5 per hop.
 3. **Greedy allocation** — accumulate token counts in descending score order, stopping once the budget is exceeded.
 4. **Bundle output** — expand the selected files into Markdown alongside the recent Git diff.
