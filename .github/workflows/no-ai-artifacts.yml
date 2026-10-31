@@ -1,0 +1,19 @@
+name: No AI Artifacts
+
+# AI ツールの作業副産物(.claude/ 配下、.mcp.json)が追跡されていないかを検査する。
+# 共通ジョブは qa-workflows の no-ai-artifacts.yml(SHA 固定)。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  no-ai-artifacts:
+    permissions:
+      contents: read
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/no-ai-artifacts.yml@d33890a74113f8ba8d8841a55b290007f72852ef
