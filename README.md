@@ -155,7 +155,7 @@ Measured on merged fix PRs of three public Rust repositories. Task = the title o
 | clap (60) | 4k / 8k / 16k | 0.08 / 0.15 / 0.28 | 0.16 / 0.27 / 0.38 |
 | bat (56) | 4k / 8k / 16k | 0.08 / 0.08 / 0.10 | 0.18 / 0.24 / 0.42 |
 
-In these settings context-smith does **not** beat naive keyword matching, except at the smallest budget on axum. On bat, 88% of the right files are retrieved but ranked too low to fit the budget. Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. Details, scripts and open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
+In these settings context-smith does **not** beat naive keyword matching, except at the smallest budget on axum. On bat, 88% of the right files are retrieved but ranked too low to fit the budget. Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. To reproduce these numbers (scripts, fixed candidate sets, metric definitions): [bench/](./bench/README.md). Open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
 
 ## Status
 
