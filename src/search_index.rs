@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::tokenizer::{tokenize_code, tokenize_path};
@@ -13,14 +13,30 @@ const W_PATH: f64 = 3.0;
 const W_SYMBOLS: f64 = 2.0;
 const W_BODY: f64 = 1.0;
 
-/// Strip FTS5 operator characters that would cause a syntax error in MATCH queries.
+/// Keep only bareword characters (alphanumerics and `_`); everything else could be
+/// FTS5 query syntax and would cause a syntax error in MATCH queries.
 /// Additionally, FTS5 boolean keywords (AND, OR, NOT, NEAR) are recognised only in
 /// uppercase; downcasing them neutralises their operator role so they are treated as
 /// plain search terms instead of query syntax.
+/// Terms are joined with an explicit `OR` (FTS5's implicit AND returned no files for
+/// multi-word tasks); BM25 ranks files matching more terms higher.
 /// Returns an empty string (which callers should reject before issuing MATCH) if the
 /// result contains no non-whitespace characters.
 pub(crate) fn sanitize_fts_query(query: &str) -> String {
-    let stripped = query.replace(['(', ')', '"', '*', '-', ':', '^', '{', '}', '~', '!'], " ");
+    // Allowlist, not denylist: keep only characters that are plain FTS5 barewords
+    // (alphanumerics, `_`). Every other character is potential query syntax (`=`, `.`,
+    // `#`, `+`, `<`, ...); enumerating them one by one kept leaking new ones (#12, #48,
+    // #79, #125). The unicode61 tokenizer splits on these anyway, so matching is unchanged.
+    let stripped: String = query
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
     stripped
         .split_whitespace()
         .map(|w| match w {
@@ -28,7 +44,62 @@ pub(crate) fn sanitize_fts_query(query: &str) -> String {
             other => other.to_string(),
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" OR ")
+}
+
+/// Upper bound on distinct terms in one MATCH. With a plain OR-join a long task (an issue
+/// title + body) is dominated by common words, so the files the task is really about drop
+/// out of the top results (#135: recall 0.00 on 302-file axum with title+body tasks).
+pub(crate) const MAX_QUERY_TERMS: usize = 8;
+
+/// Number of (file, table) rows matching `term` across the three FTS tables — a cheap
+/// document-frequency proxy. `term` must be a sanitized bareword.
+fn term_doc_freq(conn: &Connection, term: &str) -> Result<i64> {
+    let mut total = 0;
+    for table in ["fts_path", "fts_symbols", "fts_body"] {
+        total += conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
+            params![term],
+            |row| row.get::<_, i64>(0),
+        )?;
+    }
+    Ok(total)
+}
+
+/// Reduce a sanitized `a OR b OR ...` query to its `k` rarest terms (lowest document
+/// frequency; ties broken by longer term, then alphabetically, so the result is stable).
+/// Duplicates are folded case-insensitively and terms that match nothing are dropped.
+/// Queries with at most `k` distinct terms are returned unchanged.
+pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Result<String> {
+    let mut seen = HashSet::new();
+    let terms: Vec<&str> = sanitized
+        .split(" OR ")
+        .filter(|t| seen.insert(t.to_lowercase()))
+        .collect();
+    if terms.len() <= k {
+        return Ok(sanitized.to_string());
+    }
+    let mut scored: Vec<(i64, &str)> = Vec::with_capacity(terms.len());
+    for t in terms {
+        let df = term_doc_freq(conn, t)?;
+        if df > 0 {
+            scored.push((df, t));
+        }
+    }
+    if scored.is_empty() {
+        return Ok(sanitized.to_string());
+    }
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.len().cmp(&a.1.len()))
+            .then(a.1.cmp(b.1))
+    });
+    Ok(scored
+        .into_iter()
+        .take(k)
+        .map(|(_, t)| t)
+        .collect::<Vec<_>>()
+        .join(" OR "))
 }
 
 /// Populate fts_path, fts_symbols and fts_body inside a single transaction.
@@ -120,6 +191,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
             "task string is empty or contains only punctuation — please provide at least one word"
         );
     }
+    let sanitized = rarest_terms(conn, &sanitized, MAX_QUERY_TERMS)?;
 
     // Each sub-query: normalize raw BM25 rank to [0,1] then apply the weight.
     // `rank` in FTS5 is ≤ 0 (more negative = better); dividing by MIN(rank) (the most
@@ -133,18 +205,20 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     //
     // Sub-queries are wrapped in derived tables so LIMIT applies before UNION ALL,
     // preventing intermediate memory explosion.
+    // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
+    // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
     let sub_limit = (top_n * 3) as i64;
     let mut stmt = conn.prepare(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
-             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
-             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank LIMIT ?5)
          )
          GROUP BY file_id
          ORDER BY total DESC
@@ -195,41 +269,158 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_joins_terms_with_or() {
+        assert_eq!(sanitize_fts_query("decoder error"), "decoder OR error");
+    }
+
+    #[test]
     fn sanitize_plain_word_unchanged() {
         assert_eq!(sanitize_fts_query("hello").trim(), "hello");
     }
 
     #[test]
     fn sanitize_downcases_fts5_boolean_keywords() {
-        // AND/OR/NOT/NEAR must be lowercased so FTS5 treats them as plain terms
-        let result = sanitize_fts_query("authentication OR 1=1");
-        assert!(
-            !result.contains("OR"),
-            "OR should be downcased, got: {result}"
+        // User-supplied AND/OR/NOT/NEAR must become plain lowercase terms; the only
+        // uppercase `OR` left is the joiner between terms.
+        let terms = |q: &str| -> Vec<String> {
+            sanitize_fts_query(q)
+                .split(" OR ")
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            terms("authentication OR 1=1"),
+            ["authentication", "or", "1", "1"]
         );
-        assert!(
-            result.contains("or"),
-            "OR should become 'or', got: {result}"
-        );
+        assert_eq!(terms("foo AND bar"), ["foo", "and", "bar"]);
+        assert_eq!(terms("foo NOT bar"), ["foo", "not", "bar"]);
+        assert_eq!(terms("NEAR(foo bar)"), ["near", "foo", "bar"]);
+    }
 
-        let result = sanitize_fts_query("foo AND bar");
-        assert!(
-            !result.contains("AND"),
-            "AND should be downcased, got: {result}"
-        );
+    /// Regression for #125 (and the #12/#48/#79 family): a denylist of operator
+    /// characters kept missing new ones (`=`, `.`, ...). Run every printable ASCII
+    /// punctuation char — alone and inside a realistic task — through a real FTS5
+    /// MATCH so any character FTS5 treats as syntax is caught, not just known ones.
+    #[test]
+    fn search_bm25_never_errors_on_ascii_punctuation() {
+        use super::search_bm25;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
+             CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
+             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+             INSERT INTO fts_body (file_id, content) VALUES (1, 'login 1 v0 4 0 auth');",
+        )
+        .unwrap();
 
-        let result = sanitize_fts_query("foo NOT bar");
-        assert!(
-            !result.contains("NOT"),
-            "NOT should be downcased, got: {result}"
-        );
+        for c in (0x21u8..=0x7e)
+            .map(char::from)
+            .filter(|c| !c.is_alphanumeric())
+        {
+            for task in [
+                format!("login {c} auth"),
+                format!("v0{c}4{c}0"),
+                format!("{c}{c}x{c}"),
+            ] {
+                if super::sanitize_fts_query(&task).trim().is_empty() {
+                    continue; // blank is rejected earlier with a clear message
+                }
+                search_bm25(&conn, &task, 10)
+                    .unwrap_or_else(|e| panic!("task {task:?} (char {c:?}) errored: {e}"));
+            }
+        }
+        // the exact reports
+        assert!(search_bm25(&conn, "login 1=1", 10).is_ok());
+        assert!(search_bm25(&conn, "feat: add dependency graph (v0.4.0)", 10).is_ok());
+    }
 
-        let result = sanitize_fts_query("NEAR(foo bar)");
-        // parens are stripped, NEAR is lowercased
-        assert!(
-            !result.contains("NEAR"),
-            "NEAR should be downcased, got: {result}"
+    proptest::proptest! {
+        /// Whatever the task string is (any Unicode, control chars, operators), the only
+        /// permitted failure is the explicit "blank after sanitizing" rejection — never
+        /// an FTS5 syntax error. Guards the whole input class, not known characters.
+        #[test]
+        fn search_bm25_only_fails_on_blank_task(task in proptest::prelude::any::<String>()) {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
+                 CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
+                 CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+                 INSERT INTO fts_body (file_id, content) VALUES (1, 'login auth v0 4 0');",
+            )
+            .unwrap();
+            let blank = super::sanitize_fts_query(&task).trim().is_empty();
+            let res = super::search_bm25(&conn, &task, 10);
+            proptest::prop_assert_eq!(res.is_err(), blank, "task {:?}: {:?}", task, res.err());
+        }
+    }
+
+    fn fts_conn(docs: &[(i64, &str)]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
+             CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
+             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);",
+        )
+        .unwrap();
+        for (id, text) in docs {
+            conn.execute(
+                "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
+                rusqlite::params![id, text],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// #135: a long task is dominated by common words under a plain OR-join. Only the
+    /// rarest MAX_QUERY_TERMS terms may be queried, so the file with the rare term ranks.
+    #[test]
+    fn rarest_terms_keeps_rare_terms_of_a_long_task() {
+        use super::{rarest_terms, MAX_QUERY_TERMS};
+        let mut docs: Vec<(i64, String)> = (1..=30)
+            .map(|i| {
+                (
+                    i,
+                    "the common words appear in every single file here".to_string(),
+                )
+            })
+            .collect();
+        docs.push((99, "zanzibar handler".to_string()));
+        let refs: Vec<(i64, &str)> = docs.iter().map(|(i, t)| (*i, t.as_str())).collect();
+        let conn = fts_conn(&refs);
+        let task = "the common words appear in every single file here and zanzibar handler too";
+        let kept = rarest_terms(&conn, &super::sanitize_fts_query(task), MAX_QUERY_TERMS).unwrap();
+        let n = kept.split(" OR ").count();
+        assert!(n <= MAX_QUERY_TERMS, "kept {n} terms: {kept}");
+        assert!(kept.contains("zanzibar"), "rare term dropped: {kept}");
+        assert!(kept.contains("handler"), "rare term dropped: {kept}");
+        let hits = super::search_bm25(&conn, task, 5).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.0),
+            Some(99),
+            "rare-term file must rank first: {hits:?}"
         );
+    }
+
+    #[test]
+    fn rarest_terms_leaves_short_tasks_unchanged() {
+        use super::{rarest_terms, MAX_QUERY_TERMS};
+        let conn = fts_conn(&[(1, "alpha beta gamma")]);
+        let q = super::sanitize_fts_query("alpha beta gamma");
+        assert_eq!(rarest_terms(&conn, &q, MAX_QUERY_TERMS).unwrap(), q);
+    }
+
+    #[test]
+    fn rarest_terms_is_deterministic_and_dedups() {
+        use super::rarest_terms;
+        let conn = fts_conn(&[(1, "aa bb cc dd ee ff gg hh ii jj")]);
+        let q = super::sanitize_fts_query("aa AA bb cc dd ee ff gg hh ii jj");
+        let a = rarest_terms(&conn, &q, 4).unwrap();
+        let b = rarest_terms(&conn, &q, 4).unwrap();
+        assert_eq!(a, b);
+        let lower: Vec<String> = a.split(" OR ").map(str::to_lowercase).collect();
+        let uniq: std::collections::HashSet<_> = lower.iter().collect();
+        assert_eq!(lower.len(), uniq.len(), "duplicate terms kept: {a}");
     }
 
     #[test]
