@@ -276,6 +276,26 @@ mod tests {
         assert!(search_bm25(&conn, "feat: add dependency graph (v0.4.0)", 10).is_ok());
     }
 
+    proptest::proptest! {
+        /// Whatever the task string is (any Unicode, control chars, operators), the only
+        /// permitted failure is the explicit "blank after sanitizing" rejection — never
+        /// an FTS5 syntax error. Guards the whole input class, not known characters.
+        #[test]
+        fn search_bm25_only_fails_on_blank_task(task in proptest::prelude::any::<String>()) {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
+                 CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
+                 CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+                 INSERT INTO fts_body (file_id, content) VALUES (1, 'login auth v0 4 0');",
+            )
+            .unwrap();
+            let blank = super::sanitize_fts_query(&task).trim().is_empty();
+            let res = super::search_bm25(&conn, &task, 10);
+            proptest::prop_assert_eq!(res.is_err(), blank, "task {:?}: {:?}", task, res.err());
+        }
+    }
+
     #[test]
     fn sanitize_preserves_mixed_case_non_keywords() {
         // Words that are not exactly AND/OR/NOT/NEAR should survive unchanged
