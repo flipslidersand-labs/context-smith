@@ -121,13 +121,13 @@ contextsmith index          contextsmith build
  ├── deps         — inter-file import dependency graph
  ├── meta         — repo_root, indexed_at
  ├── fts_path     — FTS5 (tokenized file paths, BM25 weight ×3)
- ├── fts_symbols  — FTS5 (pre-tokenized, BM25 weight ×2)
+ ├── fts_symbols  — FTS5 (pre-tokenized, one row per symbol, BM25 weight ×0.5)
  └── fts_body     — FTS5 (file bodies, BM25 weight ×1)
 ```
 
 ### Scoring pipeline
 
-1. **BM25 search** — search `fts_path` (weight ×3), `fts_symbols` (weight ×2) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds. A task with more than 8 distinct words is first reduced to its 8 rarest words (fewest files containing them), so common words do not drown out the specific ones.
+1. **BM25 search** — search `fts_path` (weight ×3), `fts_symbols` (weight ×0.5, best match per file) and `fts_body` (weight ×1) via UNION ALL against the task string, taking the top 20 as seeds. A task with more than 8 distinct words is first reduced to its 8 rarest words (fewest files containing them), so common words do not drown out the specific ones.
 2. **Dependency BFS** — propagate scores from seed files via bidirectional BFS (depth=2), decaying ×0.5 per hop.
 3. **Greedy allocation** — accumulate token counts in descending score order, stopping once the budget is exceeded.
 4. **Bundle output** — expand the selected files into Markdown alongside the recent Git diff.
@@ -151,11 +151,11 @@ Measured on merged fix PRs of three public Rust repositories. Task = the title o
 
 | repo (tasks) | budget | context-smith | naive keyword match |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.23 / 0.33 / 0.45 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.08 / 0.15 / 0.28 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.08 / 0.08 / 0.10 | 0.18 / 0.24 / 0.42 |
+| axum (54) | 4k / 8k / 16k | 0.22 / 0.40 / 0.46 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.13 / 0.28 / 0.38 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.13 / 0.30 / 0.41 | 0.18 / 0.24 / 0.42 |
 
-In these settings context-smith does **not** beat naive keyword matching, except at the smallest budget on axum. On bat, 88% of the right files are retrieved but ranked too low to fit the budget. Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. To reproduce these numbers (scripts, fixed candidate sets, metric definitions): [bench/](./bench/README.md). Open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
+context-smith is roughly **on par with** naive keyword matching on clap and bat at 8k-16k (one task is worth about 0.02, so a 0.01 gap is noise), behind it on axum at 8k and 16k and on clap and bat at 4k, and ahead only at 4k on axum. It does **not** beat the baseline. For scale: if the right files were known in advance, 87-99% of them would fit whole into 16k. These numbers are for the development version; the 0.4.0 release on crates.io predates the budget and ranking fixes ([#142](https://github.com/flipslidersand-labs/context-smith/pull/142), [#143](https://github.com/flipslidersand-labs/context-smith/pull/143)). Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. To reproduce these numbers (scripts, fixed candidate sets, metric definitions): [bench/](./bench/README.md). Open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
 
 ## Status
 
