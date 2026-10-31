@@ -40,13 +40,17 @@ Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, opti
 
 | repo (tasks) | budget | context-smith | naive keyword match |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.23 / 0.33 / 0.45 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.08 / 0.15 / 0.28 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.08 / 0.08 / 0.10 | 0.18 / 0.24 / 0.42 |
+| axum (54) | 4k / 8k / 16k | 0.22 / 0.40 / 0.46 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.13 / 0.28 / 0.38 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.13 / 0.30 / 0.41 | 0.18 / 0.24 / 0.42 |
+
+These are the numbers of `master` after #142 (budget allocation) and #143 (BFS neighbour scores). Before those two fixes the same benchmark gave axum 0.23 / 0.33 / 0.45, clap 0.08 / 0.15 / 0.28, bat 0.08 / 0.08 / 0.10 (this is also what the 0.4.0 release produces).
+
+If you only want the current ceiling to compare against: with the true files known, whole files that fit into 4k / 8k / 16k are axum 0.50 / 0.86 / 0.97, clap 0.55 / 0.73 / 0.87, bat 0.49 / 0.85 / 0.99.
 
 ## Verified
 
-Following the steps above on 2026-10-31 (master `239a17b`, binary built with `cargo build --release`, three repos run in parallel): **all 18 cells of the table matched exactly** (two decimals). Counts: axum 54 measured (55 candidates, 1 skipped by the script: checkout failed, or no truth file is in the index at the base commit), clap 60 (`cands-clap.json` holds the 60 candidates the README used; the fetch returned more), bat 56. Runtime about 1.5-2 minutes per repo (84 s / 124 s / 120 s) plus 1.2 minutes to build; the clones are the larger cost. Re-run twice (axum 2x, clap 2x, bat 2x): recall was identical every time; the reported `cost` of context-smith on bat differed slightly between the two runs (e.g. 14585 vs 14539 at 16k, cause not investigated), so compare recall, not cost, when checking a reproduction. The index is rebuilt per task and the random baseline is seeded.
+The first verification, on 2026-10-31 (master `239a17b`, i.e. before #142 and #143; binary built with `cargo build --release`, three repos run in parallel): **all 18 cells of the then-current table matched exactly** (two decimals). The current table was measured on 2026-11-01 with a binary built from #142 + #143, run twice per repo with identical results. Counts: axum 54 measured (55 candidates, 1 skipped by the script: checkout failed, or no truth file is in the index at the base commit), clap 60 (`cands-clap.json` holds the 60 candidates the README used; the fetch returned more), bat 56. Runtime about 1.5-2 minutes per repo (84 s / 124 s / 120 s) plus 1.2 minutes to build; the clones are the larger cost. Re-run twice (axum 2x, clap 2x, bat 2x): recall was identical every time; the reported `cost` of context-smith on bat differed slightly between the two runs (e.g. 14585 vs 14539 at 16k). The cause was the order of equal-score files, which came from a hash map; #142 breaks ties by path, and after it two runs were identical in recall and cost. The index is rebuilt per task and the random baseline is seeded.
 
 The Issue bodies in `cands-*.json` have third-party home-directory paths replaced with `/home/USER` (or `/Users/USER`) before committing; titles and truth files are untouched, so the `title` numbers above are unaffected. The `full` numbers quoted in #135 were measured before this and were not re-run.
 
