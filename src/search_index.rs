@@ -13,7 +13,8 @@ const W_PATH: f64 = 3.0;
 const W_SYMBOLS: f64 = 2.0;
 const W_BODY: f64 = 1.0;
 
-/// Strip FTS5 operator characters that would cause a syntax error in MATCH queries.
+/// Keep only bareword characters (alphanumerics and `_`); everything else could be
+/// FTS5 query syntax and would cause a syntax error in MATCH queries.
 /// Additionally, FTS5 boolean keywords (AND, OR, NOT, NEAR) are recognised only in
 /// uppercase; downcasing them neutralises their operator role so they are treated as
 /// plain search terms instead of query syntax.
@@ -22,7 +23,20 @@ const W_BODY: f64 = 1.0;
 /// Returns an empty string (which callers should reject before issuing MATCH) if the
 /// result contains no non-whitespace characters.
 pub(crate) fn sanitize_fts_query(query: &str) -> String {
-    let stripped = query.replace(['(', ')', '"', '*', '-', ':', '^', '{', '}', '~', '!'], " ");
+    // Allowlist, not denylist: keep only characters that are plain FTS5 barewords
+    // (alphanumerics, `_`). Every other character is potential query syntax (`=`, `.`,
+    // `#`, `+`, `<`, ...); enumerating them one by one kept leaking new ones (#12, #48,
+    // #79, #125). The unicode61 tokenizer splits on these anyway, so matching is unchanged.
+    let stripped: String = query
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
     stripped
         .split_whitespace()
         .map(|w| match w {
@@ -218,11 +232,48 @@ mod tests {
         };
         assert_eq!(
             terms("authentication OR 1=1"),
-            ["authentication", "or", "1=1"]
+            ["authentication", "or", "1", "1"]
         );
         assert_eq!(terms("foo AND bar"), ["foo", "and", "bar"]);
         assert_eq!(terms("foo NOT bar"), ["foo", "not", "bar"]);
         assert_eq!(terms("NEAR(foo bar)"), ["near", "foo", "bar"]);
+    }
+
+    /// Regression for #125 (and the #12/#48/#79 family): a denylist of operator
+    /// characters kept missing new ones (`=`, `.`, ...). Run every printable ASCII
+    /// punctuation char — alone and inside a realistic task — through a real FTS5
+    /// MATCH so any character FTS5 treats as syntax is caught, not just known ones.
+    #[test]
+    fn search_bm25_never_errors_on_ascii_punctuation() {
+        use super::search_bm25;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
+             CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
+             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+             INSERT INTO fts_body (file_id, content) VALUES (1, 'login 1 v0 4 0 auth');",
+        )
+        .unwrap();
+
+        for c in (0x21u8..=0x7e)
+            .map(char::from)
+            .filter(|c| !c.is_alphanumeric())
+        {
+            for task in [
+                format!("login {c} auth"),
+                format!("v0{c}4{c}0"),
+                format!("{c}{c}x{c}"),
+            ] {
+                if super::sanitize_fts_query(&task).trim().is_empty() {
+                    continue; // blank is rejected earlier with a clear message
+                }
+                search_bm25(&conn, &task, 10)
+                    .unwrap_or_else(|e| panic!("task {task:?} (char {c:?}) errored: {e}"));
+            }
+        }
+        // the exact reports
+        assert!(search_bm25(&conn, "login 1=1", 10).is_ok());
+        assert!(search_bm25(&conn, "feat: add dependency graph (v0.4.0)", 10).is_ok());
     }
 
     #[test]
