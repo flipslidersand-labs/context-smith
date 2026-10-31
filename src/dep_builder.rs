@@ -357,25 +357,25 @@ pub fn bfs_expand(
 
         // Collect all node IDs in this frontier for batch IN-clause queries.
         let ids: Vec<i64> = frontier.iter().map(|&(id, _)| id).collect();
-        // Build a score map for the current frontier so each neighbor gets the
-        // decayed score of its best parent.
-        let frontier_scores: HashMap<i64, f32> =
-            frontier.iter().map(|&(id, s)| (id, s * 0.5)).collect();
-        let decayed_default = frontier
-            .iter()
-            .map(|&(_, s)| s * 0.5)
-            .fold(f32::NEG_INFINITY, f32::max);
+        let frontier_scores: HashMap<i64, f32> = frontier.iter().copied().collect();
 
-        // Batch-fetch all neighbors for the entire frontier in 2 queries.
-        let neighbors = query_neighbors_batch(conn, &ids)?;
+        // Batch-fetch every (parent, neighbour) edge of the frontier in 2 queries.
+        let edges = query_neighbors_batch(conn, &ids)?;
+
+        // Each neighbour gets the decayed score of its own best parent. (It used to get the
+        // decayed score of the best node in the whole frontier, so every neighbour of any
+        // seed outranked the weaker seeds. #135)
+        let mut best: HashMap<i64, f32> = HashMap::new();
+        for (parent, neighbor) in edges {
+            let decayed = frontier_scores[&parent] * 0.5;
+            let e = best.entry(neighbor).or_insert(f32::NEG_INFINITY);
+            if decayed > *e {
+                *e = decayed;
+            }
+        }
 
         let mut next_frontier: Vec<(i64, f32)> = Vec::new();
-        for neighbor_id in neighbors {
-            // Use the maximum decayed score from any parent in this frontier.
-            let decayed = frontier_scores
-                .get(&neighbor_id)
-                .copied()
-                .unwrap_or(decayed_default);
+        for (neighbor_id, decayed) in best {
             let prev = scores.entry(neighbor_id).or_insert(0.0);
             if decayed > *prev {
                 *prev = decayed;
@@ -389,12 +389,14 @@ pub fn bfs_expand(
     Ok(scores)
 }
 
-/// Batch-fetch all neighbors for a set of node IDs in 2 SQL queries (one outgoing,
-/// one incoming), returning a deduplicated list of neighbor IDs.
+/// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries (one
+/// outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
+/// node from `ids` and `neighbour` is the node on the other end, never itself in `ids`.
 ///
 /// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
-/// that issued 2N queries for a frontier of N nodes. (#91)
-fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
+/// that issued 2N queries for a frontier of N nodes. (#91) Keeping the parent lets the caller
+/// decay each neighbour from its own parent's score. (#135)
+fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64)>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
@@ -405,40 +407,98 @@ fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
         .collect::<Vec<_>>()
         .join(",");
 
-    let mut neighbors: HashSet<i64> = HashSet::new();
-
-    // Outgoing: any id → X
-    let out_sql = format!(
-        "SELECT to_file FROM deps WHERE from_file IN ({})",
-        placeholders
-    );
-    let mut stmt = conn.prepare_cached(&out_sql)?;
-    let out_ids: Vec<i64> = {
+    let mut edges: HashSet<(i64, i64)> = HashSet::new();
+    // Outgoing: parent → X, then incoming: X → parent.
+    for sql in [
+        format!(
+            "SELECT from_file, to_file FROM deps WHERE from_file IN ({})",
+            placeholders
+        ),
+        format!(
+            "SELECT to_file, from_file FROM deps WHERE to_file IN ({})",
+            placeholders
+        ),
+    ] {
+        let mut stmt = conn.prepare_cached(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-        stmt.query_map(params_refs.as_slice(), |row| row.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    neighbors.extend(out_ids);
-
-    // Incoming: X → any id
-    let inc_sql = format!(
-        "SELECT from_file FROM deps WHERE to_file IN ({})",
-        placeholders
-    );
-    let mut stmt = conn.prepare_cached(&inc_sql)?;
-    let inc_ids: Vec<i64> = {
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-        stmt.query_map(params_refs.as_slice(), |row| row.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    neighbors.extend(inc_ids);
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            edges.insert(row?);
+        }
+    }
 
     // Exclude the input ids themselves so the BFS does not re-visit them.
     let id_set: HashSet<i64> = ids.iter().copied().collect();
-    Ok(neighbors
+    Ok(edges
         .into_iter()
-        .filter(|n| !id_set.contains(n))
+        .filter(|(_, n)| !id_set.contains(n))
         .collect())
+}
+
+#[cfg(test)]
+mod bfs_tests {
+    use super::*;
+
+    /// In-memory graph with the given `from -> to` import edges.
+    fn graph(edges: &[(i64, i64)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE deps (from_file INTEGER NOT NULL, to_file INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for (a, b) in edges {
+            conn.execute("INSERT INTO deps VALUES (?1, ?2)", [a, b])
+                .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn neighbour_gets_half_of_its_own_parent_score_not_the_best_seed() {
+        // #135: file 3 is only linked to the weak seed 2. It used to get half of the *best*
+        // seed's score (5.0) and outrank real seeds; it must get half of seed 2's (0.5).
+        let conn = graph(&[(2, 3)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 1).unwrap();
+        assert!((s[&3] - 0.5).abs() < 1e-6, "got {}", s[&3]);
+        assert!((s[&1] - 10.0).abs() < 1e-6 && (s[&2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn incoming_edge_counts_too() {
+        // 3 imports seed 2: the edge is 3 -> 2, so 3 is a neighbour via an incoming edge.
+        let conn = graph(&[(3, 2)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 1).unwrap();
+        assert!((s[&3] - 0.5).abs() < 1e-6, "got {}", s[&3]);
+    }
+
+    #[test]
+    fn neighbour_of_two_seeds_takes_the_higher_decayed_score() {
+        let conn = graph(&[(1, 3), (2, 3)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 4.0)], 1).unwrap();
+        assert!((s[&3] - 5.0).abs() < 1e-6, "got {}", s[&3]);
+    }
+
+    #[test]
+    fn score_halves_again_on_the_second_hop() {
+        let conn = graph(&[(1, 2), (2, 3)]);
+        let s = bfs_expand(&conn, &[(1, 8.0)], 2).unwrap();
+        assert!(
+            (s[&2] - 4.0).abs() < 1e-6 && (s[&3] - 2.0).abs() < 1e-6,
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn seeds_linked_to_each_other_keep_their_own_scores() {
+        // Expansion only scores files outside the current frontier; it never rewrites a seed.
+        let conn = graph(&[(1, 2)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 2).unwrap();
+        assert!(
+            (s[&1] - 10.0).abs() < 1e-6 && (s[&2] - 1.0).abs() < 1e-6,
+            "{s:?}"
+        );
+    }
 }
