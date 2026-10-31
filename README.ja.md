@@ -115,13 +115,13 @@ contextsmith index          contextsmith build
  ├── deps         — ファイル間の import 依存グラフ
  ├── meta         — repo_root・indexed_at
  ├── fts_path     — FTS5 (トークン化したファイルパス、BM25 weight ×3)
- ├── fts_symbols  — FTS5 (pre-tokenized、BM25 weight ×2)
+ ├── fts_symbols  — FTS5 (pre-tokenized、シンボル 1 件 1 行、BM25 weight ×0.5)
  └── fts_body     — FTS5 (ファイル本文、BM25 weight ×1)
 ```
 
 ### スコアリングパイプライン
 
-1. **BM25 検索** — タスク文字列で `fts_path`（重み×3）・`fts_symbols`（重み×2）・`fts_body`（重み×1）を UNION ALL で検索、上位 20 件を seed として取得。タスクが 9 語以上(重複除く)のときは、先に出現ファイル数が少ない順の上位 8 語に絞る(一般語が固有の語を埋もれさせないため)
+1. **BM25 検索** — タスク文字列で `fts_path`（重み×3）・`fts_symbols`（重み×0.5、ファイルごとに最良の一致）・`fts_body`（重み×1）を UNION ALL で検索、上位 20 件を seed として取得。タスクが 9 語以上(重複除く)のときは、先に出現ファイル数が少ない順の上位 8 語に絞る(一般語が固有の語を埋もれさせないため)
 2. **依存グラフ BFS** — seed ファイルから bidirectional BFS（depth=2）でスコアを伝播（hop ごとに ×0.5 減衰）
 3. **greedy 配分** — スコア降順に token 数を積み上げ、budget を超えたら打ち切り
 4. **バンドル出力** — 選択ファイルを Markdown に展開し、直近 Git 差分とともに出力
