@@ -523,3 +523,329 @@ fn collect_ruby_node(
         }
     }
 }
+
+/// Shared helpers for unit tests that need a real git repository.
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::path::Path;
+
+    /// Write `add` files, delete `remove` files, and commit the result on HEAD.
+    /// Initialises the repository on first use.
+    pub fn commit_files(dir: &Path, add: &[(&str, &str)], remove: &[&str]) {
+        let repo = git2::Repository::open(dir)
+            .or_else(|_| git2::Repository::init(dir))
+            .unwrap();
+        let mut index = repo.index().unwrap();
+        for (rel, content) in add {
+            let abs = dir.join(rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&abs, content).unwrap();
+            index.add_path(Path::new(rel)).unwrap();
+        }
+        for rel in remove {
+            std::fs::remove_file(dir.join(rel)).unwrap();
+            index.remove_path(Path::new(rel)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, "test commit", &tree, &parents)
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_util::commit_files;
+    use super::*;
+    use tempfile::TempDir;
+
+    fn names(syms: &[(String, SymbolKind, u32)], kind: SymbolKind) -> Vec<&str> {
+        syms.iter()
+            .filter(|(_, k, _)| *k == kind)
+            .map(|(n, _, _)| n.as_str())
+            .collect()
+    }
+
+    // ---- Language ----
+
+    #[test]
+    fn language_from_path_maps_known_extensions() {
+        let cases = [
+            ("a.rs", Language::Rust),
+            ("a.py", Language::Python),
+            ("a.go", Language::Go),
+            ("a.ts", Language::TypeScript),
+            ("a.tsx", Language::TypeScript),
+            ("a.mts", Language::TypeScript),
+            ("a.cts", Language::TypeScript),
+            ("a.js", Language::JavaScript),
+            ("a.jsx", Language::JavaScript),
+            ("a.mjs", Language::JavaScript),
+            ("a.cjs", Language::JavaScript),
+            ("a.rb", Language::Ruby),
+        ];
+        for (p, expected) in cases {
+            assert_eq!(Language::from_path(Path::new(p)), expected, "{p}");
+        }
+    }
+
+    #[test]
+    fn language_from_path_unknown_and_no_extension() {
+        assert_eq!(Language::from_path(Path::new("README")), Language::Unknown);
+        assert_eq!(Language::from_path(Path::new("a.txt")), Language::Unknown);
+        assert_eq!(Language::from_path(Path::new("")), Language::Unknown);
+        // Extension matching is case-sensitive.
+        assert_eq!(Language::from_path(Path::new("A.RS")), Language::Unknown);
+    }
+
+    #[test]
+    fn language_as_str_values() {
+        assert_eq!(Language::Rust.as_str(), "rust");
+        assert_eq!(Language::Python.as_str(), "python");
+        assert_eq!(Language::Go.as_str(), "go");
+        assert_eq!(Language::TypeScript.as_str(), "typescript");
+        assert_eq!(Language::JavaScript.as_str(), "javascript");
+        assert_eq!(Language::Ruby.as_str(), "ruby");
+        assert_eq!(Language::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn symbol_kind_as_str_values() {
+        assert_eq!(SymbolKind::Function.as_str(), "function");
+        assert_eq!(SymbolKind::Struct.as_str(), "struct");
+        assert_eq!(SymbolKind::Class.as_str(), "class");
+        assert_eq!(SymbolKind::Impl.as_str(), "impl");
+        assert_eq!(SymbolKind::Import.as_str(), "import");
+    }
+
+    // ---- GitRepo::new ----
+
+    #[test]
+    fn gitrepo_new_nonexistent_path_errors() {
+        let tmp = TempDir::new().unwrap();
+        let err = GitRepo::new(tmp.path().join("missing")).err().unwrap();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn gitrepo_new_non_git_dir_errors() {
+        let tmp = TempDir::new().unwrap();
+        let err = GitRepo::new(tmp.path()).err().unwrap();
+        assert!(err.to_string().contains("not a git repository"), "{err}");
+    }
+
+    #[test]
+    fn gitrepo_new_bare_repo_errors() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init_bare(tmp.path()).unwrap();
+        let err = GitRepo::new(tmp.path()).err().unwrap();
+        assert!(err.to_string().contains("bare repository"), "{err}");
+    }
+
+    #[test]
+    fn gitrepo_new_valid_repo_exposes_root() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert_eq!(
+            repo.root().canonicalize().unwrap(),
+            tmp.path().canonicalize().unwrap()
+        );
+    }
+
+    // ---- GitRepo::scan ----
+
+    #[test]
+    fn scan_returns_nested_files_with_lang_and_size() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(
+            tmp.path(),
+            &[("src/main.rs", "fn main() {}\n"), ("notes.txt", "hello")],
+            &[],
+        );
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let mut files = repo.scan().unwrap();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, PathBuf::from("notes.txt"));
+        assert_eq!(files[0].1, Language::Unknown);
+        assert_eq!(files[0].3, 5);
+        assert_eq!(files[1].0, PathBuf::from("src/main.rs"));
+        assert_eq!(files[1].1, Language::Rust);
+        assert_eq!(files[1].3, 13);
+        assert_eq!(files[1].2.len(), 40, "blob sha should be 40 hex chars");
+    }
+
+    #[test]
+    fn scan_without_commits_errors() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert!(repo.scan().is_err());
+    }
+
+    // ---- GitRepo::recent_diff ----
+
+    #[test]
+    // Note: DiffFormat::Patch callback content() excludes the +/- origin char.
+    fn recent_diff_root_commit_shows_initial_files() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        assert!(diff.contains("first"), "{diff}");
+    }
+
+    #[test]
+    fn recent_diff_covers_last_n_commits_only() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        commit_files(tmp.path(), &[("c.txt", "three\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        assert!(diff.contains("three"));
+        assert!(!diff.contains("two"));
+        let diff2 = repo.recent_diff(2).unwrap();
+        assert!(diff2.contains("three") && diff2.contains("two"));
+        assert!(!diff2.contains("one"));
+    }
+
+    #[test]
+    fn recent_diff_n_larger_than_history_clamps_to_root() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(100).unwrap();
+        assert!(diff.contains("two"), "{diff}");
+    }
+
+    #[test]
+    fn recent_diff_zero_commits_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert_eq!(repo.recent_diff(0).unwrap(), "");
+    }
+
+    #[test]
+    fn recent_diff_without_commits_errors() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert!(repo.recent_diff(1).is_err());
+    }
+
+    #[test]
+    fn recent_diff_truncates_large_patch_with_marker() {
+        let tmp = TempDir::new().unwrap();
+        let big = "0123456789abcdef\n".repeat(40_000); // ~680 KB > 512 KiB cap
+        commit_files(tmp.path(), &[("big.txt", big.as_str())], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        assert!(diff.ends_with("[diff truncated]\n"));
+        assert!(diff.len() <= 512 * 1024 + "\n[diff truncated]\n".len());
+    }
+
+    // ---- SymbolExtractor ----
+
+    #[test]
+    fn extract_unknown_language_is_empty() {
+        let out =
+            SymbolExtractor::extract(Path::new("x.txt"), "anything", Language::Unknown).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn extract_rust_symbols() {
+        let src = "use std::fmt;\nstruct S;\nenum E { A }\ntrait T {}\ntype Alias = u32;\nimpl S {}\nfn run() {}\n";
+        let out = SymbolExtractor::extract(Path::new("a.rs"), src, Language::Rust).unwrap();
+        assert_eq!(names(&out, SymbolKind::Function), vec!["run"]);
+        assert_eq!(names(&out, SymbolKind::Struct), vec!["S", "E", "Alias"]);
+        assert_eq!(names(&out, SymbolKind::Class), vec!["T"]);
+        assert_eq!(names(&out, SymbolKind::Impl), vec!["S"]);
+        // `use ` prefix and trailing `;` are trimmed; line numbers are 1-based.
+        assert_eq!(out[0], ("std::fmt".to_string(), SymbolKind::Import, 1));
+        assert!(out.contains(&("run".to_string(), SymbolKind::Function, 7)));
+    }
+
+    #[test]
+    fn extract_rust_empty_source() {
+        let out = SymbolExtractor::extract(Path::new("a.rs"), "", Language::Rust).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn extract_python_symbols() {
+        let src = "import os\nfrom a import b\nclass Foo:\n    def method(self):\n        pass\n\ndef top():\n    pass\n";
+        let out = SymbolExtractor::extract(Path::new("a.py"), src, Language::Python).unwrap();
+        assert_eq!(names(&out, SymbolKind::Class), vec!["Foo"]);
+        assert_eq!(names(&out, SymbolKind::Function), vec!["method", "top"]);
+        assert_eq!(names(&out, SymbolKind::Import).len(), 2);
+    }
+
+    #[test]
+    fn extract_go_symbols() {
+        let src = "package main\n\nimport \"fmt\"\n\ntype Server struct{}\n\nfunc (s *Server) Run() {}\n\nfunc main() { fmt.Println() }\n";
+        let out = SymbolExtractor::extract(Path::new("a.go"), src, Language::Go).unwrap();
+        assert_eq!(names(&out, SymbolKind::Struct), vec!["Server"]);
+        assert_eq!(names(&out, SymbolKind::Function), vec!["Run", "main"]);
+        assert_eq!(names(&out, SymbolKind::Import).len(), 1);
+    }
+
+    #[test]
+    fn extract_typescript_symbols() {
+        let src = "import x from './x';\ninterface I {}\ntype T = string;\nenum E { A }\nabstract class Base {}\nclass C { m() {} }\nfunction f() {}\nconst g = () => 1;\n";
+        let out = SymbolExtractor::extract(Path::new("a.ts"), src, Language::TypeScript).unwrap();
+        assert_eq!(names(&out, SymbolKind::Struct), vec!["I", "T", "E"]);
+        assert_eq!(names(&out, SymbolKind::Class), vec!["Base", "C"]);
+        assert_eq!(names(&out, SymbolKind::Function), vec!["m", "f", "g"]);
+        assert_eq!(names(&out, SymbolKind::Import).len(), 1);
+    }
+
+    #[test]
+    fn extract_javascript_symbols_including_require() {
+        let src = "const lib = require('./lib');\nconst h = function () {};\nfunction* gen() {}\nclass K {}\nconst plain = 5;\n";
+        let out = SymbolExtractor::extract(Path::new("a.js"), src, Language::JavaScript).unwrap();
+        assert_eq!(names(&out, SymbolKind::Import).len(), 1);
+        assert_eq!(names(&out, SymbolKind::Class), vec!["K"]);
+        let funcs = names(&out, SymbolKind::Function);
+        assert!(funcs.contains(&"h") && funcs.contains(&"gen"), "{funcs:?}");
+        assert!(!funcs.contains(&"plain"));
+    }
+
+    #[test]
+    fn extract_javascript_non_require_call_is_not_import() {
+        let out = SymbolExtractor::extract(
+            Path::new("a.js"),
+            "console.log('x');\nfoo();\n",
+            Language::JavaScript,
+        )
+        .unwrap();
+        assert!(names(&out, SymbolKind::Import).is_empty());
+    }
+
+    #[test]
+    fn extract_ruby_symbols() {
+        let src = "require 'json'\nrequire_relative 'x'\nputs 'hi'\nmodule M\n  class C\n    def run; end\n    def self.build; end\n  end\nend\n";
+        let out = SymbolExtractor::extract(Path::new("a.rb"), src, Language::Ruby).unwrap();
+        assert_eq!(names(&out, SymbolKind::Struct), vec!["M"]);
+        assert_eq!(names(&out, SymbolKind::Class), vec!["C"]);
+        assert_eq!(names(&out, SymbolKind::Function), vec!["run", "build"]);
+        assert_eq!(names(&out, SymbolKind::Import).len(), 2);
+    }
+
+    #[test]
+    fn extract_tolerates_syntax_errors() {
+        let out =
+            SymbolExtractor::extract(Path::new("a.rs"), "fn ok() {} fn (", Language::Rust).unwrap();
+        assert!(names(&out, SymbolKind::Function).contains(&"ok"));
+    }
+}
