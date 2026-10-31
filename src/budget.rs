@@ -72,42 +72,49 @@ fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
     content[..end].to_string()
 }
 
-/// Greedy budget allocation: sort by score descending, include until budget exhausted.
+/// Greedy budget allocation: walk candidates by score descending and take every file that
+/// still fits whole; a file that does not fit is skipped, not truncated and not the end of
+/// the search, so one huge high-ranked file cannot use up the budget and starve the smaller
+/// files below it (#135). Only when nothing fits whole is the best-ranked file truncated to
+/// the budget, so a non-empty match never yields an empty bundle.
 /// Returns selected candidates in score order.
 pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate> {
     candidates.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path)) // deterministic on ties (HashMap input order is random)
     });
 
     let mut used = 0usize;
     let mut selected = Vec::new();
+    let mut best_overflow: Option<Candidate> = None;
 
     for c in candidates {
+        if used >= budget {
+            break;
+        }
         if c.content.is_empty() {
             continue;
         }
         // Ensure files shorter than 4 chars still count as 1 token so they aren't silently excluded
         let t = c.tokens().max(1);
-        if used + t > budget {
-            // Try fitting a smaller remaining chunk
-            if used >= budget {
-                break;
-            }
-            let truncated = truncate_to_tokens(&c.content, budget - used);
-            let tok = estimate_tokens(&truncated);
-            if tok == 0 {
-                break;
-            }
+        if used + t <= budget {
+            used += t;
+            selected.push(c);
+        } else if best_overflow.is_none() {
+            best_overflow = Some(c);
+        }
+    }
+
+    if let (true, Some(c)) = (selected.is_empty(), best_overflow) {
+        let truncated = truncate_to_tokens(&c.content, budget);
+        if estimate_tokens(&truncated) > 0 {
             selected.push(Candidate {
                 content: truncated,
                 ..c
             });
-            break;
         }
-        used += t;
-        selected.push(c);
     }
 
     selected
@@ -136,11 +143,59 @@ mod tests {
     }
 
     #[test]
-    fn truncates_last_file() {
+    fn drops_oversized_file_instead_of_truncating_it() {
+        // 100 tokens fit; the 200-token file does not. A fragment of it is not worth the
+        // leftover budget, and it must not end the search (#135).
         let cs = vec![make(1.0, 400), make(0.5, 800)];
         let out = allocate(cs, 150);
-        assert_eq!(out.len(), 2);
-        assert!(out[1].tokens() <= 50);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tokens(), 100);
+    }
+
+    #[test]
+    fn oversized_top_file_does_not_starve_lower_ranked_files() {
+        // #135: a huge best-scoring file (e.g. a benchmark fixture) used to take the whole
+        // budget as a truncated fragment, so every smaller file below it was lost.
+        let cs = vec![make(1.0, 4000), make(0.5, 400), make(0.4, 400)];
+        let out = allocate(cs, 250);
+        let scores: Vec<f32> = out.iter().map(|c| c.score).collect();
+        assert_eq!(
+            scores,
+            vec![0.5, 0.4],
+            "both small files must be kept whole"
+        );
+        assert!(out.iter().map(|c| c.tokens()).sum::<usize>() <= 250);
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_path_whatever_the_input_order() {
+        // Candidates come from a HashMap, and BFS neighbours share one score, so ties are
+        // common. Without a tie-break the bundle (and any benchmark of it) varies per run.
+        let named = |path: &str| Candidate {
+            file_id: 0,
+            path: PathBuf::from(path),
+            score: 0.5,
+            content: "a".repeat(400),
+        };
+        for order in [
+            ["a.rs", "b.rs", "c.rs"],
+            ["c.rs", "a.rs", "b.rs"],
+            ["b.rs", "c.rs", "a.rs"],
+        ] {
+            let out = allocate(order.iter().map(|p| named(p)).collect(), 100);
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].path, PathBuf::from("a.rs"), "input order {order:?}");
+        }
+    }
+
+    #[test]
+    fn truncates_best_file_when_nothing_fits_whole() {
+        // Returning nothing would be worse than a prefix, so the best file is truncated.
+        let cs = vec![make(1.0, 4000), make(0.5, 2000)];
+        let out = allocate(cs, 100);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].score - 1.0).abs() < f32::EPSILON);
+        assert!(out[0].tokens() <= 100);
     }
 
     #[test]
