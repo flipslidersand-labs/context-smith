@@ -76,4 +76,6 @@ ripgrep (26 candidates, added 2026-11-01) was measured on master `ffc78b0` (#142
 
 The Issue bodies in `cands-*.json` have third-party home-directory paths replaced with `/home/USER` (or `/Users/USER`) before committing; titles and truth files are untouched, so the `title` numbers above are unaffected. The `full` numbers quoted in #135 were measured before this and were not re-run.
 
+The Python and TypeScript candidate files carry **no Issue bodies**: they are third-party text, `gitleaks` flagged a pasted WebSocket handshake key and (through one keyword) every commit SHA in `cands-hono.json`, and only `TASKMODE=full` needs them. `fetch_cands.py` now leaves bodies out unless `--with-body` is given (do not commit those files), and `bench.py` stops with a message if `TASKMODE=full` is asked of a file without bodies. The Rust files still contain bodies, so `TASKMODE=full` works for them only.
+
 The `full` (title + body) task mode is available but is not what the README table reports.

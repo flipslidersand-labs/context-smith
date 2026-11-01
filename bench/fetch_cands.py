@@ -1,7 +1,10 @@
-"""usage: fetch_cands.py OWNER NAME OUT.json [LANG]
+"""usage: fetch_cands.py OWNER NAME OUT.json [LANG] [--with-body]
 
 Merged PRs that close exactly one issue and change 1-4 source files of LANG (default: rust).
 Truth = those changed source files; tests, docs and examples are not counted as source.
+
+Issue bodies are third-party text (and the only place stray tokens or home paths show up), so
+they are left out unless --with-body is given; only TASKMODE=full of bench.py needs them.
 
 LANG is one of: rust, python, typescript. A file is source if it matches the first pattern
 and not the second.
@@ -30,15 +33,17 @@ def private_paths_scrubbed(text):  # third-party home directories in issue bodie
     return re.sub(r"/(?:home|Users)/[A-Za-z0-9_.-]+", lambda m: m.group(0).rsplit("/", 1)[0] + "/USER", text)
 
 
-def select(prs, lang):
+def select(prs, lang, with_body=False):
     cands = []
     for n in prs:
         iss = n["closingIssuesReferences"]["nodes"]
         fs = [f["path"] for f in n["files"]["nodes"]]
         src = [f for f in fs if is_source(f, lang)]
         if len(iss) == 1 and 1 <= len(src) <= 4 and len(fs) < 30:
-            body = private_paths_scrubbed((iss[0]["body"] or "")[:1500])
-            cands.append({"pr": n["number"], "base": n["baseRefOid"], "issue": iss[0]["number"], "title": iss[0]["title"], "body": body, "gt": src})
+            c = {"pr": n["number"], "base": n["baseRefOid"], "issue": iss[0]["number"], "title": iss[0]["title"], "gt": src}
+            if with_body:
+                c["body"] = private_paths_scrubbed((iss[0]["body"] or "")[:1500])
+            cands.append(c)
     return cands
 
 
@@ -60,12 +65,13 @@ def fetch(owner, name):
 
 
 if __name__ == "__main__":
-    owner, name, out = sys.argv[1:4]
-    lang = sys.argv[4] if len(sys.argv) > 4 else "rust"
+    pos = [a for a in sys.argv[1:] if not a.startswith("--")]
+    owner, name, out = pos[:3]
+    lang = pos[3] if len(pos) > 3 else "rust"
     if lang not in LANGS:
         sys.exit(f"unknown LANG {lang!r}; choose from {', '.join(LANGS)}")
     allp = fetch(owner, name)
-    cands = select(allp, lang)
+    cands = select(allp, lang, "--with-body" in sys.argv)
     with open(out, "w") as f:  # one candidate per line keeps diffs and reviews small
         f.write("[\n" + ",\n".join(json.dumps(c, ensure_ascii=False) for c in cands) + "\n]\n")
     print(f"{owner}/{name} ({lang}): PRs fetched {len(allp)} | candidates {len(cands)}")
