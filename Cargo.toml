@@ -9,7 +9,7 @@ homepage = "https://github.com/flipslidersand-labs/context-smith"
 readme = "README.md"
 keywords = ["context", "llm", "bm25", "code-search", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["errors/", "docs/", ".claude/", "bench/"]
+exclude = ["errors/", "docs/", ".claude/", "bench/", "adapters/"]
 
 [lib]
 name = "context_smith"
