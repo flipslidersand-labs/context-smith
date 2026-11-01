@@ -36,7 +36,7 @@ REPO=/tmp/bench/bat  TASKMODE=title python3 bench/bench.py
 REPO=/tmp/bench/ripgrep CANDS=bench/cands-ripgrep.json TASKMODE=title python3 bench/bench.py
 ```
 
-Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, optional argument `N` = use only the first N candidates. To use your own candidates: `python3 bench/fetch_cands.py OWNER NAME OUT.json`, then `CANDS=OUT.json`.
+Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, optional argument `N` = use only the first N candidates. To use your own candidates: `python3 bench/fetch_cands.py OWNER NAME OUT.json [rust|python|typescript]` (the language decides which changed files count as source), then `CANDS=OUT.json`. The candidate file is looked up as `cands-<repo directory name>.json`, so for the other languages below use the repo name as the clone directory.
 
 ## Expected (README table, `strict`, title only; recall averaged over tasks)
 
@@ -50,6 +50,23 @@ Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, opti
 These are the numbers of `master` after #142 (budget allocation), #143 (BFS neighbour scores) and #151 (symbols scored per file, weight 0.5). With #142 + #143 only they were axum 0.22 / 0.40 / 0.46, clap 0.13 / 0.28 / 0.38, bat 0.13 / 0.30 / 0.41. Before those fixes the same benchmark gave axum 0.23 / 0.33 / 0.45, clap 0.08 / 0.15 / 0.28, bat 0.08 / 0.08 / 0.10 (this is also what the 0.4.0 release produces).
 
 If you only want the current ceiling to compare against: with the true files known, whole files that fit into 4k / 8k / 16k are axum 0.50 / 0.86 / 0.97, clap 0.55 / 0.73 / 0.87, bat 0.49 / 0.85 / 0.99.
+
+## Other languages (Python, TypeScript; added 2026-11-01, #148)
+
+None of these four repositories was used to choose any parameter (the symbol weight was chosen on axum, clap and bat), so this is the closer test of how the numbers carry over. Same method: title-only tasks, `strict` metric, index rebuilt at each PR's base commit, the first 60 candidates (most recently updated merged PRs that close exactly one issue and change 1-4 source files). Truth = the changed source files: `*.py` (not tests, docs, examples, benchmarks, scripts, `conftest.py`, `setup.py`) and `*.ts` / `*.tsx` (not `*.d.ts`, `*.test.ts`, `*.spec.ts`, test or docs directories).
+
+| repo (language, tasks) | budget | context-smith | naive keyword match | ceiling |
+|---|---|---|---|---|
+| scrapy (Python, 59) | 4k / 8k / 16k | 0.23 / 0.29 / 0.38 | 0.19 / 0.29 / 0.47 | 0.47 / 0.80 / 0.97 |
+| poetry (Python, 60) | 4k / 8k / 16k | 0.10 / 0.20 / 0.24 | 0.19 / 0.31 / 0.40 | 0.51 / 0.86 / 0.99 |
+| hono (TypeScript, 60) | 4k / 8k / 16k | 0.45 / 0.65 / 0.74 | 0.35 / 0.56 / 0.66 | 0.80 / 1.00 / 1.00 |
+| zod (TypeScript, 60) | 4k / 8k / 16k | 0.07 / 0.27 / 0.34 | 0.04 / 0.07 / 0.18 | 0.28 / 0.53 / 0.68 |
+
+Measured once each on master `1e21261` (the same code as `ffc78b0` for `src/`). TypeScript is ahead of the baseline in both repositories (by 0.08-0.16 at 16k). **Python is behind it in both** (by 0.09 at 16k on scrapy, 0.16 on poetry; poetry also at 4k and 8k). One task is worth about 0.02.
+
+Where the Python gap comes from, from a one-off measurement (the true files' rank in the unlimited-budget result, dependency expansion on; the script is not part of `bench/`, so this paragraph cannot be reproduced from this repository yet): the unlimited-budget result has a median of 108 files on poetry and 457 on scrapy (the search itself seeds at most 20, so dependency expansion adds the rest), against 245 on hono. On poetry the true files' recall at rank 10 is 0.25 for context-smith against 0.46 for the baseline, and 55% of the true files are not returned at all; on scrapy the figures are 0.43 against 0.55 at rank 10. On hono the ranking is better than the baseline (rank 1: 0.42 against 0.28). So for Python the ranking itself is weaker, unlike for Rust where the budget allocation was the main loss. The cause inside the ranking (path/identifier tokenisation, symbol extraction, the dependency graph) is not yet identified.
+
+Speed on these repositories (about 390-510 indexed files): index 0.9-1.6 s median (2.1 s max), query 0.04-0.07 s.
 
 ## Verified
 
