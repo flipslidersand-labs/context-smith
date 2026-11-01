@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-01
+
+Retrieval fixes found while measuring accuracy on real fix PRs (#135). On the `bench/` set
+(axum, clap, bat; strict metric, title-only tasks) recall at a 16k-token budget is now
+0.67 / 0.44 / 0.53 against 0.56 / 0.38 / 0.42 for naive keyword matching. Only Rust
+repositories were measured.
+
+### Added
+- `contextsmith --version` / `-V` (#111).
+- `bench/`: scripts, fixed candidate sets and a README that reproduce the Accuracy table
+  in the README (#140). Not included in the published crate.
+
+### Fixed
+- Multi-word tasks no longer fail with "No matching files found": terms are OR-joined (#133).
+- `sanitize_fts_query` uses an allow-list of characters, so punctuation such as `.` or `=`
+  in a task can no longer break the FTS5 query (#134).
+- The BM25 sub-query `LIMIT` kept the first rows in rowid order instead of the best-scoring
+  ones, and long tasks let common words drown out the rare ones. Tasks are now reduced to
+  their 8 rarest terms (#137).
+- Budget allocation: a file that does not fit is skipped instead of being truncated and
+  ending the search, so one huge top-ranked file (benchmark fixtures, large tests) can no
+  longer use up the whole budget. Only when nothing fits whole is the best file truncated.
+  Files with equal scores are ordered by path, so output is deterministic (#142).
+- Dependency expansion: each neighbour is scored from its own parent (half of the parent's
+  score) instead of half of the best seed's, so unrelated neighbours no longer outrank
+  weaker seeds (#143).
+- Symbol matches are aggregated per file (best match) and weighted 0.5 instead of 2.0, so
+  files with many symbols no longer outrank the best match (#151).
+- `--task` values that start with `-` are accepted instead of being rejected as unknown
+  options (#149).
+
+### Changed
+- A bundle no longer ends with a truncated fragment of the first file that did not fit
+  (see Budget allocation above). Bundles contain whole files, except when no file fits.
+- `Cargo.toml` `repository` / `homepage` point to `flipslidersand-labs/context-smith`.
+- README: the Accuracy section reports measured numbers and the comparison with naive
+  keyword matching (#139, #155).
+
 ## [0.4.0] - 2026-08-27
 
 ### Added
