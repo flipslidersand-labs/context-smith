@@ -502,3 +502,192 @@ mod bfs_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(paths: &[(&str, i64)]) -> HashMap<PathBuf, i64> {
+        paths
+            .iter()
+            .map(|(p, id)| (PathBuf::from(p), *id))
+            .collect()
+    }
+
+    fn mem_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE symbols (file_id INTEGER, name TEXT, kind TEXT);
+             CREATE TABLE deps (from_file INTEGER, to_file INTEGER,
+                                PRIMARY KEY (from_file, to_file));",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn go_generated_and_test_files_detected() {
+        assert!(is_go_generated_or_test(Path::new("a/x_test.go")));
+        assert!(is_go_generated_or_test(Path::new("a/x.pb.go")));
+        assert!(is_go_generated_or_test(Path::new("a/mock_x.go")));
+        assert!(!is_go_generated_or_test(Path::new("a/x.go")));
+    }
+
+    #[test]
+    fn go_dir_index_skips_generated_files() {
+        let paths: HashMap<i64, PathBuf> = [
+            (1, PathBuf::from("pkg/auth/auth.go")),
+            (2, PathBuf::from("pkg/auth/auth_test.go")),
+        ]
+        .into();
+        let idx = build_go_dir_index(&paths);
+        assert_eq!(idx[&PathBuf::from("pkg/auth")], vec![1]);
+    }
+
+    #[test]
+    fn resolve_go_prefers_longest_suffix_and_handles_empty() {
+        let idx: HashMap<PathBuf, Vec<i64>> = [
+            (PathBuf::from("internal/auth"), vec![1]),
+            (PathBuf::from("auth"), vec![2]),
+        ]
+        .into();
+        assert_eq!(
+            resolve_go("\"example.com/app/internal/auth\"", &idx),
+            vec![1]
+        );
+        assert_eq!(resolve_go("import \"other/auth\"", &idx), vec![2]);
+        assert!(resolve_go("\"example.com/none\"", &idx).is_empty());
+        assert!(resolve_go("\"\"", &idx).is_empty());
+        assert!(resolve_go("\"/\"", &idx).is_empty());
+    }
+
+    #[test]
+    fn module_specifier_extraction() {
+        assert_eq!(
+            extract_module_specifier("import { a } from \"./b\""),
+            Some("./b".into())
+        );
+        assert_eq!(
+            extract_module_specifier("require('./c')"),
+            Some("./c".into())
+        );
+        assert_eq!(extract_module_specifier("no quotes"), None);
+        assert_eq!(extract_module_specifier("\"unterminated"), None);
+    }
+
+    #[test]
+    fn normalize_path_collapses_dots() {
+        assert_eq!(
+            normalize_path(Path::new("a/./b/../c")),
+            PathBuf::from("a/c")
+        );
+        assert_eq!(normalize_path(Path::new("../x")), PathBuf::from("x"));
+    }
+
+    #[test]
+    fn expand_rust_use_handles_groups_nesting_and_alias() {
+        assert_eq!(expand_rust_use("crate::a::b"), vec!["crate::a::b"]);
+        assert_eq!(
+            expand_rust_use("crate::{a, b::{c, d}}"),
+            vec!["crate::a", "crate::b::c", "crate::b::d"]
+        );
+        assert_eq!(expand_rust_use("crate::a as z"), vec!["crate::a"]);
+        assert_eq!(expand_rust_use("crate::a::*"), vec!["crate::a"]);
+    }
+
+    #[test]
+    fn resolve_rust_finds_file_and_mod_rs() {
+        let map = ids(&[("src/a.rs", 1), ("src/b/mod.rs", 2)]);
+        assert_eq!(resolve_rust("crate::{a, b}", &map), vec![1, 2]);
+        assert!(resolve_rust("std::fmt", &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_python_relative_and_absolute() {
+        let map = ids(&[
+            ("pkg/sub/mod.py", 1),
+            ("pkg/util.py", 2),
+            ("pkg/__init__.py", 3),
+            ("top/__init__.py", 4),
+        ]);
+        let from = Path::new("pkg/sub/main.py");
+        assert_eq!(resolve_python("from .mod import x", from, &map), vec![1]);
+        assert_eq!(resolve_python("from ..util import y", from, &map), vec![2]);
+        assert_eq!(resolve_python("from .. import z", from, &map), vec![3]);
+        assert_eq!(resolve_python("import top", from, &map), vec![4]);
+        assert!(resolve_python("from . import z", from, &map).is_empty());
+        assert!(resolve_python("garbage", from, &map).is_empty());
+        assert!(resolve_python("import nope", from, &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_ts_js_extensions_index_and_traversal() {
+        let map = ids(&[("src/a.ts", 1), ("src/dir/index.js", 2), ("src/x.ts", 3)]);
+        let from = Path::new("src/x.ts");
+        assert_eq!(resolve_ts_js("import a from './a'", from, &map), vec![1]);
+        assert_eq!(resolve_ts_js("import a from './a.ts'", from, &map), vec![1]);
+        assert_eq!(resolve_ts_js("require('./dir')", from, &map), vec![2]);
+        assert!(resolve_ts_js("import r from 'react'", from, &map).is_empty());
+        assert!(resolve_ts_js("require('../../etc/shadow')", from, &map).is_empty());
+        assert!(resolve_ts_js("require('./missing')", from, &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_import_dispatches_by_extension() {
+        let map = ids(&[("src/a.rs", 1)]);
+        let go = HashMap::new();
+        assert_eq!(
+            resolve_import("crate::a", Path::new("src/main.rs"), &map, &go),
+            vec![1]
+        );
+        assert!(resolve_import("x", Path::new("README.md"), &map, &go).is_empty());
+    }
+
+    #[test]
+    fn build_deps_inserts_edges_and_skips_self_and_unknown_files() {
+        let conn = mem_db();
+        conn.execute_batch(
+            "INSERT INTO symbols VALUES (1, 'crate::b', 'import');
+             INSERT INTO symbols VALUES (1, 'crate::a', 'import');
+             INSERT INTO symbols VALUES (9, 'crate::b', 'import');
+             INSERT INTO symbols VALUES (1, 'foo', 'function');
+             INSERT INTO deps VALUES (7, 8);",
+        )
+        .unwrap();
+        let paths: HashMap<i64, PathBuf> = [
+            (1, PathBuf::from("src/a.rs")),
+            (2, PathBuf::from("src/b.rs")),
+        ]
+        .into();
+        build_deps(&conn, &paths).unwrap();
+
+        let edges: Vec<(i64, i64)> = conn
+            .prepare("SELECT from_file, to_file FROM deps")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        // old row cleared, self-edge (a→a) and unknown file 9 skipped
+        assert_eq!(edges, vec![(1, 2)]);
+    }
+
+    #[test]
+    fn bfs_expand_decays_score_and_respects_depth() {
+        let conn = mem_db();
+        conn.execute_batch("INSERT INTO deps VALUES (1,2); INSERT INTO deps VALUES (3,2); INSERT INTO deps VALUES (3,4);")
+            .unwrap();
+
+        let d1 = bfs_expand(&conn, &[(1, 1.0)], 1).unwrap();
+        assert_eq!(d1.len(), 2);
+        assert_eq!(d1[&2], 0.5);
+
+        let d2 = bfs_expand(&conn, &[(1, 1.0)], 2).unwrap();
+        assert_eq!(d2[&3], 0.25);
+        assert!(!d2.contains_key(&4));
+
+        let d0 = bfs_expand(&conn, &[(1, 0.3), (1, 0.9)], 0).unwrap();
+        assert_eq!(d0[&1], 0.9);
+        assert!(bfs_expand(&conn, &[], 2).unwrap().is_empty());
+    }
+}
