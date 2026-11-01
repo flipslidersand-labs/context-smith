@@ -238,7 +238,14 @@ fn main() -> anyhow::Result<()> {
         Command::Index { repo, out, force } => {
             let repo = GitRepo::new(&repo)?;
             let db_path = match out {
-                Some(p) => PathBuf::from(p),
+                Some(p) => {
+                    // Keep an index outside the repository (e.g. in a cache dir) with one command.
+                    let p = PathBuf::from(p);
+                    if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    p
+                }
                 None => {
                     let dir = repo.root().join(".contextsmith");
                     std::fs::create_dir_all(&dir)?;
