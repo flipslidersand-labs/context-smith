@@ -57,7 +57,8 @@ enum Command {
     Build {
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
-        #[arg(long, value_parser = non_empty_string)]
+        /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
+        #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
         task: String,
         #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
@@ -82,7 +83,8 @@ enum Command {
     Query {
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
-        #[arg(long, value_parser = non_empty_string)]
+        /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
+        #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
         task: String,
         #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
