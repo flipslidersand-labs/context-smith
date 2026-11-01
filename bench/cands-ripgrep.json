@@ -1,0 +1,275 @@
+[
+ {
+  "pr": 3496,
+  "base": "dffd776a737dc19a48b758dd6a621de113794121",
+  "issue": 2565,
+  "title": "perf(ignore): don't search subdirs for git/ignore files if max depth is reached",
+  "body": "When searching for git/ignore files (the one set with `.ignore` `.git_ignore` `.git_exclude`), the crate should not search the sub-directories if its at the max depth\r\n\r\nexample:\r\n```\r\nmkdir a\r\nfor ((i=1; i<=100; i++)); do     mktemp --directory XXX; done\r\n```\r\na.rs\r\n```rs\r\nuse ignore::WalkBuilder;\r\n\r\nfn main() {\r\n    let arg = std::env::args().nth(1).unwrap();\r\n    let files: Vec<_> = WalkBuilder::new(&arg)\r\n        .hidden(false)\r\n        .follow_links(false) // We're scanning over depth 1\r\n        .max_depth(Some(1))\r\n        .build()\r\n        .collect();\r\n}\r\n```\r\n```\r\ncargo b --release\r\nstrace target/release/a a\r\n```\r\n\r\nyou can see that we do a lot of unneeded syscalls because we're reading git/ignore files even though we won't search inside those directorates\r\n```\r\nopenat(AT_FDCWD, \"/home/USER/dev/rust/others/ripgrep/crates/ignore/a/Vwe\", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 4\r\nnewfstatat(4, \"\", {st_mode=S_IFDIR|0700, st_size=4096, ...}, AT_EMPTY_PATH) = 0\r\nstatx(AT_FDCWD, \"/home/USER/dev/rust/others/ripgrep/crates/ignore/a/Vwe/.git\", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x7fffdb02f030) = -1 ENOENT (Aucun fichier ou dossier de ce type)\r\nstatx(AT_FDCWD, \"/home/USER/dev/rust/others/ripgrep/crates/ignore/a/Vwe/.ignore\", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0x7fffdb02ed60) = -1 ENOENT (Aucun fichier ou dossier de ce type)\r\nstatx(AT_FDCWD, \"/home/USER/dev/rust/others/ripgrep/crates/ignore/a/Vwe/.gitignore\", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX",
+  "gt": [
+   "crates/ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 3475,
+  "base": "5e16a5c9e57e81f6031a23faa2ace52205fa8242",
+  "issue": 3009,
+  "title": "ignore: parallel walker occasionally hangs if visitor panics",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\nmaster (de4baa10024f2cb62d438596274b9b710e01c59b)\n\n### How did you install ripgrep?\n\nI am able to reproduce this on `master`.\n\n### What operating system are you using ripgrep on?\n\nArch Linux (64-bit, x86):\n\n```shell\n> uname -a\nLinux terrestrial-gamma-ray-flash 6.13.5-zen1-1-zen #1 ZEN SMP PREEMPT_DYNAMIC Thu, 27 Feb 2025 18:09:27 +0000 x86_64 GNU/Linux\n```\n\n### Describe your bug.\n\n`WalkParallel::visit()` will nondeterministically hang if the `ParallelVisitor::visit()` implementation panics. This also occurs when providing a closure to `WalkParallel::run()`.\n\n### What are the steps to reproduce the behavior?\n\nI am working on a minimal fix to this right now (see https://github.com/BurntSushi/ripgrep/compare/master...cosmicexplorer:ripgrep:parallel-panic-quit?expand=1), but I think it will require a change to the parallelization methods we use from crossbeam, so I wanted to create this issue beforehand. I am currently able to reproduce this with the following:\n\n```diff\ndiff --git a/crates/ignore/src/walk.rs b/crates/ignore/src/walk.rs\nindex d6ea9c2..4387fca 100644\n--- a/crates/ignore/src/walk.rs\n+++ b/crates/ignore/src/walk.rs\n@@ -2221,6 +2221,18 @@ mod tests {\n         assert!(!dents[0].path_is_symlink());\n     }\n \n+    #[test]\n+    #[should_panic(expected = \"oops!\")]\n+    fn panic_in_parallel() {\n+        let td = tmpdir();\n+        wfi",
+  "gt": [
+   "crates/ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 3458,
+  "base": "dfe4a81d2591daca76d25ae4e052c34b26578155",
+  "issue": 3453,
+  "title": "[ignore] Include depth in WithPath error.",
+  "body": "#### Describe your feature request\n\nhttps://github.com/sharkdp/fd/issues/1017 would be significantly easier to fix if `ignore::Error::WithPath` included the depth, relative to the root of the path the error occurred on.  Specifically, in the event we get an error for a broken symlink, it allows us to know the depth of the broken symlink, which informs whether or not we should output anything for it.\n",
+  "gt": [
+   "crates/ignore/src/lib.rs"
+  ]
+ },
+ {
+  "pr": 3420,
+  "base": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "issue": 3419,
+  "title": "Nondeterminism in ignore::WalkBuilder parallel multi-root walk",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\n14.1.1\n\n### How did you install ripgrep?\n\nCargo\n\n### What operating system are you using ripgrep on?\n\nmacOS 26.5\n\n### Describe your bug.\n\n`ignore::WalkBuilder` appears to produce nondeterministic results for a parallel multi-root walk when one root has a scoped ignore rule that should not apply to another root.\n\n\n\n### What are the steps to reproduce the behavior?\n\nMinimal layout:\n\n```text\n.git/\n.gitignore\nnoxfile.py\nsrc/scikit_build_core/build/metadata.py\ntests/test_metadata.py\n```\n\n`.gitignore`:\n\n```gitignore\ntests/**/build/\n```\n\nThe source build file should always be included: the ignore rule only matches `build/` directories below `tests/`.\n\nMinimal Rust repro with `ignore = \"0.4.25\"`:\n\n```rust\nuse std::path::Path;\nuse std::sync::atomic::{AtomicBool, Ordering};\n\nfn source_build_file_was_seen(root: &Path) -> bool {\n    let source_build_file = root.join(\"src/scikit_build_core/build/metadata.py\");\n    let seen = AtomicBool::new(false);\n\n    let mut builder = ignore::WalkBuilder::new(root.join(\"src\"));\n    builder.current_dir(root);\n    builder.standard_filters(true);\n    builder.add(root.join(\"tests\"));\n    builder.add(root.join(\"noxfile.py\"));\n    builder.threads(12);\n\n    builder.build_parallel().run(|| {\n        Box::new(|entry| {\n            if let Ok(entry) = entry {\n                if entry.path() == source_build_file {\n         ",
+  "gt": [
+   "crates/ignore/src/dir.rs"
+  ]
+ },
+ {
+  "pr": 3195,
+  "base": "38d630261aded3a8e535fe85761e68af35bc462d",
+  "issue": 3194,
+  "title": "Line buffering appears broken in 15.0.0",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\n```\nripgrep 15.0.0\n\nfeatures:+pcre2\nsimd(compile):+SSE2,+SSSE3,+AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.45 is available (JIT is available)\n```\n\n### How did you install ripgrep?\n\nBug appears when built locally with Cargo as well as the binaries provided on the release page\n\n### What operating system are you using ripgrep on?\n\nArch Linux -- kernel `6.17.3`\n\n### Describe your bug.\n\nI've been using ripgrep to filter `journalctl` output in follow mode for years and thus need the `--line-buffered` option otherwise nothing is output since `stdin` doesn't close.  With the latest release that switch doesn't appear to be having any affect.\n\n### What are the steps to reproduce the behavior?\n\nNo output:\n\n    journalctl -n5 -f | ./rg --no-config --line-buffered  'Oct'\n\nDoes produce some output -- I assume this is because the \"block buffer\" is getting full?\n\n    journalctl -n5000 -f | ./rg --no-config --line-buffered  'Oct'\n\nWhen run with < `15.0.0` each line that is matched is output as soon as it's printed by `journalctl`.  Obviously you'll have to adjust the search to match whatever's in your logs.\n\n### What is the actual behavior?\n\nSame as \"steps to reproduce\"\n\n### What is the expected behavior?\n\nMatch lines (or inverse matches with `-v`) should be output as soon as they're output by the pipe",
+  "gt": [
+   "crates/searcher/src/line_buffer.rs",
+   "crates/searcher/src/searcher/glue.rs"
+  ]
+ },
+ {
+  "pr": 3189,
+  "base": "9ec08522bee566c8fbf03c340acd7a1ff1789a9f",
+  "issue": 3179,
+  "title": "ignore::WalkBuilder.git_global(true) does not behave correctly with rooted files",
+  "body": "This bug was originally reported in the helix repository: https://github.com/helix-editor/helix/issues/12604\n\nI was doing a bit of a research in that issue, and I found that helix [is using the package `ignore`](https://github.com/helix-editor/helix/blob/5b0563419eeeaf0595c848865c46be4abad246a7/helix-term/Cargo.toml#L73), and we can see instances of `WalkBuilder` in the file picker function [here](https://github.com/helix-editor/helix/blob/5b0563419eeeaf0595c848865c46be4abad246a7/helix-term/src/ui/mod.rs#L234).\n\nThe full explanation of the bug can be read there, but the TLDR is: if the global `.gitignore`, specified in git's config `core.excludesfile` option contains a rooted pattern, for example `/.venv`, it is **not** ignored as expected.\n\nI looked for similar issues to see if anyone have reported it already, but I was unable to find any.",
+  "gt": [
+   "crates/ignore/src/dir.rs",
+   "crates/ignore/src/gitignore.rs",
+   "crates/ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 3185,
+  "base": "de2567a4c76fa671005538d6cd841abc44932b9a",
+  "issue": 3184,
+  "title": "Excessive slowdown with larger `-A` context windows?",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\nrg --version\nripgrep 14.1.1\n\nfeatures:-pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 is not available in this build of ripgrep.\n\n### How did you install ripgrep?\n\n`emerge`\n\n### What operating system are you using ripgrep on?\n\nGentoo\n\n### Describe your bug.\n\nOn large files, `rg` seems to slow down significantly with larger `-A` values.\n\n```\n$ ls -lh large_file\n> -rwxr-xr-x 1 XXX XXX 9.8G Oct 10 11:35 large_file\n```\n\n```sh\n$ time cat large_file | rg XXXXX -A99\nbinary file matches (found \"\\0\" byte around offset 7)\n\n________________________________________________________\nExecuted in  334.68 millis    fish           external\n   usr time  260.39 millis    2.94 millis  257.45 millis\n   sys time   75.03 millis    0.99 millis   74.04 millis\n\n$ time cat large_file | rg XXXXX -A999\nbinary file matches (found \"\\0\" byte around offset 7)\n\n________________________________________________________\nExecuted in  349.03 millis    fish           external\n   usr time  269.92 millis    1.57 millis  268.36 millis\n   sys time   91.83 millis    1.02 millis   90.81 millis\n\n$ time cat large_file | rg XXXXX -A9999\nbinary file matches (found \"\\0\" byte around offset 7)\n\n________________________________________________________\nExecuted in  667.18 millis    fish           external\n   usr time  565.68 millis    1.62 millis  564.06 mill",
+  "gt": [
+   "crates/searcher/src/line_buffer.rs",
+   "crates/searcher/src/searcher/core.rs",
+   "crates/searcher/src/searcher/glue.rs"
+  ]
+ },
+ {
+  "pr": 3182,
+  "base": "916415857f084e63efda03cf25a67fe7f6d24244",
+  "issue": 3180,
+  "title": "rg panic caused by --replace, --multiline, a particular pattern, and search text containing repeats and newlines",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\nripgrep 14.1.1\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.43 is available (JIT is available)\n\n### How did you install ripgrep?\n\nGentoo Portage\n\n### What operating system are you using ripgrep on?\n\nGentoo Linux\n\n### Describe your bug.\n\nWhen using the --replace and --multiline flags w/ certain search patterns, ripgrep panics when it searches text containing certain sequences of repeated text and newlines. The panic message is \"slice index starts at x but ends at y\", where x and y are integers and y < x.\n\nBackground: I have a program that runs ripgrep (and other regex software), parses its output, and counts and displays word sequences. Ripgrep has performed great; I've used many, many different search patterns on ~50 MiB of English text in ~5,000 files. Recently ran across this bug. The initial search pattern was much more complicated -- I spent some time simplifying it down to these 2 minimal test cases. (If it's useful, I can explain why the various groups in the pattern are there.)\n\nEach minimal search pattern is extremely specific. Removing almost any element will prevent the bug from appearing; for example, changing the initial group from `(^|[^a-z])` to `^`, or changing the \"\\s\" in the middle to \" \". Similar situation for the search text: for the lines2 test case, changing the initi",
+  "gt": [
+   "crates/printer/src/util.rs"
+  ]
+ },
+ {
+  "pr": 3174,
+  "base": "bb88a1ac45c70bef97e0d6ccd6e91595610de860",
+  "issue": 3173,
+  "title": "hidden files whitelisted by ancestor .ignore are not searched when . is directory argument",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\n```\nripgrep 14.1.1\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.43 is available (JIT is available)\n```\n\n### How did you install ripgrep?\n\ndnf\n```\nrpm -q ripgrep  \nripgrep-14.1.1-1.el8.x86_64\n```\n\n### What operating system are you using ripgrep on?\n\nRocky Linux 8.10 (Green Obsidian)\n\n### Describe your bug.\n\nWhen the current directory is passed to ripgrep as `.`, hidden-but-whitelisted files that are immediate children of the current directory are not searched.  This does not happen if no directory argument is provided, or if the directory is provided as `./.` instead.\n\n(For extra context, the Emacs [consult](https://github.com/minad/consult) package always passes a `.` argument to ripgrep when searching under the current working directory, which is how I discovered this.)\n\n### What are the steps to reproduce the behavior?\n\n```sh\ncd \"$(mktemp -d)\"\nmkdir subdir\necho \"foo text\" >subdir/.foo.txt\ncat <<EOF >.ignore\n!.foo.txt\nEOF\n\nrg -l 'text' . # finds subdir/.foo.txt\ncd subdir\n\n# STEP 1\nrg -l 'text'     # finds .foo.txt as expected\nrg -l 'text' .   # bad: no results\nrg -l 'text' ./. # finds ././.foo.txt as expected\n\nmkdir subsubdir\necho \"foo text\" >subsubdir/.foo.txt\n\n# STEP 2\nrg -l 'text'     # finds both .foo.txt and subsubdir/.foo.txt\nrg -l 'text' .   # only finds ./subsubdir/.foo.txt\nrg -l",
+  "gt": [
+   "crates/ignore/src/dir.rs"
+  ]
+ },
+ {
+  "pr": 3162,
+  "base": "9d8016d10c94a5af2768eb6dd0440386a7d317a0",
+  "issue": 3158,
+  "title": "Add `min_depth` to `ignore::WalkBuilder`",
+  "body": "#### Describe your feature request\n\nI am migrating from `walkdir` to `ignore` so I can support `.dockerignore` files, and we use the `walkdir::WalkDir::min_depth` method which has no equivalent in `ignore::WalkBuilder`.\n\nI'd be willing to add the method.\n\nAlso, thanks for all the great crates!\n",
+  "gt": [
+   "crates/ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 3166,
+  "base": "9802945e6342ec284633924cb7d8d3ce67204995",
+  "issue": 3076,
+  "title": "`--max-count` not working properly with `--multiline` if matches are on consecutive lines",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\nripgrep 14.1.1 (rev 4649aa9700)\n\nfeatures:+pcre2\n\nPCRE2 10.43 is available (JIT is unavailable)\n\n### How did you install ripgrep?\n\nDownload from https://github.com/BurntSushi/ripgrep/releases/tag/14.1.1\n\n### What operating system are you using ripgrep on?\n\nWindows 11\n\n### Describe your bug.\n\nFor the purpose of limiting count by `--max-count`, with the mutiline flag, the program seems to be counting matches on consecutive lines as a single match, resulting in extra matches.\n\n\n### What are the steps to reproduce the behavior?\n\n1. Create a file with contents\n```\nline 2\nline 3 x\nline 2\nline 3\n```\n\n2. Run `rg --max-count=1 -U \"line 2\\nline 3\" <file> --stats --debug`.\n\n\n### What is the actual behavior?\n\n```\nrg: DEBUG|rg::flags::parse|crates/core\\flags\\parse.rs:97: no extra arguments found from configuration file\nrg: DEBUG|rg::flags::hiargs|crates/core\\flags\\hiargs.rs:1083: number of paths given to search: 1\nrg: DEBUG|rg::flags::hiargs|crates/core\\flags\\hiargs.rs:1094: is_one_file? true\nrg: DEBUG|rg::flags::hiargs|crates/core\\flags\\hiargs.rs:1269: found hostname for hyperlink configuration: d1\nrg: DEBUG|rg::flags::hiargs|crates/core\\flags\\hiargs.rs:1279: hyperlink format: \"\"\nrg: DEBUG|rg::flags::hiargs|crates/core\\flags\\hiargs.rs:174: using 1 thread(s)\nrg: DEBUG|grep_cli::decompress|crates\\cli\\src\\decompress.rs:502: gzip: could not find execu",
+  "gt": [
+   "crates/printer/src/json.rs",
+   "crates/printer/src/summary.rs"
+  ]
+ },
+ {
+  "pr": 3154,
+  "base": "491bf3f6d5bc1a621754440e291960f460a9c003",
+  "issue": 3139,
+  "title": "Inconsistent behaviour when using --files-with-matches vs without",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\nripgrep 14.1.1\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.43 is available (JIT is available)\n\n### How did you install ripgrep?\n\ncargo install ripgrep --features pcre2\n\n\n\n### What operating system are you using ripgrep on?\n\nWindows 10 & 11\n\n### Describe your bug.\n\nOutput when using switch `--files-with-matches` appears to leave out files, that otherwise show matches when the switch is not present.\n\n### What are the steps to reproduce the behavior?\n\nCompare the output of these two commands on the attached files:\n\n`rg --pcre2 --iglob *.txt --multiline \"(?s)Start(?!.*thing1)(?=.*thing2)(?!.*thing3)\"`\n`rg --pcre2 --iglob *.txt --multiline \"(?s)Start(?!.*thing1)(?=.*thing2)(?!.*thing3)\" --files-with-matches`\n\n[issue.txt](https://github.com/user-attachments/files/22177751/issue.txt)\n[normal.txt](https://github.com/user-attachments/files/22177755/normal.txt)\n\nBase64-encoded version of issue.txt (just in case attachment mangles it):\n> U3RhcnQgCiAgIAoKICAgWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFgKICAgWVlZWVlZWVlZWVlZ\n> WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZ\n> WVlZWVkKICAgCiAgICAgIHRoaW5nMiAKCgo=\n\nBase64 normal.txt:\n> U3RhcnQKCiAgdGhpbmcyIAoK\n\n### What is the actual behavior?\n\nWithout `--files-with-matches`:\n> normal.txt\n> 1:Start\n> \n> issue.txt\n> 1:Start\n\n(Note: Wh",
+  "gt": [
+   "crates/printer/src/summary.rs"
+  ]
+ },
+ {
+  "pr": 2885,
+  "base": "6c5108ed17987531644518fac8c1659b0b202611",
+  "issue": 2884,
+  "title": "Alternation match regression",
+  "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [X] I have a different issue.\n\n### What version of ripgrep are you using?\n\n14.1.0\n\n### How did you install ripgrep?\n\nCargo\n\n### What operating system are you using ripgrep on?\n\nFedora 40\n\n### Describe your bug.\n\nripgrep fails to return some matches when case is ignored. This only happens with very particular matches and specific characters.\r\n\r\nA git bisect seems to suggest this is a regression introduced by\r\nca740d9ace9065103036c101ca973b79e59ae85a.\n\n### What are the steps to reproduce the behavior?\n\nRun the following:\r\n```\r\necho -n \"e-x\" | rg -i \"e.x|ex\"\r\n```\r\n\n\n### What is the actual behavior?\n\n```\r\n$ echo -n \"e-x\" | rg --debug -i \"e.x|ex\"\r\nrg: DEBUG|rg::flags::config|/home/USER/.cargo/registry/src/index.crates.io-6f17d22bba15001f/ripgrep-14.1.0/crates/core/flags/config.rs:41: /home/USER/.ripgreprc: arguments loaded from config file: []\r\nrg: DEBUG|rg::flags::parse|/home/USER/.cargo/registry/src/index.crates.io-6f17d22bba15001f/ripgrep-14.1.0/crates/core/flags/parse.rs:97: no extra arguments found from configuration file\r\nrg: DEBUG|rg::flags::hiargs|/home/USER/.cargo/registry/src/index.crates.io-6f17d22bba15001f/ripgrep-14.1.0/crates/core/flags/hiargs.rs:1099: using heuristics to determine whether to read from stdin or search ./ (is_readable_stdin=true, stdin_consumed=false, mode=Search(Standard))\r\nrg: DEBUG|rg::flags::hiargs|/home/USER/.cargo/registry/src/index.crates.io-6f17d22bba15001f/ripgrep-14.1.0/crates/co",
+  "gt": [
+   "crates/regex/src/literal.rs"
+  ]
+ },
+ {
+  "pr": 2768,
+  "base": "eca13f08a2a0ece89a423565891e48a90a8aedef",
+  "issue": 2767,
+  "title": "ignore: WalkBuilder::build_parallel() example does not compile",
+  "body": "The example given in the documentation for `ignore::WalkBuildeer::build_parallel()`\r\nhttps://github.com/BurntSushi/ripgrep/blob/eca13f08a2a0ece89a423565891e48a90a8aedef/crates/ignore/src/walk.rs#L594\r\ndoes not compile, since the returned closure is expected to return a `WalkState`, not `()`.",
+  "gt": [
+   "crates/ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 2576,
+  "base": "fed4fea217abbc502f2e823465de903c8f2b623d",
+  "issue": 2574,
+  "title": "Incomplete matches when using the `--word-regexp` flag",
+  "body": "#### What version of ripgrep are you using?\r\nripgrep 13.0.0\r\n-SIMD -AVX (compiled)\r\n\r\n#### How did you install ripgrep?\r\n`wget https://github.com/BurntSushi/ripgrep/releases/download/13.0.0/ripgrep-13.0.0-x86_64-unknown-linux-musl.tar.gz`\r\n\r\n#### What operating system are you using ripgrep on?\r\nMac and Linux\r\n\r\n#### Describe your bug.\r\nAccording to the manual: \r\n```\r\n-w, --word-regexp\r\n            Only show matches surrounded by word boundaries. This is roughly equivalent to\r\n            putting \\b before and after all of the search patterns.\r\n```\r\n\r\nI'm using this text as a sample file:\r\n```\r\nsome.domain.com\r\nsome.domain.com/x\r\nsome.domain.com\r\n```\r\n\r\nAnd here is some very naive regex that searches for \"domains\" (not really, but it is enough to show the problem):\r\n`\"([\\w]+[.])*domain[.](\\w)+`\r\n\r\nRunning this regex with the `-w` flag (`rg -w \"([\\w]+[.])*domain[.](\\w)+\"`) matches the first and third strings properly (`some.domain.com`), but for the second one **starts capturing from the second char onwards**, meaning it matches `ome.domain.com`.\r\n\r\nIf I change the execution, remove the `-w` flag and wrap the regex with `\\b` (`rg \"\\b([\\w]+[.])*domain[.](\\w)+\\b\"`), then all lines are matched properly (`some.domain.com` is matched).\r\n\r\n#### What are the steps to reproduce the behavior?\r\nExplained above.\r\n\r\n#### What is the actual behavior?\r\nhttps://gist.github.com/ilia-cy/396f43f57057e42723d4a3dc87d4e994\r\nThe matches aren't shown here because they are highlighted in the terminal,",
+  "gt": [
+   "crates/regex/src/word.rs"
+  ]
+ },
+ {
+  "pr": 1876,
+  "base": "94e4b8e301302097dad48b292560ce135c4d4926",
+  "issue": 1875,
+  "title": "Add support for pofile (.po)?",
+  "body": "#### Describe your feature request\r\n\r\nI want to exclude files matching `*.po` which is a Gettext PO file type.\r\nI would assume that `po` should be a name for it, possibly with a `pofile` alias.",
+  "gt": [
+   "crates/ignore/src/default_types.rs"
+  ]
+ },
+ {
+  "pr": 1919,
+  "base": "abf115228e886494e6198a64c519db7285ff29af",
+  "issue": 1918,
+  "title": "Add support for cuda files",
+  "body": "CUDA programming is usually done within .cu and .cuh files, though it can also include the usual c/c++ file extensions.  Please add \"cuda\" as another one of the ripgrep types.",
+  "gt": [
+   "crates/ignore/src/default_types.rs"
+  ]
+ },
+ {
+  "pr": 1554,
+  "base": "afb325f733d74d1520bbe9f251f2969e45c73431",
+  "issue": 1550,
+  "title": "high peak memory usage with parallel breadth first directory traversal",
+  "body": "#### What version of ripgrep are you using?\r\n\r\nripgrep 12.0.0\r\n-SIMD -AVX (compiled)\r\n+SIMD +AVX (runtime)\r\n\r\n#### How did you install ripgrep?\r\n\r\n`cargo install ripgrep` on `rustc 1.42.0 (b8cedc004 2020-03-09)`\r\n\r\n#### What operating system are you using ripgrep on?\r\n\r\nLinux, derived from Ubuntu 18.04\r\n\r\n#### Describe your question, feature request, or bug.\r\n\r\nrg seems to leak memory when searching for an expression in latest versions of all crates from crates.io. The memory usage gradually increases and peaks at around 1Gb.\r\n\r\n#### If this is a bug, what are the steps to reproduce the behavior?\r\n\r\n```bash\r\n# get all crates from crates.io\r\ngit clone https://github.com/the-lean-crate/criner && cd criner && cargo run --release -- mine\r\n# get latest version of every crate\r\nfor dir in ./criner.db/assets/*/*/*/; do echo -n \"$dir\"; ls \"$dir\" | grep '\\.crate' | sort -Vr | head -n 1; done > ./latest-versions\r\nmkdir crates\r\ncd crates\r\n# decompress the latest version of every crate\r\ncat ../latest-versions | parallel ../decompress-one-crate.sh\r\n```\r\nwhere decompress-one-crate.sh is\r\n```bash\r\n#!/bin/sh\r\ncat \"$1\" | tar --gunzip -xf -\r\n```\r\n\r\nSample `rg` invocation exhibiting the behavior is:\r\n\r\n```\r\nrg --iglob '*.rs' -iF '#[allow('\r\n```\r\n\r\n#### If this is a bug, what is the actual behavior?\r\n\r\nMemory usage increases as the search progresses, reaching as high as 1Gb. It increases gradually and accumulates.\r\n\r\n#### If this is a bug, what is the expected behavior?\r\n\r\nMemory usage should not",
+  "gt": [
+   "crates/ignore/src/lib.rs",
+   "crates/ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1587,
+  "base": "1980630f1770da3d7d392dc3b743d04018217e34",
+  "issue": 1586,
+  "title": "Request: Add type for meson",
+  "body": "Programs build with [Meson](https://mesonbuild.com/) rely on specific build files that are always called `meson.build`. Maybe you also want to include `meson_options.txt` for [meson specific options](https://mesonbuild.com/Build-options.html). Please add a type to only search this files.\r\n",
+  "gt": [
+   "crates/ignore/src/default_types.rs"
+  ]
+ },
+ {
+  "pr": 1492,
+  "base": "eef7a7e7ffe51cbe546eb23312620dfbaa5b4653",
+  "issue": 1455,
+  "title": "globset: Implement serde Serialize/Deserialize",
+  "body": "My project currently uses a wrapper type around globset's `GlobMatcher` in order to implement `Serialize` and `Deserialize`. The implementation [is pretty trivial](https://github.com/rojo-rbx/rojo/blob/c82bc8a3583a65279d7aa28cde4b53977cd78fc4/src/glob.rs#L38-L50)!\r\n\r\nDoes it make sense for the globset crate to implement `Serialize`/`Deserialize`? I'd like to have them on both the `Glob` and `GlobMatcher` types for myself, but it's possible other types make sense. This would probably want to be behind a feature flag.\r\n\r\nIf this sounds okay, I'll file a PR! I think this change is similar to the spirit of #1447, but that PR hasn't been reviewed yet as of time of this writing.",
+  "gt": [
+   "crates/globset/src/lib.rs",
+   "crates/globset/src/serde_impl.rs"
+  ]
+ },
+ {
+  "pr": 1294,
+  "base": "392682d35296bda5c0d0cccf43bae55be3d084df",
+  "issue": 1293,
+  "title": "For to --iglob even if -g",
+  "body": "#### What version of ripgrep are you using?\r\n\r\nripgrep 11.0.1\r\n-SIMD -AVX (compiled)\r\n+SIMD +AVX (runtime)\r\n\r\n\r\n#### How did you install ripgrep?\r\n\r\nbrew install\r\n\r\n#### What operating system are you using ripgrep on?\r\n\r\nMac OSx lastest\r\n\r\n#### Describe your question, feature request, or bug.\r\n\r\nHow do I force --iglob for all my searches even if I specify -g ..\r\nI would like to avoid having to write a custom function/wrapper\r\n\r\nThanks",
+  "gt": [
+   "src/app.rs",
+   "src/args.rs"
+  ]
+ },
+ {
+  "pr": 827,
+  "base": "597bf04a56d43aa9c0eb0f8fbb90c9d51c53656c",
+  "issue": 820,
+  "title": "--files performance regression in 0.8.0",
+  "body": "#### What version of ripgrep are you using?\r\n\r\n0.8.0\r\n\r\n#### What operating system are you using ripgrep on?\r\n\r\nWindows 10\r\n\r\n#### If this is a bug, what are the steps to reproduce the behavior?\r\n\r\nUsing an old commit of the Chromium sources (`git clone https://chromium.googlesource.com/chromium/src`) as corpus (~230k files).\r\n\r\nWith 0.8.0 `--files` runs about 4x longer:\r\n```\r\nPS C:\\devel\\testWorkspace> (Measure-Command { & 'C:\\devel\\ripgrep-0.8.0-x86_64-pc-windows-msvc\\rg.exe' --files | Measure-Object –Line | Out-Default }).TotalSeconds\r\n\r\n Lines Words Characters Property\r\n ----- ----- ---------- --------\r\n234319 [files]\r\n\r\n43.309153 [seconds]\r\n``` \r\n\r\nThan with 0.7.1:\r\n```\r\nPS C:\\devel\\testWorkspace> (Measure-Command { & 'C:\\devel\\ripgrep-0.7.1-x86_64-pc-windows-msvc\\rg.exe' --files | Measure-Object –Line | Out-Default }).TotalSeconds\r\n\r\n Lines Words Characters Property\r\n ----- ----- ---------- --------\r\n234319 [files]\r\n\r\n11.2432563 [seconds]\r\n```\r\n\r\nUsing Process Monitor it looks like 0.8.0 accesses individual files a lot more:\r\n![image](https://user-images.githubusercontent.com/9205389/36384556-fa76474a-158f-11e8-9c7a-208f270c1b0f.png)\r\n\r\nThan 0.7.1, which seems to only access folders:\r\n![image](https://user-images.githubusercontent.com/9205389/36384611-27245f16-1590-11e8-8a2e-b54f6abe0b1c.png)\r\n\r\n/cc @roblourens",
+  "gt": [
+   "ignore/src/walk.rs"
+  ]
+ },
+ {
+  "pr": 728,
+  "base": "14779ed0ea5d28aaa6c04dff3be77989f9fd2836",
+  "issue": 725,
+  "title": "glob ignored for items in path",
+  "body": "I found the following surprising:\r\n```\r\n$ echo bar > bar\r\n$ rg -g 'foo' --files *\r\nbar\r\n$ rg -g 'foo' --files bar\r\nbar\r\n```\r\n\r\nI was expecting the above rg commands to return nothing.",
+  "gt": [
+   "src/app.rs",
+   "src/args.rs"
+  ]
+ },
+ {
+  "pr": 652,
+  "base": "1aec4b11231ccb7de92e3008408e4d06a714d106",
+  "issue": 649,
+  "title": "incorrect gitignore behaviour",
+  "body": "Steps\r\n\r\n1. Clone nim project `git clone https://github.com/nim-lang/Nim.git`\r\n2. In nim folder run `rg uint64`.  It gives no results which is incorrect.  Silver searcher gives correct results\r\n3. Used `git check-ignore lib\\system.nim` to verify git doesn't ignore the file\r\n4.  `rg --debug` output [here](https://gist.github.com/kartiku/130d3c63c98fcb3304cc649d23838e2b).  Lib folder is being ignored\r\n\r\nUsing 0.7.1 release from [here](https://github.com/BurntSushi/ripgrep/releases/download/0.7.1/ripgrep-0.7.1-x86_64-pc-windows-msvc.zip)",
+  "gt": [
+   "ignore/src/gitignore.rs"
+  ]
+ },
+ {
+  "pr": 516,
+  "base": "e0989ef13bf6be0659fbb8bac3975522b155cbc1",
+  "issue": 506,
+  "title": "Using an unparenthesized pipe with -w produces unexpected results",
+  "body": "I ran `rg -w 'min|max' src/lib*` in the rust source, and got far more results than I expected.  For example:\r\n```\r\nsrc/liblibc\\src\\unix\\solaris\\mod.rs\r\n17:pub type minor_t = ::c_uint;\r\n250:        pub f_namemax: ::c_ulong,\r\n1070:    pub fn mincore(addr: *const ::c_void, len: ::size_t,\r\n```\r\n\r\nIt seems to be matching `(\\bmin)|(max\\b)`, whereas I expected `\\b(min|max)\\b`.\r\n\r\nrepro'd in 0.4.0 and 0.5.2\r\n",
+  "gt": [
+   "src/args.rs"
+  ]
+ },
+ {
+  "pr": 310,
+  "base": "073ff35ebb6877e23bf3effe3710e695184a1671",
+  "issue": 286,
+  "title": "Redirecting ripgrep to a file within the search directory will cause rg to also search that file",
+  "body": "This leads to ripgrep searching its own output, taking a lot of time and eating up disk space. Here's a minimal example:\r\n```\r\nmkdir rg-test && cd rg-test\r\necho \"hello\" > found.txt\r\nrg -e \"hello\" > tmp.txt\r\nrg -e \"hello\" > tmp2.txt\"\r\nrg -e \"hello\" > tmp3.txt\"\r\n```\r\n\r\nThen, running `rg -e \"hello\"` will output the following:\r\n```\r\nfound.txt\r\n1:hello\r\n\r\ntmp.txt\r\n1:found.txt:hello\r\n2:tmp.txt:found.txt:hello\r\n\r\ntmp2.txt\r\n1:found.txt:hello\r\n2:tmp.txt:found.txt:hello\r\n3:tmp.txt:tmp.txt:found.txt:hello\r\n4:tmp2.txt:found.txt:hello\r\n5:tmp2.txt:tmp.txt:found.txt:hello\r\n6:tmp2.txt:tmp.txt:tmp.txt:found.txt:hello \r\n\r\ntmp3.txt\r\n1:found.txt:hello\r\n2:tmp.txt:found.txt:hello\r\n3:tmp.txt:tmp.txt:found.txt:hello\r\n4:tmp2.txt:found.txt:hello\r\n5:tmp2.txt:tmp.txt:found.txt:hello\r\n6:tmp2.txt:tmp.txt:tmp.txt:found.txt:hello\r\n7:tmp2.txt:tmp2.txt:found.txt:hello\r\n8:tmp2.txt:tmp2.txt:tmp.txt:found.txt:hello\r\n9:tmp2.txt:tmp2.txt:tmp.txt:tmp.txt:found.txt:hello\r\n10:tmp3.txt:found.txt:hello\r\n11:tmp3.txt:tmp.txt:found.txt:hello\r\n12:tmp3.txt:tmp.txt:tmp.txt:found.txt:hello\r\n13:tmp3.txt:tmp2.txt:found.txt:hello\r\n14:tmp3.txt:tmp2.txt:tmp.txt:found.txt:hello\r\n15:tmp3.txt:tmp2.txt:tmp.txt:tmp.txt:found.txt:hello\r\n16:tmp3.txt:tmp2.txt:tmp2.txt:found.txt:hello\r\n17:tmp3.txt:tmp2.txt:tmp2.txt:tmp.txt:found.txt:hello\r\n18:tmp3.txt:tmp2.txt:tmp2.txt:tmp.txt:tmp.txt:found.txt:hello\r\n```\r\n\r\nWhen doing the same with grep instead, we get the expected output (and switching hello with yellow)\r\n\r\n```\r\nfound2.txt\r\n1:yellow\r\n\r\nt",
+  "gt": [
+   "ignore/src/walk.rs",
+   "src/args.rs",
+   "src/atty.rs",
+   "src/main.rs"
+  ]
+ }
+]
