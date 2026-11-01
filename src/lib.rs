@@ -3,6 +3,7 @@ pub mod bundle_writer;
 pub mod dep_builder;
 pub mod embed;
 pub mod index_builder;
+pub mod path_kind;
 pub mod search_index;
 pub mod tokenizer;
 
