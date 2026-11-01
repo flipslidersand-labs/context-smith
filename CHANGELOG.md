@@ -18,6 +18,9 @@ on axum, clap and bat, so their numbers are optimistic.
 - `contextsmith --version` / `-V` (#111).
 - `bench/`: scripts, fixed candidate sets and a README that reproduce the Accuracy table
   in the README (#140). Not included in the published crate.
+- `adapters/claude-code/`: a Claude Code skill and a thin wrapper (`ctx-select.sh`) that list
+  the files most relevant to a task in any git repository, keeping the index outside the
+  repository (#145). Not included in the published crate.
 
 ### Fixed
 - Multi-word tasks no longer fail with "No matching files found": terms are OR-joined (#133).
@@ -38,6 +41,8 @@ on axum, clap and bat, so their numbers are optimistic.
   files with many symbols no longer outrank the best match (#151).
 - `--task` values that start with `-` are accepted instead of being rejected as unknown
   options (#149).
+- `index --out <path>` creates the missing parent directories of `<path>` instead of failing
+  with "unable to open database file" (#172).
 
 ### Changed
 - Test and fixture files (`tests/`, `test/`, `__tests__/`, `fixtures/` directories, and
@@ -50,6 +55,16 @@ on axum, clap and bat, so their numbers are optimistic.
 - `Cargo.toml` `repository` / `homepage` point to `flipslidersand-labs/context-smith`.
 - README: the Accuracy section reports measured numbers and the comparison with naive
   keyword matching (#139, #155).
+
+### Known limitations
+- With the default budget of 30,000 tokens, the budget allocation of this release can do worse
+  than 0.4.0 when the best-ranked file is a large test or fixture that more than half fits:
+  its fragment uses the budget and the smaller files below it are lost (bat 0.53 against 0.66,
+  hono 0.75 against 0.80). On other repositories measured it is the same or better. Tracked in
+  #174; a proposed alternative (#166) lost accuracy at 4k and 8k on repositories it was not
+  tuned on, so it was not adopted.
+- Only Rust, Python and TypeScript repositories were measured, 11 in all; the result for
+  other languages and for repositories of other shapes is unknown.
 
 ## [0.4.0] - 2026-08-27
 
