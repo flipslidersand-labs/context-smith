@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/context-smith.svg)](https://crates.io/crates/context-smith)
 [![docs.rs](https://docs.rs/context-smith/badge.svg)](https://docs.rs/context-smith)
-[![CI](https://github.com/flipslidersand/context-smith/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand/context-smith/actions/workflows/ci.yml)
+[![CI](https://github.com/flipslidersand-labs/context-smith/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand-labs/context-smith/actions/workflows/ci.yml)
 [![license](https://img.shields.io/crates/l/context-smith.svg)](./LICENSE)
 
 **English**: this page | **日本語**: [README.ja.md](./README.ja.md)
