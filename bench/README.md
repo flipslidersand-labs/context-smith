@@ -28,10 +28,12 @@ cargo build --release                         # from the repo root -> target/rel
 git clone --filter=blob:none https://github.com/tokio-rs/axum.git /tmp/bench/axum
 git clone --filter=blob:none https://github.com/clap-rs/clap.git  /tmp/bench/clap
 git clone --filter=blob:none https://github.com/sharkdp/bat.git   /tmp/bench/bat
+git clone --filter=blob:none https://github.com/BurntSushi/ripgrep.git /tmp/bench/ripgrep
 
 REPO=/tmp/bench/axum TASKMODE=title python3 bench/bench.py
 REPO=/tmp/bench/clap TASKMODE=title python3 bench/bench.py
 REPO=/tmp/bench/bat  TASKMODE=title python3 bench/bench.py
+REPO=/tmp/bench/ripgrep CANDS=bench/cands-ripgrep.json TASKMODE=title python3 bench/bench.py
 ```
 
 Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, optional argument `N` = use only the first N candidates. To use your own candidates: `python3 bench/fetch_cands.py OWNER NAME OUT.json`, then `CANDS=OUT.json`.
@@ -43,6 +45,7 @@ Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, opti
 | axum (54) | 4k / 8k / 16k | 0.22 / 0.52 / 0.67 | 0.17 / 0.49 / 0.56 |
 | clap (60) | 4k / 8k / 16k | 0.21 / 0.29 / 0.44 | 0.16 / 0.27 / 0.38 |
 | bat (56) | 4k / 8k / 16k | 0.16 / 0.30 / 0.53 | 0.18 / 0.24 / 0.42 |
+| ripgrep (26) | 4k / 8k / 16k | 0.04 / 0.17 / 0.22 | 0.08 / 0.19 / 0.27 |
 
 These are the numbers of `master` after #142 (budget allocation), #143 (BFS neighbour scores) and #151 (symbols scored per file, weight 0.5). With #142 + #143 only they were axum 0.22 / 0.40 / 0.46, clap 0.13 / 0.28 / 0.38, bat 0.13 / 0.30 / 0.41. Before those fixes the same benchmark gave axum 0.23 / 0.33 / 0.45, clap 0.08 / 0.15 / 0.28, bat 0.08 / 0.08 / 0.10 (this is also what the 0.4.0 release produces).
 
@@ -51,6 +54,8 @@ If you only want the current ceiling to compare against: with the true files kno
 ## Verified
 
 The first verification, on 2026-10-31 (master `239a17b`, i.e. before #142 and #143; binary built with `cargo build --release`, three repos run in parallel): **all 18 cells of the then-current table matched exactly** (two decimals). The current table was measured on 2026-11-01 with a binary built from master `6aea5f2` (#142 + #143 + #151), run twice per repo with identical results. Counts: axum 54 measured (55 candidates, 1 skipped by the script: checkout failed, or no truth file is in the index at the base commit), clap 60 (`cands-clap.json` holds the 60 candidates the README used; the fetch returned more), bat 56. Runtime about 1.5-2 minutes per repo (84 s / 124 s / 120 s) plus 1.2 minutes to build; the clones are the larger cost. Re-run twice (axum 2x, clap 2x, bat 2x): recall was identical every time; the reported `cost` of context-smith on bat differed slightly between the two runs (e.g. 14585 vs 14539 at 16k). The cause was the order of equal-score files, which came from a hash map; #142 breaks ties by path, and after it two runs were identical in recall and cost. The index is rebuilt per task and the random baseline is seeded.
+
+ripgrep (26 candidates, added 2026-11-01) was measured on master `ffc78b0` (#142 + #143 + #151 + #156), run twice with identical results: 26 measured, 0 skipped, 0 `cs` query errors. It is the repository the fixes were *not* developed on; see #135 for stage-by-stage numbers (A: before the series, B: symbols only, C: #142 + #143 only, D: current).
 
 The Issue bodies in `cands-*.json` have third-party home-directory paths replaced with `/home/USER` (or `/Users/USER`) before committing; titles and truth files are untouched, so the `title` numbers above are unaffected. The `full` numbers quoted in #135 were measured before this and were not re-run.
 
