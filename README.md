@@ -151,11 +151,11 @@ Measured on merged fix PRs of three public Rust repositories. Task = the title o
 
 | repo (tasks) | budget | context-smith | naive keyword match |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.22 / 0.40 / 0.46 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.13 / 0.28 / 0.38 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.13 / 0.30 / 0.41 | 0.18 / 0.24 / 0.42 |
+| axum (54) | 4k / 8k / 16k | 0.22 / 0.52 / 0.67 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.21 / 0.29 / 0.44 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.16 / 0.30 / 0.53 | 0.18 / 0.24 / 0.42 |
 
-context-smith is roughly **on par with** naive keyword matching on clap and bat at 8k-16k (one task is worth about 0.02, so a 0.01 gap is noise), behind it on axum at 8k and 16k and on clap and bat at 4k, and ahead only at 4k on axum. It does **not** beat the baseline. For scale: if the right files were known in advance, 87-99% of them would fit whole into 16k. These numbers are for the development version; the 0.4.0 release on crates.io predates the budget and ranking fixes ([#142](https://github.com/flipslidersand-labs/context-smith/pull/142), [#143](https://github.com/flipslidersand-labs/context-smith/pull/143)). Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. To reproduce these numbers (scripts, fixed candidate sets, metric definitions): [bench/](./bench/README.md). Open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
+context-smith is ahead of naive keyword matching at 16k on all three repositories (by 0.06-0.11) and at 8k on all three (by 0.02-0.06; one task is worth about 0.02, so the axum and clap gaps at 8k are within noise). At 4k it is ahead on axum and clap and 0.02 behind on bat (noise). For scale: if the right files were known in advance, 87-99% of them would fit whole into 16k. These numbers are for the development version; the 0.4.0 release on crates.io predates the budget, ranking and symbol-scoring fixes ([#142](https://github.com/flipslidersand-labs/context-smith/pull/142), [#143](https://github.com/flipslidersand-labs/context-smith/pull/143), [#151](https://github.com/flipslidersand-labs/context-smith/pull/151)). Limits: three Rust repositories, BM25 only (no embeddings), an untuned baseline, other languages not measured. The symbol weight (0.5) was chosen on these same three repositories, so the table is optimistic for them (ripgrep, with 26 tasks, was used as a check and moved the same way). To reproduce these numbers (scripts, fixed candidate sets, metric definitions): [bench/](./bench/README.md). Open questions: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135).
 
 ## Status
 
