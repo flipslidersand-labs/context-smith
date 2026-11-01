@@ -145,11 +145,11 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 
 | リポ(タスク数) | 予算 | context-smith | 素朴な単語一致 |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.22 / 0.40 / 0.46 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.13 / 0.28 / 0.38 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.13 / 0.30 / 0.41 | 0.18 / 0.24 / 0.42 |
+| axum (54) | 4k / 8k / 16k | 0.22 / 0.52 / 0.67 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.21 / 0.29 / 0.44 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.16 / 0.30 / 0.53 | 0.18 / 0.24 / 0.42 |
 
-context-smith は、clap と bat の 8k〜16k では素朴な単語一致と**同程度**(1 タスクは約 0.02 なので、0.01 の差は誤差)、axum の 8k・16k と clap・bat の 4k では下回り、上回るのは axum の 4k だけです。素朴な単語一致には**勝てていません**。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分と順位づけの修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143))が入っていません。限界: Rust リポジトリ 3 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング、他の言語は未測定。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
+context-smith は、3 リポすべての 16k で素朴な単語一致を上回り(0.06〜0.11)、8k でも 3 リポすべてで上回ります(0.02〜0.06。1 タスクは約 0.02 なので、axum と clap の 8k の差は誤差の範囲)。4k では axum と clap で上回り、bat では 0.02 下回ります(誤差)。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151))が入っていません。限界: Rust リポジトリ 3 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング、他の言語は未測定。シンボルの重み(0.5)はこの同じ 3 リポで選んだため、この表はこれらのリポに対して楽観的(確認用の ripgrep 26 件でも同じ向きに動いた)。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
 
 ## ステータス
 
