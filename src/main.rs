@@ -26,6 +26,7 @@ use context_smith::budget::{allocate, Candidate};
 use context_smith::bundle_writer::{render_task_md, write_bundle};
 use context_smith::dep_builder::bfs_expand;
 use context_smith::index_builder::{build_index, IndexDb};
+use context_smith::path_kind::path_score_factor;
 use context_smith::search_index::search_bm25;
 use context_smith::GitRepo;
 
@@ -186,7 +187,6 @@ fn select_candidates(
             .collect();
 
         for file_id in scored_ids {
-            let score = scored[&file_id];
             let rel_path: String = {
                 let mut stmt = conn
                     .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
@@ -195,6 +195,7 @@ fn select_candidates(
                     Err(_) => continue,
                 }
             };
+            let score = scored[&file_id] * path_score_factor(&rel_path);
             let abs = repo.root().join(&rel_path);
             let content = match std::fs::read_to_string(&abs) {
                 Ok(s) => s,
