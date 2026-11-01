@@ -20,7 +20,7 @@ Exit codes: 0 ok, 2 usage error or contextsmith missing, 3 contextsmith older th
 
 ## What to expect (measured, not promised)
 
-- It finds the files a real fix touched about as often as, or better than, a plain keyword match over the same words: on 12 public repositories (Rust, Python, TypeScript) its recall at a 16k budget was higher on 11 and lower on 1 (poetry), by 0.01 to 0.22. Recall is 0.3 to 0.8 in absolute terms, so it misses files, especially ones the task does not name (settings, shared helpers).
+- It finds the files a real fix touched about as often as, or better than, a plain keyword match over the same words: on 11 public repositories (Rust, Python, TypeScript) its recall at a 16k budget was higher on 10 and lower on 1 (poetry), by 0.01 to 0.22 (three of the eleven were also used to choose a ranking weight, so their gap is optimistic). Recall is 0.3 to 0.8 in absolute terms, so it misses files, especially ones the task does not name (settings, shared helpers).
 - It does not read the task semantically: a file that never contains the task's words is not found.
 - Test and fixture files rank at half weight, not excluded. The benchmark counts only source files as correct, so it favours that choice; whether it helps real work is not measured.
 - Whether the list makes an AI's answers better has not been measured.
