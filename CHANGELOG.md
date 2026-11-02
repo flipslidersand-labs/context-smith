@@ -57,12 +57,6 @@ on axum, clap and bat, so their numbers are optimistic.
   keyword matching (#139, #155).
 
 ### Known limitations
-- With the default budget of 30,000 tokens, the budget allocation of this release can do worse
-  than 0.4.0 when the best-ranked file is a large test or fixture that more than half fits:
-  its fragment uses the budget and the smaller files below it are lost (bat 0.53 against 0.66,
-  hono 0.75 against 0.80). On other repositories measured it is the same or better. Tracked in
-  #174; a proposed alternative (#166) lost accuracy at 4k and 8k on repositories it was not
-  tuned on, so it was not adopted.
 - Only Rust, Python and TypeScript repositories were measured, 11 in all; the result for
   other languages and for repositories of other shapes is unknown.
 
