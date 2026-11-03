@@ -116,7 +116,7 @@ contextsmith index          contextsmith build
       │
       ▼
  .contextsmith/index.db (SQLite)
- ├── files        — path, language, blob SHA
+ ├── files        — path, language, blob SHA of the working-tree content (uncommitted edits are indexed; only files tracked in HEAD)
  ├── symbols      — function/struct/class names, line numbers, snippets
  ├── deps         — inter-file import dependency graph
  ├── meta         — repo_root, indexed_at
