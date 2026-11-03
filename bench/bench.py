@@ -40,6 +40,8 @@ def est(size):  # bytes -> tokens, same rule for every method
 
 CANDS = os.environ.get("CANDS", os.path.join(HERE, f"cands-{os.path.basename(os.path.normpath(REPO))}.json"))
 cands = json.load(open(CANDS))[:LIMIT]
+if not MODE.endswith("title") and not all("body" in c for c in cands):
+    sys.exit("this candidate file has no issue bodies: use TASKMODE=title, or refetch with fetch_cands.py --with-body")
 res = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
 cost = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
 errs, skipped, t0, corpus = 0, 0, time.time(), []

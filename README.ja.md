@@ -115,13 +115,13 @@ contextsmith index          contextsmith build
  ├── deps         — ファイル間の import 依存グラフ
  ├── meta         — repo_root・indexed_at
  ├── fts_path     — FTS5 (トークン化したファイルパス、BM25 weight ×3)
- ├── fts_symbols  — FTS5 (pre-tokenized、BM25 weight ×2)
+ ├── fts_symbols  — FTS5 (pre-tokenized、シンボル 1 件 1 行、BM25 weight ×0.5)
  └── fts_body     — FTS5 (ファイル本文、BM25 weight ×1)
 ```
 
 ### スコアリングパイプライン
 
-1. **BM25 検索** — タスク文字列で `fts_path`（重み×3）・`fts_symbols`（重み×2）・`fts_body`（重み×1）を UNION ALL で検索、上位 20 件を seed として取得。タスクが 9 語以上(重複除く)のときは、先に出現ファイル数が少ない順の上位 8 語に絞る(一般語が固有の語を埋もれさせないため)
+1. **BM25 検索** — タスク文字列で `fts_path`（重み×3）・`fts_symbols`（重み×0.5、ファイルごとに最良の一致）・`fts_body`（重み×1）を UNION ALL で検索、上位 20 件を seed として取得。タスクが 9 語以上(重複除く)のときは、先に出現ファイル数が少ない順の上位 8 語に絞る(一般語が固有の語を埋もれさせないため)
 2. **依存グラフ BFS** — seed ファイルから bidirectional BFS（depth=2）でスコアを伝播（hop ごとに ×0.5 減衰）
 3. **greedy 配分** — スコア降順に token 数を積み上げ、budget を超えたら打ち切り
 4. **バンドル出力** — 選択ファイルを Markdown に展開し、直近 Git 差分とともに出力
@@ -141,15 +141,17 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 
 ## 精度
 
-公開 Rust リポジトリ 3 つの、マージ済みの修正 PR で測定。タスク = その PR が閉じた Issue の題名、正解 = PR が変更した `src/**/*.rs`、インデックスは PR の**マージ前**のコミットで作成(修正の漏れ込みなし)。ファイルの内容が 50% 以上バンドルに入っている場合だけ「見つかった」と数える。比較対象は素朴な単語一致(タスクの語を含む数でファイルを並べ、パス一致は ×3 で加点、同じトークン予算を埋める)。タスク平均の再現率(recall):
+公開 Rust リポジトリ 5 つの、マージ済みの修正 PR で測定。タスク = その PR が閉じた Issue の題名、正解 = PR が変更した `src/**/*.rs`、インデックスは PR の**マージ前**のコミットで作成(修正の漏れ込みなし)。ファイルの内容が 50% 以上バンドルに入っている場合だけ「見つかった」と数える。比較対象は素朴な単語一致(タスクの語を含む数でファイルを並べ、パス一致は ×3 で加点、同じトークン予算を埋める)。タスク平均の再現率(recall):
 
 | リポ(タスク数) | 予算 | context-smith | 素朴な単語一致 |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.23 / 0.33 / 0.45 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.08 / 0.15 / 0.28 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.08 / 0.08 / 0.10 | 0.18 / 0.24 / 0.42 |
+| axum (54) | 4k / 8k / 16k | 0.45 / 0.54 / 0.67 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.23 / 0.33 / 0.48 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.25 / 0.35 / 0.48 | 0.18 / 0.24 / 0.42 |
+| ripgrep (26) | 4k / 8k / 16k | 0.15 / 0.22 / 0.49 | 0.08 / 0.19 / 0.27 |
+| fd (74) | 4k / 8k / 16k | 0.37 / 0.48 / 0.60 | 0.25 / 0.37 / 0.69 |
 
-この条件では、axum の最小予算を除き、context-smith は素朴な単語一致に**勝てていません**。bat では正しいファイルの 88% を検索で拾えているが、順位が低く予算に入らない。限界: Rust リポジトリ 3 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング、他の言語は未測定。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
+Rust の 5 リポでは、context-smith は素朴な単語一致を、4k(0.07〜0.28)と 8k(0.03〜0.11)ではすべてのリポで、16k では 5 つのうち 4 つ(0.06〜0.22)で上回ります。fd の 16k は下回ります(0.09。74 件中 約 7 タスク分)。1 タスクはリポにより 0.014〜0.04(74 件〜26 件)なので、0.03 以下の差は誤差の範囲。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151)・[#162](https://github.com/flipslidersand-labs/context-smith/pull/162))が入っていません。限界: Rust リポジトリ 5 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング。他の言語(Python・TypeScript)は [bench/](./bench/README.md#other-languages-python-typescript-added-2026-11-01-148) を参照: TypeScript は測定した 2 リポともですべての予算で素朴な単語一致を上回る(hono の 16k の差 0.02 は誤差)が、**Python は 2 リポとも 16k で下回る**(scrapy 0.10、poetry 0.21。poetry は 8k でも 0.09)ので、Rust の数字がそのまま通用するとは考えないこと。poetry と hono では、16k の recall が 8k より低い。予算を増やして下がるのは本来起きないはずの現象。原因(16k で 1.00 から 0.00 に落ちた poetry の 2 タスクで確認。8k では飛ばされる 16,000 トークンのテストファイルが、断片として予算全部を使う): 半分規則([#162](https://github.com/flipslidersand-labs/context-smith/pull/162))が、予算の 2 倍以内の、上位だが正解でない大きなファイルに、予算全部を使い切らせている。詳細は [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。シンボルの重み(0.5)と予算配分の規則は axum・clap・bat・ripgrep で開発したため、この表はそれらのリポに対して楽観的。fd と、Python・TypeScript の 4 リポは、どのパラメータの選択にも使っていない。ripgrep は正解ファイルが大きく(中央値 約 9,400 トークン。他は約 3,500)、予算配分の規則が最も効く。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
 
 ## ステータス
 

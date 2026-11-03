@@ -7,10 +7,11 @@ use crate::tokenizer::{tokenize_code, tokenize_path};
 
 // BM25 signal weights (higher = stronger signal).
 // path: file-name/directory match is the strongest localization cue.
-// symbols: function/type names match the task vocabulary directly.
+// symbols: function/type names match the task vocabulary directly. Kept low (0.5): symbol
+//   matches are plentiful and noisy; at the old 2.0 they pushed the right file down (#135).
 // body: full-text fallback, broadest but noisiest.
 const W_PATH: f64 = 3.0;
-const W_SYMBOLS: f64 = 2.0;
+const W_SYMBOLS: f64 = 0.5;
 const W_BODY: f64 = 1.0;
 
 /// Keep only bareword characters (alphanumerics and `_`); everything else could be
@@ -175,7 +176,7 @@ pub fn populate_fts_with_paths(
     }
 }
 
-/// BM25 search across fts_path (×3), fts_symbols (×2) and fts_body (×1).
+/// BM25 search across fts_path (×3), fts_symbols (×0.5, best match per file) and fts_body (×1).
 ///
 /// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MAX(rank)` so
 /// that the absolute magnitude difference between small path tables and large body tables
@@ -205,6 +206,9 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     //
     // Sub-queries are wrapped in derived tables so LIMIT applies before UNION ALL,
     // preventing intermediate memory explosion.
+    // fts_symbols has one row per symbol while fts_path / fts_body have one row per file, so its
+    // rows are collapsed to the best match per file (`MIN(rank)`); summing them let a file with many
+    // symbols outrank the file that matches the task best (#135).
     // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
     // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
     let sub_limit = (top_n * 3) as i64;
@@ -215,7 +219,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
              FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, rank FROM fts_symbols WHERE name    MATCH ?4 ORDER BY rank LIMIT ?5)
+             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
              FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank LIMIT ?5)
@@ -242,7 +246,9 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_fts_query;
+    use super::*;
+    use crate::index_builder::IndexDb;
+    use tempfile::TempDir;
 
     #[test]
     fn sanitize_removes_fts5_operators() {
@@ -402,6 +408,43 @@ mod tests {
         );
     }
 
+    /// #135: `fts_symbols` holds one row per symbol, so summing per-row scores per file made a
+    /// file with many symbols that merely contain one common word outrank the file whose single
+    /// symbol matches the task's specific terms. Scores must be aggregated per file.
+    #[test]
+    fn many_symbol_rows_do_not_outrank_the_better_matching_file() {
+        let conn = fts_conn(&[]);
+        // 100 unrelated files so that "handler" is moderately rare (a word present in every
+        // document has ~zero BM25 weight and would never inflate a sum)
+        for id in 10..110 {
+            conn.execute(
+                "INSERT INTO fts_symbols (file_id, name) VALUES (?1, 'unrelated')",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        // file 1: 40 symbols, each containing the word "handler"
+        for i in 0..40 {
+            conn.execute(
+                "INSERT INTO fts_symbols (file_id, name) VALUES (1, ?1)",
+                rusqlite::params![format!("handler{i} handler")],
+            )
+            .unwrap();
+        }
+        // file 2: one symbol that matches both the specific and the common term
+        conn.execute(
+            "INSERT INTO fts_symbols (file_id, name) VALUES (2, 'zanzibar handler')",
+            [],
+        )
+        .unwrap();
+        let hits = super::search_bm25(&conn, "zanzibar handler", 5).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.0),
+            Some(2),
+            "file with one precise symbol match must rank first: {hits:?}"
+        );
+    }
+
     #[test]
     fn rarest_terms_leaves_short_tasks_unchanged() {
         use super::{rarest_terms, MAX_QUERY_TERMS};
@@ -433,5 +476,222 @@ mod tests {
         );
         assert!(result.contains("Oregon"), "got: {result}");
         assert!(result.contains("Notify"), "got: {result}");
+    }
+
+    // ---- populate_fts_with_paths / search_bm25 ----
+
+    struct Fixture {
+        db: IndexDb,
+        dir: TempDir,
+        rel: HashMap<i64, PathBuf>,
+        abs: HashMap<i64, PathBuf>,
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Files: auth/login.rs (symbol authenticate_user), db/store.rs (symbol open_pool).
+    fn fixture() -> Fixture {
+        let db = IndexDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        let dir = TempDir::new().unwrap();
+        let mut rel = HashMap::new();
+        let mut abs = HashMap::new();
+        let specs = [
+            (
+                "auth/login.rs",
+                "authenticate_user",
+                "fn authenticate_user() { check password }",
+            ),
+            (
+                "db/store.rs",
+                "open_pool",
+                "fn open_pool() { connect database }",
+            ),
+        ];
+        for (path, sym, body) in specs {
+            let id: i64 = db
+                .upsert_file(std::path::Path::new(path), crate::Language::Rust, "sha", 1)
+                .unwrap()
+                .0;
+            db.connection()
+                .execute(
+                    "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, 'function', 1, '')",
+                    params![id, sym],
+                )
+                .unwrap();
+            let abs_path = dir.path().join(path.replace('/', "_"));
+            std::fs::write(&abs_path, body).unwrap();
+            rel.insert(id, PathBuf::from(path));
+            abs.insert(id, abs_path);
+        }
+        db.connection()
+            .execute(
+                "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (1, 'use std::io', 'import', 1, '')",
+                [],
+            )
+            .unwrap();
+        Fixture { db, dir, rel, abs }
+    }
+
+    #[test]
+    fn populate_fills_all_three_fts_tables() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let c = f.db.connection();
+        assert_eq!(count(c, "fts_path"), 2);
+        // import symbols are excluded
+        assert_eq!(count(c, "fts_symbols"), 2);
+        assert_eq!(count(c, "fts_body"), 2);
+    }
+
+    #[test]
+    fn populate_twice_does_not_duplicate_rows() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert_eq!(count(f.db.connection(), "fts_path"), 2);
+        assert_eq!(count(f.db.connection(), "fts_body"), 2);
+    }
+
+    #[test]
+    fn populate_with_empty_maps_clears_fts() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(count(f.db.connection(), "fts_path"), 0);
+        assert_eq!(count(f.db.connection(), "fts_body"), 0);
+    }
+
+    #[test]
+    fn populate_skips_unreadable_body_but_keeps_rest() {
+        let mut f = fixture();
+        let id = *f.abs.keys().next().unwrap();
+        f.abs.insert(id, f.dir.path().join("does_not_exist.rs"));
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert_eq!(count(f.db.connection(), "fts_body"), 1);
+        assert_eq!(count(f.db.connection(), "fts_path"), 2);
+    }
+
+    #[test]
+    fn populate_truncates_large_body_on_char_boundary() {
+        let f = fixture();
+        let id = *f.abs.keys().next().unwrap();
+        std::fs::write(&f.abs[&id], "あ".repeat(200_000)).unwrap();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let bytes: i64 =
+            f.db.connection()
+                .query_row(
+                    "SELECT length(CAST(content AS BLOB)) FROM fts_body WHERE file_id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert!(bytes <= 512 * 1024 && bytes > 512 * 1024 - 3, "{bytes}");
+    }
+
+    #[test]
+    fn populate_error_rolls_back_transaction() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        f.db.connection()
+            .execute_batch("DROP TABLE fts_symbols")
+            .unwrap();
+        let res = populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs);
+        assert!(res.is_err());
+        // Transaction must have been closed and earlier data restored.
+        assert!(f.db.connection().is_autocommit());
+        assert_eq!(count(f.db.connection(), "fts_path"), 2);
+    }
+
+    #[test]
+    fn search_finds_file_by_path_term() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let hits = search_bm25(f.db.connection(), "login", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        let login_id = *f
+            .rel
+            .iter()
+            .find(|(_, p)| p.ends_with("login.rs"))
+            .unwrap()
+            .0;
+        assert_eq!(hits[0].0, login_id);
+        assert!(hits[0].1 > 0.0);
+    }
+
+    #[test]
+    fn search_finds_file_by_symbol_and_body_terms() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let store_id = *f
+            .rel
+            .iter()
+            .find(|(_, p)| p.ends_with("store.rs"))
+            .unwrap()
+            .0;
+        let by_symbol = search_bm25(f.db.connection(), "pool", 5).unwrap();
+        assert_eq!(by_symbol[0].0, store_id);
+        let by_body = search_bm25(f.db.connection(), "database", 5).unwrap();
+        assert_eq!(by_body[0].0, store_id);
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert!(search_bm25(f.db.connection(), "zzzzqqqq", 5)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn search_respects_top_n() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        // "fn" appears in both bodies
+        let all = search_bm25(f.db.connection(), "fn", 10).unwrap();
+        assert_eq!(all.len(), 2);
+        let one = search_bm25(f.db.connection(), "fn", 1).unwrap();
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn search_results_sorted_by_score_descending() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        let hits = search_bm25(f.db.connection(), "fn authenticate", 10).unwrap();
+        assert!(hits.windows(2).all(|w| w[0].1 >= w[1].1), "{hits:?}");
+    }
+
+    #[test]
+    fn search_empty_query_is_error() {
+        let f = fixture();
+        let err = search_bm25(f.db.connection(), "", 5).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn search_punctuation_only_query_is_error() {
+        let f = fixture();
+        assert!(search_bm25(f.db.connection(), "(*) - \"", 5).is_err());
+    }
+
+    #[test]
+    fn search_with_fts_operators_in_query_does_not_error() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        assert!(search_bm25(f.db.connection(), "login OR (x) AND \"y\" *", 5).is_ok());
+    }
+
+    #[test]
+    fn search_on_empty_index_returns_empty() {
+        let db = IndexDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        assert!(search_bm25(db.connection(), "anything", 3)
+            .unwrap()
+            .is_empty());
     }
 }

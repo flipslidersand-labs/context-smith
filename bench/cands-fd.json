@@ -1,0 +1,785 @@
+[
+ {
+  "pr": 2208,
+  "base": "8b14e8dc5f1bd8c2656d735e80f1e6335b335bbf",
+  "issue": 2207,
+  "title": "--absolute-path drops \\?\\UNC\\ and \\?\\Volume{...}\\ search paths on Windows",
+  "body": "On Windows, `fd --absolute-path` strips the `\\?\\` verbatim prefix by string trimming (`filesystem::absolute_path`, `src/filesystem.rs:21`), so `\\?\\UNC\\server\\share\\x` becomes the relative `UNC\\server\\share\\x` and `\\?\\Volume{GUID}\\x` becomes `Volume{GUID}\\x`. fd prints nothing and exits 0; the error only shows with `--show-errors`. Hyperlinks built from those paths are wrong too. Rust's own `canonicalize` produces `\\?\\UNC\\...` paths, so these reach fd in practice.\r\n\r\nSuggested fix: strip the prefix by components instead — `\\?\\C:` becomes `C:`, `\\?\\UNC\\s\\sh` becomes `\\s\\sh`, other verbatim forms left alone. A unit test for this fails before the fix (`left: \"UNC\\\\server\\\\share\\\\foo\"`). fd's other path handling is unchanged; `--strip-cwd-prefix` combos still apply to the result.\r\n\r\nI used AI assistance (Kimi Code) to help draft this report and the proposed fix; I verified the behavior on Windows myself and reviewed everything before posting.\r\n",
+  "gt": [
+   "src/filesystem.rs"
+  ]
+ },
+ {
+  "pr": 2193,
+  "base": "c44735ec0f130c2486afe9c976937c03b57a8c62",
+  "issue": 2192,
+  "title": "[BUG] -u is not equivalent to -H -I when combined with --ignore or --no-hidden",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nAccording to documents, `-u`/`--unrestricted` should be an alias for `--no-ignore --hidden`.\n\nSo `fd -u --ignore` should be identical to `fd -H -I --ignore`: `--ignore` turns the \"no-ignore\" off, while hidden files stay visible. Also `fd -u --no-hidden` should be identical to `fd --no-ignore`.\n\nBut actually:\n```sh\ntouch a.txt .hidden.txt ignored.txt\necho ignored.txt > .ignore\nfd -u --ignore\nfd -u --no-hidden\n```\n\nBoth 2 outputs are `a.txt`\n\n### Describe what you expected to happen:\n\nThere are 4 files. `.hidden.txt` and `.ignore` are hidden files. `ignored.txt` is the ignored file.\n\n`fd -u --ignore` is expected to be the same as `fd -H -I --ignore` or `fd -H`: \n```\n.hidden.txt  # visible hidden file\n.ignore # visible hidden file\na.txt \n```\n\n`fd -u --no-hidden` is expected to be the same as `fd -H -I --no-hidden` or `fd -I`: \n```\na.txt\nignored.txt  # visible ignored file\n```\n\n### What version of `fd` are you using?\n\nfd 10.5.0\n\n### Which operating system / distribution are you on?\n\n```shell\nDarwin 27.0.0 arm64\n```",
+  "gt": [
+   "src/cli.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 2106,
+  "base": "fe0e455feea831a055599accb5ac4eea2e3d6ba1",
+  "issue": 2104,
+  "title": "[BUG] Newlines in error messages shown as `\\x0A`",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\n```\n$ fd a/b\n[fd error]: The search pattern 'a/b' contains a path-separation character and will not lead to any search results.\\x0A\\x0AIf you want to search for all files inside the 'a/b' directory, use a match-all pattern:\\x0A\\x0A  fd . 'a/b'\\x0A\\x0AInstead, if you want your pattern to match the full file path, use:\\x0A\\x0A  fd --full-path 'a/b'\n```\n\nhttps://github.com/sharkdp/fd/blob/fe0e455feea831a055599accb5ac4eea2e3d6ba1/src/main.rs#L204-L212\n\n### Describe what you expected to happen:\n\n```\n$ $ fd a/b\n[fd error]: The search pattern 'a/b' contains a path-separation character and will not lead to any search results.\n\nIf you want to search for all files inside the 'a/b' directory, use a match-all pattern:\n\n  fd . 'a/b'\n\nInstead, if you want your pattern to match the full file path, use:\n\n  fd --full-path 'a/b'\n```\n\n### What version of `fd` are you using?\n\n10.5.0\n\n### Which operating system / distribution are you on?\n\n```shell\nDarwin 24.6.0 x86_64\n```",
+  "gt": [
+   "src/error.rs"
+  ]
+ },
+ {
+  "pr": 2185,
+  "base": "cfed17a2bc4a2a27eeb90932b94f4c5680a78741",
+  "issue": 2184,
+  "title": "[BUG] Explicit regex case sensitivity matching (?i) makes other clauses case-sensitive",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nWhen using regex case match on the first clause all the other clauses become case-sensitive also.\n\nExample files foo-bar, foo-BAR, and FOO-BAR:\n\n```\nfd 'foo' --and 'bar'       # finds all three'\nfd '(?i)foo' --and 'bar'   # finds only foo-bar\n```\n\nWith some assistance from GTP-6.1 Sol, found the cause to be smart-case inspecting the expanded regex, where case folding introduces uppercase characters that weren’t in the pattern.\n\n### Describe what you expected to happen:\n\n_No response_\n\n### What version of `fd` are you using?\n\nfd 8.3.1\n\n### Which operating system / distribution are you on?\n\n```shell\nFound on Ubuntu 22.04.5 LTS on WSL\nLinux 6.18.54.1-microsoft-standard-WSL2 x86_64\n```",
+  "gt": [
+   "src/regex_helper.rs"
+  ]
+ },
+ {
+  "pr": 2173,
+  "base": "dbfe46bd1d068a7e5b41086298ce23052c8d521f",
+  "issue": 382,
+  "title": "Design and refactoring / general code quality",
+  "body": "This is intended as a tracking issue for general code quality and design discussions. @sharkdp feel free to close this when you think quality has reached an overall satisfactory level.\r\n\r\nTo start, I'll quote a recent comment by @sharkdp from a discussion on a [PR thread](https://github.com/sharkdp/fd/pull/309#issuecomment-450738639):\r\n\r\n> There are many things I have in mind that would hopefully help to improve the code quality:\r\n>\r\n> - Group related functions into `impl` blocks of appropriate `structs` such that we don't have to pass around so many parameters.\r\n> - Think about a unified interface for filters (file type, file size, modification data, file extension, ..). \r\nMaybe a `trait`-based interface where the filters would be stored in a `Vec<Box<dyn Filter>>`.\r\n> - Extract some of the functionality like the `OsStr`-based path handling into separate libraries / crates.\r\n",
+  "gt": [
+   "src/filetypes.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 2039,
+  "base": "ee20f426ddf338ac7ead5c5f00ea49258005caaf",
+  "issue": 1017,
+  "title": "--min-depth is broken for broken symlinks",
+  "body": "```console\r\ntavianator@tachyon $ ln -s nowhere foo/bar/baz/link\r\ntavianator@tachyon $ fd link foo -L\r\nfoo/bar/baz/link\r\ntavianator@tachyon $ fd link foo -L --min-depth=1\r\ntavianator@tachyon $ fd link foo -L --min-depth=0\r\ntavianator@tachyon $\r\n```\r\n\r\nBecause:\r\n\r\nhttps://github.com/sharkdp/fd/blob/306cd99273125adb13af74c7801b6fab747fef5d/src/walk.rs#L447-L452\r\n\r\nhttps://github.com/sharkdp/fd/blob/306cd99273125adb13af74c7801b6fab747fef5d/src/walk.rs#L510-L514",
+  "gt": [
+   "src/dir_entry.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 2127,
+  "base": "bb80489efb9fe2bdeabe1844feb5ee0af6fc9b1c",
+  "issue": 2126,
+  "title": "[BUG] `--format` rejects templates starting with `-` and gives a misleading error suggestion",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nWhen using `--format <fmt>`, a format string starting with `-` is rejected:\n\n```console\n> fd --format \"- {/.}\"\nerror: unexpected argument '- ' found\n\n  tip: to pass '- ' as a value, use '-- - '\n\nUsage: fd.exe [OPTIONS] [pattern] [path]...\n\nFor more information, try '--help'.\n```\n\nBut `--format=\"- {/.}\"` can work.\n\nThe help text presents the option as:\n\n```text\n--format <fmt>\n    Print results according to template\n```\n\nThis suggests that a template can be passed as the next argument. It does not mention a restriction on templates starting with `-`. Generating a Markdown list is a straightforward use of this option, but following the documented syntax fails, and the error suggestion does not explain how to fix it.\n\nThe suggestion to use `--` is confusing here because the intended value belongs to `--format`, rather than being a positional argument.\n\n### Describe what you expected to happen:\n\n`--format \"- {/.}\"` should accept the string as the format value, consistent with the documented `--format <fmt>` syntax, and print:\n\n```text\n- a\n- b\n- ...\n```\n\nIf requiring `=` for these templates is intentional, the help text should explain this restriction, and the error should suggest `--format=\"- {/.}\"` instead of directing the user toward `--`.\n\n### What version of `fd` are you using?\n\nfd 10.5.0\n\n### Which operating system / distribution are you on?\n\n```she",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 2082,
+  "base": "41532d114e2ba565fb5367d606c111b29b96450c",
+  "issue": 2081,
+  "title": "Panic on out-of-range '@' Unix timestamp in --changed-before/--changed-within",
+  "body": "### Describe the bug you encountered:\n\n`fd` panics instead of erroring gracefully when `--changed-before` / `--changed-within` (aka `--newer`/`--older`) is given a `@`-prefixed Unix timestamp large enough to overflow `SystemTime`:\n\n```\n$ fd --changed-before \"@18446744073709551615\" . /tmp\nthread 'main' panicked at library/std/src/time.rs:614:31:\noverflow when adding duration to instant\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n```\n\n### Describe what you expected to happen:\n\nThe value should be rejected the same way other unparseable time inputs are — `TimeFilter::from_str` returns `None`, so `fd` prints its normal \"not a valid time\" style error and exits non-zero, rather than panicking with a backtrace.\n\n### Root cause\n\nIn `src/filter/time.rs`, the `@`-timestamp branch of `TimeFilter::from_str` builds the time with `UNIX_EPOCH + Duration::from_secs(...)`. `SystemTime`'s `Add<Duration>` panics on overflow. Every other branch in the same function already fails softly via `.ok()?`; only this one can panic.\n\nThe fix is a one-liner — use `UNIX_EPOCH.checked_add(...)`, which returns `Option` and lets the existing `?` propagate `None`. I have this ready with a regression test and will open a PR referencing this issue.\n\n### What version of `fd` are you using?\n\nReproduced on current `master` (`10.4.2`+).\n",
+  "gt": [
+   "src/filter/time.rs"
+  ]
+ },
+ {
+  "pr": 1983,
+  "base": "0e74d5b75dfd65e756dcb934ff505682a6f18e83",
+  "issue": 1963,
+  "title": "Add --exact option",
+  "body": "This was already requested by @KuroSensei in #627 back in 2020, specifically because `--fixed-strings` performs substring matching even when undesirable, and there's no way to turn that off. @sharkdp suggested that `--glob` can be used instead and closed the issue, but I say that this is not a good solution because globbing syntax can interfere and cause undesirable behavior.\n\n`--exact` would perform `--fixed-strings` without substring matching.",
+  "gt": [
+   "src/cli.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1959,
+  "base": "a665a3bba9abc85e80c142a7dcdb8c356b12d9c9",
+  "issue": 1958,
+  "title": "Add --ignore-parent option",
+  "body": "Add an `--ignore-parent` option to undo the `--no-ignore-parent` option, similar to how `--ignore-vcs` undoes `--no-ignore-vcs`. ",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1921,
+  "base": "7027d45303b412be6fa9c09d689cc6276748fb38",
+  "issue": 1724,
+  "title": "Update manual: --exclude glob on summary line",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nThe [intro to the manual says](https://man.archlinux.org/man/fd.1#:~:text=By%20default%20fd%20uses%20regular%20expressions%20for%20the%20pattern.%20However%2C%20this%20can%20be%20changed%20to%20use%20simple%20glob%20patterns%20with%20the%20%27%2D%2Dglob%27%20option.): (emphasis mine)\n> By default fd uses **regular expressions** for the pattern. However, this can be changed to use simple glob patterns with the '--glob' option.\n\nOK, so `pattern` is a regex. \n\nAnd then, [regarding `--exclude`](https://man.archlinux.org/man/fd.1#:~:text=%2DE%2C%20%2D%2Dexclude%20pattern)\n\n>     -E, --exclude pattern\n\nBut no.  It's actually a glob.  This really tricked me until I read the full description slowly, and word for word.  I missed it on the first reading.\n\nCan we please change this to:\n\n    -E, --exclude glob\n\n\n### Describe what you expected to happen:\n\nManual says: \n\n    -E, --exclude glob\n\n### What version of `fd` are you using?\n\nfd 9.0.0\n\n### Which operating system / distribution are you on?\n\n```shell\n[tom@nas ~]$ uname -srm\nLinux 6.6.33-2-MANJARO-RPI4 aarch64\n[tom@nas ~]$ lsb_release -a\nLSB Version:    n/a\nDistributor ID: Manjaro-ARM\nDescription:    Manjaro ARM Linux\nRelease:        24.03\nCodename:       n/a\n```",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1917,
+  "base": "7027d45303b412be6fa9c09d689cc6276748fb38",
+  "issue": 1900,
+  "title": "Panic when using `--full-path` if current working directory is invalid or removed",
+  "body": "## Description\n\nWhen `--full-path` (or `-f`) is used, fd builds absolute paths for each match. If the process’s current working directory becomes invalid during the search (e.g. it was deleted or permissions changed), the program can **panic** instead of reporting an error.\n\n**Location:** `src/walk.rs`, in the worker closure that builds `search_str` for full-path matching (around lines 521–524).\n\n**Cause:** `filesystem::path_absolute_form(entry_path)` can return an `Err` (for example when `env::current_dir()` fails). The code uses `.expect(\"Retrieving absolute path succeeds\")`, which turns that error into a panic.\n\n**Reproduction (conceptually):**\n1. Start fd with `--full-path` in a directory.\n2. From another process/shell, remove or make the current directory inaccessible (e.g. `rmdir` the CWD or revoke access) while the search is running.\n3. When fd tries to resolve a relative path, `path_absolute_form` fails and the process panics.\n\n**Suggested fix:** Do not use `.expect()`. Either propagate the error (e.g. with `?`) so the search can fail gracefully, or send a `WorkerResult::Error` and continue, so the user gets an error message and a non-zero exit code instead of a panic.",
+  "gt": [
+   "src/config.rs",
+   "src/filesystem.rs",
+   "src/main.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1924,
+  "base": "7027d45303b412be6fa9c09d689cc6276748fb38",
+  "issue": 1018,
+  "title": "`-x` catch the `<path>...` arguments (if any)",
+  "body": "**What version of `fd` are you using?**\r\n[fd 8.3.1]\r\n\r\n`fd -h` shows `[<path>...]` as the ARGS of `fd`. \r\n\r\n> fd [FLAGS/OPTIONS] [\\<pattern\\>] [\\<path\\>...]\r\n\r\nHowever, for the special option `-x, --exec <cmd>`. There are two things: \r\n\r\n1. for example, if I run `fd -I -t d '^target$' -x echo ./some_path`. It gonna show the `./some_path` first, then the query results followed.\r\n2. even the `-x, --exec <cmd>` is an *option*, but looks like it can only used after `<pattern>`.\r\n\r\nFor the first situation, I understand that `-x` is special and it is hard to tell if the `path` after it is the arguments of command or the search path. However, do you guys think it should be some warning inside README?\r\n\r\nFor the second situation, can we update the `fd` command's format like: `fd [FLAGS/OPTIONS] [<pattern>] [-x/-X][<path>...]`? \r\n\r\nThank you!\r\n",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1914,
+  "base": "b691572928bf4a589c1f195c79037fdd2d2b6f07",
+  "issue": 1913,
+  "title": "[BUG] Performance regression on directory lookups between 10.3.0 and 10.4.0",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nHello,\n\nAfter upgrading from 10.3.0 to 10.4.0 (official archlinux packages), I noticed some of my scripts got noticeably slower.\n\nI use `fd` to navigate a pretty large ZFS volume (roughly 2800 directories and 1.3M files) mounted locally with NFS.\n\nBaseline measurement with the last known good version:\n```\n> fd --version\nfd 10.3.0\n\n# Hot cache\n> hyperfine --warmup 2 'fd xyz /tank/documents/ --type d'\nBenchmark 1: fd xyz /tank/documents/ --type d\n  Time (mean ± σ):      93.5 ms ±   2.4 ms    [User: 596.2 ms, System: 197.9 ms]\n  Range (min … max):    89.4 ms …  99.0 ms    31 runs\n\n# Cold cache\n> hyperfine --prepare 'sync ; echo 3 | sudo tee /proc/sys/vm/drop_caches' 'fd xyz /tank/documents/ --type d'\nBenchmark 1: fd xyz /tank/documents/ --type d\n  Time (mean ± σ):      2.248 s ±  0.072 s    [User: 0.429 s, System: 0.635 s]\n  Range (min … max):    2.180 s …  2.447 s    10 runs\n```\n\nBut after upgrading to 10.4.0:\n```\n> fd --version\nfd 10.4.0\n\n# Hot cache\n> hyperfine --warmup 2 'fd xyz /tank/documents/ --type d'\nBenchmark 1: fd xyz /tank/documents/ --type d\n  Time (mean ± σ):     205.0 ms ±   5.1 ms    [User: 981.2 ms, System: 2421.8 ms]\n  Range (min … max):   197.3 ms … 218.9 ms    15 runs\n\n# Cold cache\n> hyperfine --prepare 'sync ; echo 3 | sudo tee /proc/sys/vm/drop_caches' 'fd xyz /tank/documents/ --type d'\nBenchmark 1: fd xyz /tank/documents/ --type ",
+  "gt": [
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1852,
+  "base": "e3a6f8b7e735e24c96219053f8978813dbdc85f1",
+  "issue": 1727,
+  "title": "feature request: add `--prune-parent` flag",
+  "body": "I am building a tool to list git repos.  Currently, its implementation is\n\n```sh\nfd '^\\.(git|sl)$' \"$@\" \\\n\t--max-depth=10 --unrestricted --hidden --type=d --follow --prune \\\n\t--exec dirname {} \\; \\\n\t| sort\n\n```\n\nOn my machine this still is pretty slow (~1m).  Most of the time is being spent looking for repos in repos.  I don't care if my tool finds submodules, so I'd like to exclude them.  `--prune` will prevent `fd` from looking inside `.git/` but I want `fd` to not look at the whole repo. \n\nWould you accept a patch that adds `--prune-parent`, which would do the behavior I described?",
+  "gt": [
+   "src/cli.rs",
+   "src/config.rs",
+   "src/main.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1872,
+  "base": "5f95a781212e3efbc6d91ae50e0ca0ce0693da50",
+  "issue": 1843,
+  "title": "[BUG] Hyperlinks fail on Windows when file path contains spaces",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nSetup (pwsh):\n```pwsh\nmkdir C:\\test\npushd C:\\test\nNew-Item hi.txt\nNew-Item 'hi there.txt'\n```\n\nRun:\n```\nC:\\test\n> fd -e txt--hyperlink=auto -d1\n\nhi there.txt\nhi.txt\n# entries are underlined in Windows Terminal to indicate hyperlinks\n```\n\n<img width=\"598\" height=\"173\" alt=\"Image\" src=\"https://github.com/user-attachments/assets/8ebc4b19-bfe2-4489-b17a-38e24f12fdf8\" />\n\n\n```\n# Observed hyperlinks from fd==10.2.0 on Windows\nfile://C:/test/hi%20there.txt  # FAILURE\nfile://C:/test/hi.txt  # SUCCESS\n```\n\nThe `file://` part is missing the third slash for local host. The issue affects filepaths with spaces (and maybe other escape chars; I haven't checked). Filepaths without spaces open fine, even with two slashes. \n\nI'm not a Rust person but it looks like adding a slash '/' to the Windows `host` function in `hyperlinks.rs` would fix it for my use case, which is drive-based paths. No idea how UNC paths will behave (they're also broken right now, see below). \n\n```rust\n#[cfg(windows)]\nconst fn host() -> &'static str {\n    \"/\"\n}\n```\n\nOther notes:\n- if I run from a mapped network drive `N:\\test`, I get the same results - 2 slashes - `file://N:/test/hi%20there.txt`\n- if I run from a bare UNC path on the network `\\\\192.168.0.20\\share\\test`, I'll get 4 slashes `file:////192.168.0.20/share/test/hi%20there.txt`, and Terminal declares the link as unsupported. I know UN",
+  "gt": [
+   "src/hyperlink.rs"
+  ]
+ },
+ {
+  "pr": 1805,
+  "base": "ba2dde80f37214e050a684ee3093db8b7f595ff4",
+  "issue": 1797,
+  "title": "[BUG] --print0 and --exec does not include null byte",
+  "body": "### Checks\n\n- [x] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\n## Setup\n\n```\n# fd --version \nfd 10.3.0\n\n# mkdir /tmp/fd_test\n\n# cd /tmp/fd_test/\n\n# touch 1 2 3\n\n# ls\n1  2  3\n```\n\n## print0 / exec (the bug)\n\n- The null byte (`00`) is not included. It should be.\n\n```\n# fd --print0 --exec echo -n ';' . -- /tmp/fd_test | hexdump -C\n00000000  2f 74 6d 70 2f 66 64 5f  74 65 73 74 2f 32 2f 74  |/tmp/fd_test/2/t|\n00000010  6d 70 2f 66 64 5f 74 65  73 74 2f 31 2f 74 6d 70  |mp/fd_test/1/tmp|\n00000020  2f 66 64 5f 74 65 73 74  2f 33                    |/fd_test/3|\n```\n\n## print0 / no exec\n\n- `00` is null byte.\n- This is the correct output.\n\n```\n# fd --print0 . -- /tmp/fd_test | hexdump -C\n00000000  2f 74 6d 70 2f 66 64 5f  74 65 73 74 2f 31 00 2f  |/tmp/fd_test/1./|\n00000010  74 6d 70 2f 66 64 5f 74  65 73 74 2f 32 00 2f 74  |tmp/fd_test/2./t|\n00000020  6d 70 2f 66 64 5f 74 65  73 74 2f 33 00           |mp/fd_test/3.|\n0000002d\n```\n\n## no print0 / no exec\n\n- `0a` is new line.\n- This is the correct output.\n\n```\n# fd . -- /tmp/fd_test | hexdump -C\n00000000  2f 74 6d 70 2f 66 64 5f  74 65 73 74 2f 31 0a 2f  |/tmp/fd_test/1./|\n00000010  74 6d 70 2f 66 64 5f 74  65 73 74 2f 32 0a 2f 74  |tmp/fd_test/2./t|\n00000020  6d 70 2f 66 64 5f 74 65  73 74 2f 33 0a           |mp/fd_test/3.|\n0000002d\n```\n\n\n### Describe what you expected to happen:\n\n_No response_\n\n### What version of `fd` are you using?\n\nfd 10.3.0\n\n### Which operating syst",
+  "gt": [
+   "src/exec/command.rs",
+   "src/exec/job.rs",
+   "src/exec/mod.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1690,
+  "base": "a4fdad6ff781b5b496c837fde24001b0e46973d6",
+  "issue": 1689,
+  "title": "Replace `humantime` crate",
+  "body": "[`humantime`](https://crates.io/crates/humantime) crate seems to be unmaintained and [`jiff`](https://crates.io/crates/jiff) crate provides the same functionality.\n\nref: rustsec/advisory-db#2249",
+  "gt": [
+   "src/filter/time.rs"
+  ]
+ },
+ {
+  "pr": 1617,
+  "base": "3b7b95d0815dab6c8ffd60feec78999fcab82b99",
+  "issue": 1616,
+  "title": "Consider adding a `--mindepth` alias for `--min-depth`",
+  "body": "As of https://github.com/sharkdp/fd/pull/323, `fd` supports a `--maxdepth` alias. However, no such alias exists for `--min-depth` so the following, seemingly correct command fails:\r\n\r\n```shell\r\n$ fd --maxdepth=3 --mindepth=2\r\nerror: unexpected argument '--mindepth' found\r\n\r\n  tip: a similar argument exists: '--min-depth'\r\n\r\nUsage: fd --max-depth <depth> --min-depth <depth> [pattern] [path]...\r\n\r\nFor more information, try '--help'.\r\n```",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1540,
+  "base": "8eb047945ef2fb83000c0d7db0c17d935c6871d7",
+  "issue": 1457,
+  "title": "New .git Handling has no opt out",
+  "body": "I have the following code:\r\n\r\n```\r\nfd --type d --base-directory ~/Source -H '\\.git' | sed 's|/.git||'\r\n```\r\nwhich lists all folders that contain a `.git` folder (basically a project search). This worked fine in 8.x.x but breaks in 9.x.x due to the breaking change of the .git handling.\r\n\r\nSadly there is no option to opt out for this. because --no-ignore-vcs does bring back all ignored files (so .terraform, .terragrunt-cache, .node-modules, ...) which I do not want. I just want to include \".git\" but not everything .gitignore\r\n\r\nHow can this be achieved? Could you bring back the old behaviour with some cli flag?",
+  "gt": [
+   "src/cli.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1521,
+  "base": "68fe31da3f5da5d8d5b997d8919dc97e6eafead5",
+  "issue": 1461,
+  "title": "[BUG] Including hidden files also includes (git)ignored files if the .gitignore is in the parent directory",
+  "body": "### Checks\n\n- [X] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nAssume we have the following directory structure:\r\n```\r\n.\r\n├── .abc\r\n├── .gitignore\r\n└── sub_directory\r\n   └── .abc\r\n```\r\nwhere\r\n```\r\ncat .gitignore\r\n.abc\r\n```\r\nUsing `fd` in the `sup_directory` with `--hidden`, I get\r\n```\r\nfd --hidden\r\n.abc\r\n```\r\nThe `.abc` file is shown, although it should have been ignored.\n\n### Describe what you expected to happen:\n\nDo not show the `.abc` file.\r\n\r\nNote that this only happens in the `sup_directory`. Using `fd --hidden` in the root directory shows the expected output.\r\n\r\nPossible Fix:\r\n```\r\ndiff --git a/src/cli.rs b/src/cli.rs\r\nindex 0007a31..3a7081f 100644\r\n--- a/src/cli.rs\r\n+++ b/src/cli.rs\r\n@@ -643,7 +643,7 @@ impl Opts {\r\n         } else if !self.search_path.is_empty() {\r\n             &self.search_path\r\n         } else {\r\n-            let current_directory = Path::new(\".\");\r\n+            let current_directory = Path::new(\"./\");\r\n             ensure_current_directory_exists(current_directory)?;\r\n             return Ok(vec![self.normalize_path(current_directory)]);\r\n         };\r\n```\r\nAll tests pass in the github workflows with this change.\r\n\r\nThe bug is not really caused by something `fd` is doing but rather by what the \"Walker\" in the `ignore` dependency is doing. A simple loop over `WalkBuilder::new(path).hidden(false).build()` with `path = \".\"` and `path = \"./\"` leads to the same wrong and correct results, re",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1464,
+  "base": "f48372624de7bec76dfed1adc68f5e8ac26b946c",
+  "issue": 1460,
+  "title": "Allow `--type dir` as an alias to `directory` due to how common it is",
+  "body": "I think it would make things simpler and more intuitive (i had to go into the docs when it wasn't working), so I think to make it a bit more ergonomic, might be good to add another alias for the search types. Thx!",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1458,
+  "base": "266311ca33a78924dcad1fc13f99974098286ed0",
+  "issue": 1455,
+  "title": "[BUG] Colorized output in `-l` despite `NO_COLOR=1` and `LS_COLORS=`",
+  "body": "### Checks\n\n- [X] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nDespite specifying `NO_COLOR=1` and `LS_COLORS=` , I still see colorized output when using the `-l` flag.\r\n\r\n```\r\n$ LS_COLORS= NO_COLOR=1 fd null /dev/ -l\r\ncrw-rw-rw- 1 root root 1, 3 Dec 11 15:40 /dev/null\r\n```\r\n\r\nIn this example, the final `/dev/null` part is colorized. With `--color never` it works though.\n\n### Describe what you expected to happen:\n\nMonochrome output\n\n### What version of `fd` are you using?\n\nfd 9.0.0\n\n### Which operating system / distribution are you on?\n\n```shell\nLinux\n```\n",
+  "gt": [
+   "src/cli.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1452,
+  "base": "00b64f3ccbfb832ef744bb42bbdfabaf929b5ee2",
+  "issue": 1313,
+  "title": "Add a streaming mode when running under pipe",
+  "body": "Currently when not running under an interactive shell, it will buffer its output and output everything in one go.\r\nHowever, I am writing a GUI front end and need this \"streaming\" mode similar to when running under an interactive shell so users can see the result in a faster manner.\r\n\r\nExpected behaviour is that the user can instantly see the initial result with more items being added along the way.\r\n\r\nAm I missing something or is there any switch to customize this behavior?",
+  "gt": [
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1412,
+  "base": "8b5532d8dd89d932d304f9adbcac8d723682973a",
+  "issue": 1203,
+  "title": "fd starts slowly on systems with very many cores",
+  "body": "_Originally posted by @pmarreck in https://github.com/sharkdp/fd/issues/1131#issuecomment-1336197854_\r\n\r\n> I use `fd` in some test suites and I noticed a slowdown. I investigated and I found that simply running `fd` with no arguments in an empty directory on /tmp (which is in-memory!) was taking 0.2 seconds. This is ridiculously slow on my machine (Ryzen Threadripper 3990x with 64 cores/128 threads running on NVMe). Multiplied by the number of times I was calling `fd` in my suite, this immediately explained why multiple seconds had been added at some point.\r\n> \r\n> When I add the `-j1` argument, as someone else indicated, the boot runtime of running `fd` alone drops to 0.01 seconds, which is 20x faster and far more reasonable an expectation.\r\n> \r\n> I'm on NixOS unstable running on ZFS root.\r\n> \r\n> @matu3ba & @tavianator , this is NOT a filesystem problem (IMHO). This looks like a heuristics bug regarding non-specification of the number of concurrent jobs to run (per the mandocs, not specifying it \"uses heuristics\")\r\n> \r\n> At least I now know a workaround that works!",
+  "gt": [
+   "src/cli.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1396,
+  "base": "19832fcbd3e59f9904aa4b7914a297242303bca6",
+  "issue": 1387,
+  "title": "Include `.git/` folder in the \"gitignored\" filtering",
+  "body": "I mostly use `fd` in repositories, and I love having the ability of gitignoring pollution from build folders.\r\n\r\nHowever, I keep getting tons of stuff from `.git/`.\r\n\r\nI consider `.git/` to be _\"gitignored by default\"_, but that might just be my POV, any thoughts on this?\r\n\r\nI imagine the odds of someone intentionally looking for stuff in the `.git/` directory should be low, but in that case, they can resort to `-I/--no-ignore` (or `--no-ignore-vcs`).",
+  "gt": [
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1318,
+  "base": "a11f8426d4e88ccc3745cc27b700aeb5ede39013",
+  "issue": 1303,
+  "title": "Exec: Allow literal placeholder {} ",
+  "body": "Sometimes a literal {} is needed that doesn't get parsed as placeholder. \r\n\r\n## Use-case\r\n\r\nI wanted to refactor my go code where `interface{}` can be now written as `any`. I therefore wanted to search-replace all occurences using `fd` and `sed`. I couldn't find a way telling `fd` to not interpret the `{}` as placeholder.\r\n\r\n### Reproducer\r\n\r\n```go\r\nfd -e go -X echo \"interface{}\"\r\n```\r\n\r\nWithin my folder with only a `hello.go` file, this just outputs: `interface./hello.go`\r\n\r\nMy goal would be: `interface{} hello.go`\r\n\r\n## Proposed Solution\r\n\r\nAllowing `{{}}` which gets detected as something like `LITERAL` and gets replaced with `{}` should work.",
+  "gt": [
+   "src/cli.rs",
+   "src/exec/mod.rs",
+   "src/exec/token.rs"
+  ]
+ },
+ {
+  "pr": 1394,
+  "base": "93cdb2628e89dd5831eee22b8df697aea00eca3b",
+  "issue": 1393,
+  "title": "[BUG] unintended behavior when using \"-1\"",
+  "body": "### Checks\n\n- [X] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nThanks for fd, it comes in handy!\r\n\r\nAttempts to use the shorthand `-1` alias instead of `--max-results` with exec or batch exec are not prevented, and the operations will be performed on every object which matches the query instead of the first hit. Depending on what one was trying to achieve the impact of this can be quite significant.\r\n\r\n\r\nThe alias does not have the relevant `conflicts_with`\r\n\r\nhttps://github.com/sharkdp/fd/blob/93cdb2628e89dd5831eee22b8df697aea00eca3b/src/cli.rs#L513-L522\r\n\r\n\r\nUsing long option `--max-results=1` would yield immediate abort and explanation that options conflict:\r\n\r\nhttps://github.com/sharkdp/fd/blob/93cdb2628e89dd5831eee22b8df697aea00eca3b/src/cli.rs#L20-L30\r\n\r\n\r\nFinally `-1` overrides_with `--max-results`, but not the other way around so `fd --max-results=1 -1 -X prog query` will launch prog against all objects matching query.\n\n### Describe what you expected to happen:\n\nConsistent behavior: if mixing `max-results` with exec-type functions is refused, same should be true for aliases.\n\n### What version of `fd` are you using?\n\n8.7.0\n\n### Which operating system / distribution are you on?\n\n```shell\nLinux\n```\n",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 497,
+  "base": "0f2429cabcb591df74fc2ab3e32b3ac967264f6d",
+  "issue": 357,
+  "title": "`fd -L` omits broken symlinks",
+  "body": "It appears that `fd -L` completely omits any broken symlinks. Instead it should fall back to treating a broken symlink as though `-L` was not specified, which matches the observed `find` behavior.\r\n\r\nExample:\r\n\r\n```\r\n> touch a\r\n> ln -s b c\r\n> ln -s a d\r\n> exa\r\na  c@  d@\r\n> find -L .\r\n.\r\n./a\r\n./c\r\n./d\r\n> fd -L\r\na\r\nd\r\n>\r\n```\r\n\r\nNotice how `fd -L` completely omitted the broken `c` symlink. Continued:\r\n\r\n```\r\n> find -L . -type l\r\n./c\r\n> fd -L -t l\r\n>\r\n```\r\n\r\nNotice how `find` is treating the broken symlink exactly as though `-L` were not specified.\r\n\r\nThis was tested with fd 7.2.0 on macOS 10.14.1 (18B75).",
+  "gt": [
+   "src/fshelper/mod.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 1211,
+  "base": "addf00cb167ee6a9d8c14ddd9ca81512001af953",
+  "issue": 1209,
+  "title": "[BUG] Unrestricted option doesn't work when \"~/.config/fd/ignore\" is set",
+  "body": "### Checks\n\n- [X] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nShell snippet to reproduce:\r\n\r\n```\r\n> mkdir test-fd\r\n> cd test-fd\r\n> touch .hi what\r\n> ls -a\r\n.hi  what\r\n> fd -u\r\n.hi\r\nwhat\r\n> echo '.hi' > ~/.config/fd/ignore\r\n> fd -u # I expect the output to be \".hi\\nwhat\"\r\nwhat\r\n> fd --version\r\nfd 8.6.0\r\n```\n\n### Describe what you expected to happen:\n\nThat last \"fd -u\" should have shown \".hi\", but it ignored it. I don't expect unrestricted mode to respect the global ignore file...\n\n### What version of `fd` are you using?\n\n8.6.0\n\n### Which operating system / distribution are you on?\n\n```shell\narch linux\n```\n",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1176,
+  "base": "db2590dca56a180d51ec73a3dc41963e454452cc",
+  "issue": 982,
+  "title": "How to find files which haven't changed within a specified period of time",
+  "body": "**What version of `fd` are you using?**\r\n[ `fd 8.3.2` ]\r\n\r\nI know that `fd -tf --changed-within=4weeks .` prints files in the current directory that have changed within 4week. how do i find those that haven't changed within 4week\r\n",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1178,
+  "base": "38cdeb041364d3a644d3cfd68daf724e0d35b29b",
+  "issue": 1177,
+  "title": "[BUG] Powershell completions are generated incorrectly",
+  "body": "### Checks\n\n- [X] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\nPowershell completions do not work in the manner that most people expect, because the completion command that is configured is `fd.exe`.\r\n\r\nAfter sourcing the `fd.ps1` file, if you type ...\r\n\r\n```\r\n> fd.exe --\r\n```\r\n\r\n...you will see completions. However, if you type ...\r\n\r\n```\r\n> fd --\r\n```\r\n\r\n...you will not see completions. Editing the `fd.ps1` file so that `.exe` is removed resolves the issue.\n\n### Describe what you expected to happen:\n\nCompletions should work in Powershell when the command is `fd`\r\n\r\nMy Windows version:\r\n![image](https://user-images.githubusercontent.com/514926/202516077-c19e3f8f-aa9e-4c35-b5ed-64263967276b.png)\r\n\n\n### What version of `fd` are you using?\n\n8.5.3\n\n### Which operating system / distribution are you on?\n\n```shell\nWindows 11, Powershell core 7.3.0\n```\n",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1169,
+  "base": "d89b5755d99a8e43a7166bcf70819a25aad08701",
+  "issue": 1106,
+  "title": "help: mention that fd detects executables by file permissions",
+  "body": "Detecting an executable efficiently is not simple: https://stackoverflow.com/questions/4458120/search-for-executable-files-using-find-command\r\n\r\nfd uses the executable bit of the file permissions, which should be mentioned in the help page.",
+  "gt": [
+   "src/cli.rs",
+   "src/filesystem.rs",
+   "src/filetypes.rs"
+  ]
+ },
+ {
+  "pr": 1173,
+  "base": "85e3adaf1800fd8cb192f7a4a2bb9000f993f5bc",
+  "issue": 1172,
+  "title": "[BUG] Generated completions aren't picked up",
+  "body": "### Checks\r\n\r\n- [X] I have read the troubleshooting section and still think this is a bug.\r\n\r\n### Describe the bug you encountered:\r\n\r\nAutomatic generation of completions use path to executable and thus won't work. On current master (85e3adaf1800fd8cb192f7a4a2bb9000f993f5bc) after issuing `make completions` the created completion for e.g. `fish` looks like (just the first 3 lines are shown as the pattern should be clear):\r\n```\r\ncomplete -c target/release/fd -s d -l max-depth -d 'Set maximum search depth (default: none)' -r\r\ncomplete -c target/release/fd -l min-depth -d 'Only show search results starting at the given depth' -r\r\ncomplete -c target/release/fd -l exact-depth -d 'Only show search results at the exact given depth' -r\r\n...\r\n```\r\nas the (later) installed binary doesn't match the command.\r\n\r\n### Describe what you expected to happen:\r\n\r\nThe generated completions should not use path names.\r\n\r\nThis is caused by `src/main.rs:96`, which takes the full first argument without removing paths.\r\n\r\n### What version of `fd` are you using?\r\n\r\nfd 8.5.2\r\n\r\n### Which operating system / distribution are you on?\r\n\r\n```shell\r\n$ uname -srm\r\nLinux 6.0.8-arch1-1 x86_64\r\n```\r\n\r\n```\r\n$ lsb_release -a\r\nLSB Version:    n/a\r\nDistributor ID: Arch\r\nDescription:    Arch Linux\r\nRelease:        rolling\r\nCodename:       n/a\r\n```\r\n",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1167,
+  "base": "56c405d8e6bbd5c49e5beaf33c7d882de72900d4",
+  "issue": 1166,
+  "title": "[BUG] building `fd` with `--no-default-features` fails",
+  "body": "### Checks\r\n\r\n- [X] I have read the troubleshooting section and still think this is a bug.\r\n\r\n### Describe the bug you encountered:\r\n\r\n```\r\nerror: cannot find macro `anyhow` in this scope\r\n   --> src/cli.rs:845:13\r\n    |\r\n845 |         Err(anyhow!(\r\n    |             ^^^^^^\r\n    |\r\n    = note: consider importing one of these items:\r\n            anyhow::anyhow\r\n            crate::anyhow\r\n    = note: `anyhow` is in scope, but it is a crate, not a macro\r\n```\r\n\r\n### Describe what you expected to happen:\r\n\r\nthe `fd` build to succeed.\r\n\r\n### What version of `fd` are you using?\r\n\r\n8.5.2\r\n\r\n### Which operating system / distribution are you on?\r\n\r\n```shell\r\nSunOS nemesis 5.11 omnios-master-74f47d7f9b2 i86pc i386 i86pc\r\n```\r\n",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1164,
+  "base": "567ce2640f78164798e4b1a5358608b0ef03f488",
+  "issue": 1163,
+  "title": "Panic when using owner",
+  "body": "### Checks\n\n- [X] I have read the troubleshooting section and still think this is a bug.\n\n### Describe the bug you encountered:\n\n```\r\n$ fd -d 2 -o $USER -t d . /hps/scratch/lsf_tmpdir\r\nthread 'main' panicked at 'Mismatch between definition and access of `owner`. Could not downcast to TypeId { t: 14109425959541630025 }, need to downcast to TypeId { t: 563790022623738129 }\r\n', /nfs/research/zi/mbhall//Software/.cargo/registry/src/github.com-1ecc6299db9ec823/clap-4.0.18/src/parser/error.rs:30:9\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\n```\r\n\r\nI guess this is akin to #1160? But as it is not a `u32` I wasn't sure how to put in a fix (I was planning to copy the fix for that issue)\n\n### Describe what you expected to happen:\n\nBefore upgrading to this version, the command ran fine. I expect it to list all directories owned by me (`$USER`)\n\n### What version of `fd` are you using?\n\n0.5.1\n\n### Which operating system / distribution are you on?\n\n```shell\nLinux 4.18.0-240.22.1.el8_3.x86_64 x86_64\r\n\r\n\r\nLSB Version:    :core-4.1-amd64:core-4.1-noarch\r\nDistributor ID: CentOS\r\nDescription:    CentOS Linux release 8.3.2011\r\nRelease:        8.3.2011\r\nCodename:       n/a\n```\n",
+  "gt": [
+   "src/filter/owner.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1162,
+  "base": "cbd11d8a45dc80392c5f1be9679051085e6a3376",
+  "issue": 1160,
+  "title": "Panic when using `-j` flag",
+  "body": "After installing the latest version of `fd-find` (8.5.0), I am getting the following error when I rust fd in signle-thread mode:\r\n\r\n```\r\n$ fd -j 1\r\nthread 'main' panicked at 'Mismatch between definition and access of `threads`. Could not downcast to TypeId { t: 18349839772473174998 }, need to downcast to TypeId { t: 12390601965711666277 }\r\n', /home/USER/.cargo/registry/src/github.com-1ecc6299db9ec823/clap-4.0.18/src/parser/error.rs:30:9\r\nstack backtrace:\r\n   0: rust_begin_unwind\r\n             at /rustc/a55dd71d5fb0ec5a6a3a9e8c27b2127ba491ce52/library/std/src/panicking.rs:584:5\r\n   1: core::panicking::panic_fmt\r\n             at /rustc/a55dd71d5fb0ec5a6a3a9e8c27b2127ba491ce52/library/core/src/panicking.rs:142:14\r\n   2: <fd::cli::Opts as clap::derive::FromArgMatches>::from_arg_matches_mut\r\n   3: fd::main\r\nnote: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\r\n```\r\nWithout `-j 1` it works fine. The panic is present if using other number with `-j` flag, such as `-j 2` etc.\r\n\r\n**What version of `fd` are you using?**\r\n```\r\n$ fd --version\r\nfd 8.5.0\r\n```\r\n",
+  "gt": [
+   "src/cli.rs"
+  ]
+ },
+ {
+  "pr": 1137,
+  "base": "425703420929d0bbe83b592abe4e2d2e20885132",
+  "issue": 1136,
+  "title": "Regression: `--exec-batch` no longer preserves status code",
+  "body": "Suppose you have a `fd` command targeting at least one file, e.g. a directory `/dir` containing a file `foo`. Then running\r\n```bash\r\nfd foo /dir -X bash -c 'exit 1'\r\n```\r\nsucceeds (based on exit code) in 8.4.0, but fails in e.g. 8.3.2. I would expect the latter to be the correct behavior (since #477).\r\n\r\nBisecting shows that #960 (specifically 9fb0c5d372062d6193798519526cb7b14ea24fcc) caused this regression; happy to open a PR if desired. ",
+  "gt": [
+   "src/exec/mod.rs"
+  ]
+ },
+ {
+  "pr": 1115,
+  "base": "e46d402ed1a1bd1774a570f915bc3e8ddb5b5206",
+  "issue": 1046,
+  "title": "Ambiguity in piped vs not piped output",
+  "body": "**What version of `fd` are you using?**\r\n[paste the output of `fd --version` here]\r\n```\r\n$ fd --version\r\nfd 8.4.0\r\n```\r\n\r\n_A short journey_:\r\n\r\n<details>\r\n<summary><i>I am confused on why piped vs not piped output is different</i></summary>\r\nHmmm... Do I have other `.editorconfig` files I can reference for my new one?\r\n\r\n```console\r\n$ fd .editorconfig\r\n$\r\n```\r\nWAT? 😕\r\n(5 minutes) ... aaaah, okay, it's _a hidden file, and hidden files are not searched by default_:\r\n\r\n```console\r\n$ fd -H .editorconfig\r\nkNBcDyXJi/ecRlRPv/BXM_Je/.rPDclZxNgYyr\r\nXFxiJagnA/WJgbrTD/OiInoDSAgiINUnkk/.YZmDuFuCckIL\r\nWIHkZjomi/yIqdYhH/rfdDVKTAUBWSiXAo/GfaHm/lFbq/.xIRDWCIvevaM\r\nfFXOXmAWN/acInlfx/flMaBjiDVIYVYtBI/RsoTY/BbzL/bFr#OkB/zbHTfZ/ifKaY/SfUIW]iXniUyQ/.UgrGwPaQeGmV\r\n.EzjFK/eNeAOoJwm/omvRBNUvZ5263.2/WQSEH/qlBKQv=DShLzMF/OjqIhM.GfUVw.dnXazN.DLIpSSPOdtxn.bVkXV.Gywp/\r\n.EHDIh/wRWiXKLRB/levauwvgX9517.2/JrmiW/YUOpol~LuqpgqS/TojFxD.qwYdl.JEjimx.rKtTUXgepXFs.ZOpma.eIJR/onSvQh.oONnz.gwLsWe.YBfzuemHHpvL.sDbfk.mmnj}XcmJiJ:O.CRL\r\n.iWbGU/bhMyenPRx/ymTRQutnp7866.6/Thawj/dcogoa%tLTmpLj/DKkGys.eRRii.CIdXph.rUtUHfPNGwzu.hKAKv.tHbJ/XSvwvG.TtCRa.iKGOlp.tGqEddLfvCKy.yeJGp.XtEj|JdVAdBg.tjjLfvx.MPsrbBppO.XHi\r\n.zsAeh/ZcXjHpZXA/vVaFyYjIa7460.9/FTgNJ/bsqXby%nlcvMKY/XGLlCa.CMfCh.uSXfFl.pEzyalOgKxvy.HXOTU.wXrm/USER@example.invalid\r\n.LSaEq/INMPskppO/JgHjUtlOA9796.6/YqmAQ/wYqCpj,smjcPsb/MYvWBa.LJBtO.yuBOck.xtrLwWIfdigW.LhCyW.xQeL/TGgeon.rkLRD.qWOrwe.YBlrzbPqxjyr.LMrTm.UIUR(DZYvpjy.ADvUPBO}m.ZiL\r",
+  "gt": [
+   "src/app.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1061,
+  "base": "ff77a2e29e37d338e21ff4f0e93bc438a07c5533",
+  "issue": 1051,
+  "title": "-t executable flags can't show windows executable ",
+  "body": "### `-t executable` flags can't show windows executable \r\n\r\n![图片](https://user-images.githubusercontent.com/51036094/175789762-8fb2d8c8-1208-48de-9893-70cbc0ee285a.png)\r\n\r\n",
+  "gt": [
+   "src/filesystem.rs",
+   "src/filetypes.rs"
+  ]
+ },
+ {
+  "pr": 1079,
+  "base": "218d475cb21763deaf0ecc8d46078b8f289d03a7",
+  "issue": 1072,
+  "title": "fd does not want to work when cwd is non existent",
+  "body": "**What version of `fd` are you using?**\r\n`fd 8.3.1`\r\n`fish, version 3.3.1`\r\n\r\n```sh\r\n$ cd /mnt/path/to/some/external/drive\r\n# Unmount the drive\r\n# Remount the drive at the same space (may not be necessary)\r\nfdfind someFolder /home/USER/some/path/\r\n[fd error]: Could not retrieve current directory (has it been deleted?).\r\n```\r\n\r\nI think this is a bug: when providing a path the cwd should not be accessed.",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 1020,
+  "base": "16acdeb6ce36985190af366f9ec3d792553e90d8",
+  "issue": 410,
+  "title": "-X should batch the number of passed files to the maximum supported by the shell",
+  "body": "It appears that if you run `getconf ARG_MAX` it returns the maximum length that the command string can be.  Possibly include a command to artificially limit the number of arguments as well?\r\n\r\n```\r\n$ fd -IH . -tf -X wc -l\r\n[fd error]: Problem while executing command: Argument list too long (os error 7)\r\n```",
+  "gt": [
+   "src/exec/command.rs",
+   "src/exec/job.rs",
+   "src/exec/mod.rs"
+  ]
+ },
+ {
+  "pr": 986,
+  "base": "3e201de9b06e4587781eaf4fe7e755d4f9d8c6df",
+  "issue": 840,
+  "title": "Make `-u` idempotent (always search all files/dirs)",
+  "body": "`fd -u` is an alias for `fd -I`and `fd -uu`is an alias for `fd -IH`. The former is unnecessary given that it's an alias to another one-letter flag (I imagine it's there for historical reasons?) and the latter is cumbersome if someone wanted to use the long form (`--unrestricted`). This setup also makes the behavior of the flag ambiguous if new default filters were added in the future. In that case, would I disable all filters with `-uu` or would I need to use `-uuu`?\r\n\r\nGiven the project's focus on ergonomics and usability, I'd suggest to make `-u` always search all files and to deprecate `-uu`. This would be the equivalent of `ls -a`, giving the user the guarantee that no filters will be applied by default. The main cons of this suggestion is that it's a breaking change and a subtle one: the command would continue to work with `-u` but could return a different set of results.",
+  "gt": [
+   "src/app.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 895,
+  "base": "52f22557a52e3c9669db2cd1db4f9e282ff96b54",
+  "issue": 868,
+  "title": "fd waits for the whole traversal if the only matches arrive within max_buffer_time",
+  "body": "If all the matches are received very quickly, within `max_buffer_time`, then they'll be added to the buffer without being printed.  The first match to arrive after the time limit will kick it into streaming mode, but if we never get any more matches then that never happens and we'll wait for the whole search to complete before printing anything.\r\n\r\nI guess the fix is to use `rx.recv_timeout()` instead of `for worker_result in rx` [here](https://github.com/sharkdp/fd/blob/17dd2a6dfec1ca2086c3d279f5c458758bc9a71b/src/walk.rs#L239).",
+  "gt": [
+   "src/exec/job.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 902,
+  "base": "7fe4bfaacb7e248b7db980f5b31508843ef0d5f9",
+  "issue": 867,
+  "title": "--max-results=1 does not actually quit after the first result",
+  "body": "**Describe the bug you encountered:**\r\n\r\nI am running `fd` on a slow FUSE filesystem ([goofys](https://github.com/kahing/goofys)). It seems like `-1`/`--max-results=1` doesn't do what it says on the tin.\r\n\r\n**Describe what you expected to happen:**\r\n\r\nI expected `fd` to print the result and then quit. There is only one file on the path that matches my pattern.\r\n\r\nI ran this command: `fd -F --max-results=1 PATTERN PATH`\r\n\r\nOne result is printed ~5 seconds later, but `fd` continues to run for a long time, at least a minute, until I interrupted it. FWIW, `find` can search the entire path in <25 seconds.\r\n\r\n**What version of `fd` are you using?**\r\n\r\n```\r\nfd 8.2.1\r\n```\r\n\r\n**Which operating system / distribution are you on?**\r\n\r\n```\r\nLinux 5.8.0-63-generic x86_64\r\nDistributor ID:\tUbuntu\r\nDescription:\tUbuntu 20.10\r\nRelease:\t20.10\r\nCodename:\tgroovy\r\n```",
+  "gt": [
+   "src/output.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 886,
+  "base": "fe992706ae78f59b8dac6e55834bc69ed08a3b02",
+  "issue": 794,
+  "title": "--change-newer-than requires using UTC time, \"newer\" check is incorrect",
+  "body": "# Describe the bug you encountered\r\n\r\nIt looks like there's differences to `--change-newer-than`' s behavior vs. its documentation, as well as having a potential bug.\r\n\r\n## Bug 1: Documentation of UTC time usage\r\n\r\nIt appears that it needs the time to be stated in UTC, not local time.\r\n\r\n```\r\n$ touch a\r\n\r\n$ sleep 61\r\n\r\n$ touch b\r\n\r\n$ ls -l a b\r\n-rw-r--r--  1 zachriggle  staff  12168 Jul 15 19:36 a\r\n-rw-r--r--  1 zachriggle  staff      0 Jul 15 19:37 b\r\n\r\n$ date -r b '+%Y-%m-%d %H:%M:%S'\r\n2021-07-15 19:37:01\r\n\r\n$ fd --change-newer-than '2021-07-15 19:37:01'\r\na\r\nb\r\n```\r\n\r\nHowever, if we add the `-u` flag to BSD `date` to get UTC time, we get closer to the expected result.\r\n\r\n## Bug 2: Files not actually \"newer\" are printed\r\n\r\nEven if we specify in UTC time, file `b` is still printed.\r\n\r\n```\r\n$ date -ur b '+%Y-%m-%d %H:%M:%S'\r\n2021-07-16 00:37:01\r\n\r\n$ fd --change-newer-than '2021-07-16 00:37:01'\r\nb\r\n```\r\n\r\nThis is probably technically correct, since the file was created sometime within that second -- but I consider this to be a bug.\r\n\r\nHowever, if I specify the time in seconds, the comparison should be of the same granularity.\r\n\r\n## Bug 3: Time comparison seems to be incorrect\r\n\r\nLet's try with fractions of a second.  Luckily, GNU `date` does this (macOS default `date` does not) and is available via homebrew.\r\n\r\n```\r\n$ gdate -r b +\"%Y-%m%-d %H:%M:%S.%N\"\r\n2021-0715 19:37:01.866605000\r\n\r\n$ fd --change-newer-than '2021-07-16 00:37:01.866605000'\r\nb\r\n```\r\n\r\nSo it looks like `fd` supp",
+  "gt": [
+   "src/filter/time.rs"
+  ]
+ },
+ {
+  "pr": 883,
+  "base": "ecdaf58e7f16609089bc9f91c3d964d11e9a7466",
+  "issue": 823,
+  "title": "Make `--type empty` its own option",
+  "body": "```\r\n-t, --type <filetype>...              \r\n        Filter the search by type (multiple allowable filetypes can be specified):\r\n          'f' or 'file':         regular files\r\n          'd' or 'directory':    directories\r\n          'l' or 'symlink':      symbolic links\r\n          'x' or 'executable':   executables\r\n          'e' or 'empty':        empty files or directories\r\n          's' or 'socket':       socket\r\n          'p' or 'pipe':         named pipe (FIFO)\r\n```\r\nthe help `multiple allowable filetypes can be specified` suggests that adding multiple type parameters will have an `OR` effect (if a file is any of the types then it will be included in the results), but this is not always the case. In particular, the `empty` type is inconsistent. When used with `symlink`, `socket`, or `pipe`, it works in accordance with the help, anything that is `empty` `OR` the other type will be included. However, if you use it with `file`, `executable`, or `directory` it will only include results if they are both `empty` `AND` the other type (e.g. `fd --type empty --type directory` only includes empty directories.\r\n\r\n`empty` being a type prevents me from searching for empty symlinks, sockets, or pipes. (I'm not sure if these are possible but I digress)\r\n\r\nThis issue is touched upon in #714 :\r\n> You are right. executable and empty are special in that they mean: only show executable/empty results. Otherwise --type file --type empty would mean: \"show me files OR empty directories/files\", ",
+  "gt": [
+   "src/app.rs"
+  ]
+ },
+ {
+  "pr": 853,
+  "base": "21fd01307313e7442670f6f2047371e465c53bba",
+  "issue": 720,
+  "title": "--color=always ~10x slower",
+  "body": "**Describe the bug you encountered:**\r\n\r\nI understand that outputting the escape sequences for colors is more text, but I didn't expect it to be 10x slower. Is this expected behavior?\r\n\r\n**Describe what you expected to happen:**\r\n\r\nExpected `color=always` to not be 10x slower, although maybe I'm simply misguided.\r\n\r\n![image](https://user-images.githubusercontent.com/25516241/105956489-c0898e80-602c-11eb-97f2-96a9569650ec.png)\r\n\r\n**What version of `fd` are you using?**\r\n`fd 8.2.1` (`fd-8.2.1-1` on the AUR)\r\n\r\n**Which operating system / distribution are you on?**\r\n\r\n```\r\nLinux 5.10.10-arch1-1 x86_64\r\n```\r\n\r\nand `lsb_release` but I don't think it's very helpful :)\r\n```\r\nLSB Version:\t1.4\r\nDistributor ID:\tArch\r\nDescription:\tArch Linux\r\nRelease:\trolling\r\nCodename:\tn/a\r\n```\r\nRyzen 3900x (24 threads) but it seemed during the bench mark only ~80% cpu was being used.",
+  "gt": [
+   "src/output.rs"
+  ]
+ },
+ {
+  "pr": 822,
+  "base": "2570fbd04e058ed449e95b2583e7145c40e9c925",
+  "issue": 595,
+  "title": "Opposing/negating command-line options (eg. --no-hidden)",
+  "body": "Background\r\n-------------\r\nFirst off, let me just say that I love your projects, `bat` and `fd` are great and I use them both regularly.\r\n\r\nWhat I was looking for was something similar to the `--no-hidden` option as it exists in ripgrep. As in fd, in ripgrep hidden files are not searched by default. However with ripgrep I can create a global config that effectively changes it's behavior to search hidden files by default, and then still be able to pass a `--no-hidden` option in order to turn it back off on a case by case basis when desired. The logic that parses the command-line options would simply let subsequent opposing command-line options override prior ones. When I was looking around to see if this was possible, I found https://github.com/sharkdp/fd/issues/362 where a global config file that was previously proposed, and I agree that aliases adequately satisfy the same use case.\r\n\r\nProposal\r\n----------\r\nIf so-called \"opposing\" command-line options such as `--no-hidden` were supported. Then it would be possible to define aliases such as\r\n\r\n```bash\r\nalias fd='fd --hidden'\r\n```\r\nwhich would effectively change the default options to search hidden files, and then if you wanted to ignore hidden files you could run something like:\r\n\r\n```bash\r\nfd --no-hidden\r\n```\r\n\r\nSimilarly other \"opposing\" command-line options could be added where applicable, for example the currently supported `--no-ignore` could be complemented with a new `--ignore` option. \r\n\r\nJust briefly looking at the cu",
+  "gt": [
+   "src/app.rs"
+  ]
+ },
+ {
+  "pr": 817,
+  "base": "3ba90dd7685a73923a3a872c4ffc8756a198d755",
+  "issue": 787,
+  "title": "Supporting \"--no-ignore-parent\" like ripgrep, or support ignoring specifit .gitignore?",
+  "body": "My problem is that I use my home directory as a git repo to manage my dotfiles, so there is a `~/.gitignore` that ignores everything except some files. The problem is `fd` won't work by default at this situation. Although there is a `--no-ignore-vcs`, but I still want `.gitignore` to be respected when I am in a project directory.\r\n\r\nRipgrep has a flag `--no-ignore-parent` that can ignore `.gitignore` in parent directory, which works well enough. A even better solution could introduce a new flag to exclude certain `.gitignore` only, such as `fd --no-ignore-file ~/.gitignore`.\r\n\r\nSimilar ripgrep issue: https://github.com/BurntSushi/ripgrep/issues/372\r\n",
+  "gt": [
+   "src/app.rs",
+   "src/main.rs",
+   "src/options.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 819,
+  "base": "c06c9952b61f35a7881b399cd21d0a4f821e7055",
+  "issue": 783,
+  "title": "fd -l/--list-details doesn't work in busybox",
+  "body": "**Describe the bug you encountered:**\r\n\r\nTry to use `fd -l` in my specific case `fd --extension json --list-details`\r\n\r\n```\r\nls: unrecognized option: human-readable\r\nBusyBox v1.32.1 () multi-call binary.\r\n\r\nUsage: ls [-1AaCxdLHRFplinshrSXvctu] [-w WIDTH] [FILE]...\r\n\r\nList directory contents\r\n\r\n\t-1\tOne column output\r\n\t-a\tInclude entries which start with .\r\n\t-A\tLike -a, but exclude . and ..\r\n\t-x\tList by lines\r\n\t-d\tList directory entries instead of contents\r\n\t-L\tFollow symlinks\r\n\t-H\tFollow symlinks on command line\r\n\t-R\tRecurse\r\n\t-p\tAppend / to dir entries\r\n\t-F\tAppend indicator (one of */=@|) to entries\r\n\t-l\tLong listing format\r\n\t-i\tList inode numbers\r\n\t-n\tList numeric UIDs and GIDs instead of names\r\n\t-s\tList allocated blocks\r\n\t-lc\tList ctime\r\n\t-lu\tList atime\r\n\t--full-time\tList full date and time\r\n\t-h\tHuman readable sizes (1K 243M 2G)\r\n\t--group-directories-first\r\n\t-S\tSort by size\r\n\t-X\tSort by extension\r\n\t-v\tSort by version\r\n\t-t\tSort by mtime\r\n\t-tc\tSort by ctime\r\n\t-tu\tSort by atime\r\n\t-r\tReverse sort order\r\n\t-w N\tFormat N columns wide\r\n\t--color[={always,never,auto}]\tControl coloring\r\n```\r\n\r\n**Describe what you expected to happen:**\r\nThe correct long list\r\n\r\n**What version of `fd` are you using?**\r\nInstalling fd (8.2.1-r0)\r\n\r\n**Which operating system / distribution are you on?**\r\nnode:lts-alpine3.13\r\n  Executing busybox-1.32.1-r6.trigger\r\n\r\nGitHub action",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 814,
+  "base": "c37592b0b7396d84db02182880b94828572b9ed5",
+  "issue": 631,
+  "title": "Time functions assume UTC and don't allow for RFC 3339 offsets",
+  "body": "`--change-newer-than` assumes given time is in UTC, not local timezone. Furthermore, offsets like '2020-07-19T00:38:00-07:00' throw errors.\r\n\r\nfd version 8.1.1 on Arch Linux",
+  "gt": [
+   "src/filter/time.rs"
+  ]
+ },
+ {
+  "pr": 811,
+  "base": "6e44828cc8d1dc9691079cd38ac50d0bb3019762",
+  "issue": 752,
+  "title": "fd cannot search files under a RAM disk",
+  "body": "**Describe the bug you encountered:**\r\n\r\nwhen performing search (e.g. `fd somepattern`) under a ramdisk (using ImDisk as RAM disk utility), the following error is returned immediately:\r\n\r\n`[fd error] Cannot retrieve current directory (has it been deleted?)`\r\n\r\nInstead, the builtin windows prompt command:\r\n`dir /S /P somepattern`\r\nworks correctly.\r\n\r\n\r\n**What version of `fd` are you using?**\r\n8.2.1\r\n\r\n**Which operating system / distribution are you on?**\r\nWindows 8.1 x64\r\n",
+  "gt": [
+   "src/filesystem.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 810,
+  "base": "ab81cad3b5f4a2c1b2adeeb74970351786f3a93e",
+  "issue": 737,
+  "title": "When a write error occurs on stdout fd just exits with 1",
+  "body": "**Describe the bug you encountered:**\r\nWhen a write error occurs on stdout fd just exits with 1\r\n\r\n**Describe what you expected to happen:**\r\nI expected a similar behavior to find eg\r\n`find > /dev/full` \r\nprints\r\n```\r\nfind: ‘standard output’: No space left on device\r\nfind: write error\r\n``` \r\n\r\n**What version of `fd` are you using?**\r\n<!-- paste the output of `fd --version` here -->\r\n`fd 8.2.1`\r\n\r\n**Which operating system / distribution are you on?**\r\n<!--\r\nUnix:    paste the output of `uname -srm` and `lsb_release -a` here.\r\nWindows: please tell us your Windows version\r\n-->\r\n`Linux 5.11.2-arch1-1 x86_64`\r\n",
+  "gt": [
+   "src/output.rs"
+  ]
+ },
+ {
+  "pr": 733,
+  "base": "efc71bc00b66afdbd570ad0ada21569e2a81cdae",
+  "issue": 624,
+  "title": "Improve time option usage",
+  "body": "For fd's [time options](https://github.com/sharkdp/fd/blob/master/src/app.rs#L411-L444) consider adding these two tweaks\r\n\r\n-  `--newer` and `--older` [visible clap aliases](https://docs.rs/clap/2.32.0/clap/struct.Arg.html#method.visible_aliases)\r\n- default the time component to `00:00:00` when only a date is given\r\n\r\nwhich would turn this verbose incantation\r\n\r\n    $ fd -t f --change-newer-than '2020-06-29 00:00:00' abcF08m1002r00ec12843000000a5p /opt/datastore/data/prod/xml/schema/xyz/\r\n\r\ninto a slightly less verbose and more memorable\r\n\r\n    $ fd -t f --newer 2020-06-29 abcF08m1002r00ec12843000000a5p /opt/datastore/data/prod/xml/schma/xyz/\r\n\r\nLooks like you're using modified time metadata, so these shorter long names are potentially confusing. But I didn't like `--newermt` and `--oldermt`. Ah, the age old naming challenge.",
+  "gt": [
+   "src/app.rs"
+  ]
+ },
+ {
+  "pr": 730,
+  "base": "cf7dd43f80fb455fe7907c026fae5404f832868b",
+  "issue": 537,
+  "title": "Option `--path-separator` failing on MSys (Git Bash)",
+  "body": "I have fd 7.4.0 installed on a Windows machine (Rust 1.41.0, stable-x86_64-pc-windows-msvc) and run it from a bash that is provided by [Git for Windows](https://gitforwindows.org/), which itself is based on Msys2 (according to https://github.com/git-for-windows/git/wiki/Technical-overview):\r\n\r\n```\r\n$ uname -a\r\nMINGW64_NT-10.0-18363 SOMEHOST 3.0.7-338.x86_64 2019-07-03 15:16 UTC x86_64 Msys\r\n\r\n$ fd\r\nbar\r\nbar\\baz\r\nbar\\baz\\bla\r\nbar\\baz\\bla\\some.txt\r\nbar\\yetanother.txt\r\nother.txt\r\n```\r\n\r\nfd is using backslashes as it is supposed to do in Windows. #429 added the `--path-separator` option, which could be useful for using the results as paths within Git Bash. However, in my environment, the option fails, and every backslash is substituted with the absolute path to the Git for Windows installation directory:\r\n\r\n```\r\n$ fd --path-separator=\"/\"\r\nbar\r\nbarC:/Program Files/Git/baz\r\nbarC:/Program Files/Git/bazC:/Program Files/Git/bla\r\nbarC:/Program Files/Git/bazC:/Program Files/Git/blaC:/Program Files/Git/some.txt\r\nbarC:/Program Files/Git/yetanother.txt\r\nother.txt\r\n\r\n$ ls \"C:/Program Files/Git/\"\r\nbin/  cmd/  dev/  etc/  git-bash.exe*  git-cmd.exe*  LICENSE.txt  mingw64/  ReleaseNotes.html  tmp/  unins000.dat  unins000.exe*  unins000.msg  usr/\r\n```\r\nUsing single-quotes around the slash character make no difference. Nor does leaving out the quotes all together.\r\n",
+  "gt": [
+   "src/filesystem.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 711,
+  "base": "b8089f8d5842dff6b4a42bf5dfdeb24c02b71d76",
+  "issue": 697,
+  "title": "--exec option doesn't honor --path-separator in Git Bash",
+  "body": "In Git Bash, I use the alias `fd='MSYS_NO_PATHCONV=1 fd --path-separator=/'` so that everything is generally done with bash-style path names. This doesn't work with the --exec feature. This makes the output of \"grep -H\" annoying. The good news is that it functions - grep must accept either file separator. The bad news is that I get a path string I can't  usefully copy/paste in the shell to pass to programs like vim.\r\n\r\nExamples:\r\n`fd --type f ^filename.ext$`\r\nPrints the full path of filename.ext with forward slashes\r\n\r\n`fd --type f ^filename.ext$ --exec echo {}`\r\nPrints the full path of filename.ext with backward slashes\r\n\r\nI would expect --path-separator to apply everywhere, including paths passed to programs launched via the --exec argument.\r\n\r\nUsing fd version 8.1.1 - installed via chocolatey\r\n\r\nUsing the Git Bash that comes with Git for Windows version 2.28.0.windows.1\r\n",
+  "gt": [
+   "src/exec/mod.rs",
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 658,
+  "base": "a851570b15bbca91f1f4ef230c6d8939f2459ecc",
+  "issue": 535,
+  "title": "`-prune` options",
+  "body": "Is it possible to add an option `-prune`, to not explore sub-directories, when the current directory has been matched ? (like `find -prune`)",
+  "gt": [
+   "src/app.rs",
+   "src/main.rs",
+   "src/options.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 668,
+  "base": "24402dda7ce50f140d19dea69209cda4e41ed88e",
+  "issue": 600,
+  "title": "\"-c never\" and NO_COLOR are not respected for -h and other usage messages",
+  "body": "When adding `-c never` I would expect it to also apply to the `-h` output, but that's still coloured:\r\n\r\n![screenshot_2020-05-23-18-07-09_border](https://user-images.githubusercontent.com/1032692/82727968-56438000-9d20-11ea-8d90-ab13b7f9b4af.png)\r\n\r\nThis also applies to something like `fd -c none -v`, which is an error but has coloured (hard to read) output:\r\n\r\n![screenshot_2020-05-23-18-12-03_border](https://user-images.githubusercontent.com/1032692/82728113-f39eb400-9d20-11ea-94c4-ffa2da620609.png)\r\n\r\n\r\nIn general, I'd really recommend to be careful with coloured terminal stuff, because what's helpful for one personal might be next-to-unreadable for the next (especially if it's non-configurable).\r\n\r\nThis is fd 8.1.0 on Void Linux.",
+  "gt": [
+   "src/app.rs",
+   "src/main.rs",
+   "src/output.rs"
+  ]
+ },
+ {
+  "pr": 682,
+  "base": "4f8697c40739f1d7388fc54145e42fecebddf8ae",
+  "issue": 604,
+  "title": "Color Presets",
+  "body": "_Originally posted by @sharkdp in https://github.com/sharkdp/fd/issues/469#issuecomment-633611703_\r\n> Another option would be to ship `fd` with a more \"complete\"/colorful version of `LS_COLORS` for cases when it has not been set by the user. But that should be discussed in a separate ticket.\r\n\r\nYou could change `--color` to accept a color preset rather than always or never. `--color=rich` could be the preset in the demo, `--color=lite` could be the current default, `--color=none` could be no color, and `--color=default` could be the `LS_COLORS` variable with a fallback to the `lite` preset (or `none` if it doesn't pass the Windows-related checks). And it could read other presets from files, making sure to ignore carriage returns for compatibility purposes.",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 679,
+  "base": "e0adb45d082d8318ab284e208d59b8e3b53fc2d8",
+  "issue": 678,
+  "title": "Error after successful return (bug not located): \"Unwrap error\", after printing `-1`'s result",
+  "body": "**Describe the bug you encountered:**\r\nQuery returns or reports and error after normal, successful usage.\r\n\r\n**Describe what you expected to happen:**\r\nPrint result of `fd -d 3 -1 cheat.sheets .` and exit.\r\n\r\nDoes not error on `fd -d 3 -1 cheat.sheets`, without final `.` search path arg.\r\n\r\n**What version of `fd` are you using?**\r\n`fd 8.1.1`\r\n**Which operating system / distribution are you on?**\r\n`Darwin 18.7.0 x86_64`\r\n\r\n```\r\n^C^C\r\n$ env RUST_BACKTRACE=1 fd -d 3 -1 cheat.sheets .\r\nhosting/Reference/cheat.sheets\r\nthread '<unnamed>' panicked at 'called `Result::unwrap()` on an `Err` value: \"SendError(..)\"', src/walk.rs:371:21\r\nstack backtrace:\r\nthread '<unnamed>' panicked at 'called `Result::unwrap()` on an `Err` value: \"SendError(..)\"', src/walk.rs:371:21\r\nthread '<unnamed>' panicked at 'called `Result::unwrap()` on an `Err` value: \"SendError(..)\"', src/walk.rs:371:21\r\n   0: <std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display>::fmt\r\n   1: core::fmt::write\r\n   2: std::io::Write::write_fmt\r\n   3: std::panicking::default_hook::{{closure}}\r\n   4: std::panicking::rust_panic_with_hook\r\n   5: rust_begin_unwind\r\n   6: core::panicking::panic_fmt\r\n   7: core::result::unwrap_failed\r\n   8: fd::walk::spawn_senders::{{closure}}::{{closure}}\r\n   9: <ignore::walk::FnVisitorImp as ignore::walk::ParallelVisitor>::visit\r\n  10: ignore::walk::Worker::run_one\r\n  11: crossbeam_utils::thread::ScopedThreadBuilder::spawn::{{closure}}\r\nnote: Some details are omitted, run with `R",
+  "gt": [
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 676,
+  "base": "ec4cc981fcf47dbf5eb654ece3950543605ef383",
+  "issue": 675,
+  "title": "Invalid option values are silently ignored",
+  "body": "**Describe the bug you encountered:**\r\nWhen supplying an invalid value to an option that expects a numeric value, `fd` silently ignores that option.\r\n\r\nFor example, `fd --max-depth x` silently ignores the `--max-depth` option.\r\n\r\nAt least the following options are affected:\r\n* `--min-depth`\r\n* `--max-depth` (`--maxdepth`)\r\n* `--exact-depth`\r\n* `--threads`\r\n* `--max-buffer-time`\r\n* `--max-results`\r\n\r\n**Describe what you expected to happen:**\r\nI expected `fd` to exit with an error message saying the option value is invalid.\r\n\r\n**What version of `fd` are you using?**\r\nfd 8.1.1\r\n\r\n**Which operating system / distribution are you on?**\r\nWindows 10 (Version 2004, Build 19041.572)",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 601,
+  "base": "78cde856b1064ea458f6ec7dda8c66f560aac94c",
+  "issue": 469,
+  "title": "Colourful output on Windows (in Git Bash)",
+  "body": "I've seen the talks leading up to colour output support, namely #129 #137\r\n\r\nHowever, [`bat`](http://github.com/sharkdp/bat) works and emits a colourful output, by default. Below is `bat ~/Desktop/desktop.ini`:\r\n\r\n![`bat` output with colours working](https://user-images.githubusercontent.com/1969470/63160946-42dfe780-c01f-11e9-8b67-8cab4a74f0db.png)\r\n\r\nIt seems colourful output *can* be supported.\r\n\r\nI'm using Git Bash 2.20-something. Git Bash can be set up to run with *MinTTY*, which gets you a nice terminal emulator, unlike that of the default `cmd`. Git Bash is the nicest and best way to get Bash shell environment running for Windows, and this is like the only Shell I use on Windows, so it's surprising that if `bat` colours work, `fd` does not.",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 596,
+  "base": "c0592e276eaad85bfc04d692447fde90db63a0bb",
+  "issue": 498,
+  "title": "fd segfaults on macos Catalina",
+  "body": "Hi.\r\n\r\nHere are some details:\r\n\r\n```\r\n$ rustc --version\r\nrustc 1.38.0 (625451e37 2019-09-23)\r\n\r\n$ uname -a\r\nDarwin nucleus 19.0.0 Darwin Kernel Version 19.0.0: Wed Sep 25 20:18:50 PDT 2019; root:xnu-6153.11.26~2/RELEASE_X86_64 x86_64\r\n\r\n$ port version\r\nVersion: 2.6.99\r\n\r\n```\r\n\r\nTo demonstrate the problem, I reinstalled fd as below:\r\n\r\n```\r\n$ cargo install fd-find --force\r\n    Updating crates.io index\r\n  Installing fd-find v7.4.0\r\n   Compiling libc v0.2.62\r\n   Compiling memchr v2.2.1\r\n   Compiling bitflags v1.2.0\r\n   Compiling fs_extra v1.1.0\r\n   Compiling lazy_static v1.4.0\r\n   Compiling cc v1.0.45\r\n   Compiling unicode-width v0.1.6\r\n   Compiling log v0.4.8\r\n   Compiling regex-syntax v0.6.12\r\n   Compiling cfg-if v0.1.10\r\n   Compiling strsim v0.8.0\r\n   Compiling ansi_term v0.11.0\r\n   Compiling nix v0.14.1\r\n   Compiling vec_map v0.8.1\r\n   Compiling version_check v0.9.1\r\n   Compiling same-file v1.0.5\r\n   Compiling fnv v1.0.6\r\n   Compiling void v1.0.2\r\n   Compiling quick-error v1.2.2\r\n   Compiling ansi_term v0.12.1\r\n   Compiling thread_local v0.3.6\r\n   Compiling crossbeam-utils v0.6.6\r\n   Compiling walkdir v2.2.9\r\n   Compiling humantime v1.3.0\r\n   Compiling lscolors v0.6.0\r\n   Compiling crossbeam-channel v0.3.9\r\n   Compiling term_size v0.3.1\r\n   Compiling atty v0.2.13\r\n   Compiling num_cpus v1.10.1\r\n   Compiling textwrap v0.11.0\r\n   Compiling aho-corasick v0.7.6\r\n   Compiling bstr v0.2.8\r\n   Compiling clap v2.33.0\r\n   Compiling regex v1.3.1\r\n   Compiling ctrlc v3.1.3\r\n   Compilin",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 590,
+  "base": "65b65b32be0cb987cf8bbed5fed9f7202deefa06",
+  "issue": 587,
+  "title": "Do not exit immediately if one of the search paths is missing",
+  "body": "**Describe the bug you encountered:**\r\n```bash\r\n> tree\r\n.\r\n└── real\r\n    ├── bar\r\n    └── foo\r\n> fd . real fake\r\n[fd error]: 'fake' is not a directory\r\n```\r\nMaybe this is as intended, but it would be beneficial to have a flag to allow traversal over dynamic directories.\r\n\r\n**Describe what you expected to happen:**\r\n```bash\r\n> {fd . real; fd . fake}\r\nreal/bar\r\nreal/foo\r\n[fd error]: 'fake' is not a directory.\r\n```\r\n\r\n**What version of `fd` are you using?**\r\nfd 7.3.0\r\n\r\n**Which operating system / distribution are you on?**\r\nLinux 5.3.0-51-generic x86_64\r\nDistributor ID:\tUbuntu\r\nDescription:\tUbuntu 19.10\r\nRelease:\t19.10\r\nCodename:\teoan\r\n\r\n",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 571,
+  "base": "789706c3abd62f0a26083a8726a6b3b73dd953db",
+  "issue": 562,
+  "title": "Make sure --list-details works on Windows and MacOS",
+  "body": "- [x] MacOS (use `gls`, if available. otherwise, use `ls`)\r\n- [x] Windows\r\n\r\nsee comments in #556",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 570,
+  "base": "d63c63be8cf8b6ecf75c1b5b8a2033ec7bb899f9",
+  "issue": 469,
+  "title": "Colourful output on Windows (in Git Bash)",
+  "body": "I've seen the talks leading up to colour output support, namely #129 #137\r\n\r\nHowever, [`bat`](http://github.com/sharkdp/bat) works and emits a colourful output, by default. Below is `bat ~/Desktop/desktop.ini`:\r\n\r\n![`bat` output with colours working](https://user-images.githubusercontent.com/1969470/63160946-42dfe780-c01f-11e9-8b67-8cab4a74f0db.png)\r\n\r\nIt seems colourful output *can* be supported.\r\n\r\nI'm using Git Bash 2.20-something. Git Bash can be set up to run with *MinTTY*, which gets you a nice terminal emulator, unlike that of the default `cmd`. Git Bash is the nicest and best way to get Bash shell environment running for Windows, and this is like the only Shell I use on Windows, so it's surprising that if `bat` colours work, `fd` does not.",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 569,
+  "base": "2bab4a22494e3f10da0b708da7a1eebaa483b727",
+  "issue": 404,
+  "title": "Add --min-depth option",
+  "body": "We have `--max-depth` option, but there is no `--min-depth` counterpart. It could be used exactly like it's been used with `find`.\r\n",
+  "gt": [
+   "src/app.rs",
+   "src/main.rs",
+   "src/options.rs",
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 551,
+  "base": "fc924d2e0a52a8276587fa56e26f7cb326941e54",
+  "issue": 550,
+  "title": "NO_COLOR support",
+  "body": "Hello. Lovely tool. \r\n\r\nI find myself doing a bunch of `fd whatever | cat` to strip out colors.\r\n\r\nWould be lovely to have support for [NO_COLOR](https://no-color.org/)! Would give users are more consistent way to control this behavior.\r\n\r\nLovely tool. Played with it briefly a while back but after a [recent mention](https://mobile.twitter.com/dimfeld/status/1232468670367948800) from @dimfeld I've been using it quite consistently. It alleviated my specific gripe, which was ripgrep being ridiculously faster than find & needing less filtering after. Thanks ever much.",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 496,
+  "base": "94916709743ab7e06756f9cdd7a3ed24ea5c29df",
+  "issue": 488,
+  "title": "--hidden flag is not idempotent",
+  "body": "Creating an alias for fd providing the `--hidden` flag has been recommended here for numerous times.\r\n\r\nI did that, but now am seeing problems when another shell abstraction (eg fzf's `FZF_DEFAULT_COMMAND` env var) is providing `--hidden` as well, causing fd command to end up with multiple `--hidden` flags, resulting in\r\n\r\n    error: The argument '--hidden' was provided more than once, but cannot be used multiple times\r\n\r\nerror. Now, said command _could_ bypass alias by prefixing fd with `command` (at least in bash), but generally such flags are allowed to be provided many times.\r\n\r\nIs there a reason for current behavior?\r\n\r\nRunning ver `7.0.0`",
+  "gt": [
+   "src/app.rs"
+  ]
+ },
+ {
+  "pr": 483,
+  "base": "b027b2c32285253b5866f934acc66fcd695ea649",
+  "issue": 92,
+  "title": "Options -u (and -uu) as in ripgrep",
+  "body": "As mentioned in https://github.com/sharkdp/fd/issues/33 , `-u` as an alias for `--no-ignore` and `-uu` as an alias for `--no-ignore --hidden` would make it easier/less surprising to use this alongside ripgrep.\r\n",
+  "gt": [
+   "src/app.rs"
+  ]
+ },
+ {
+  "pr": 480,
+  "base": "2545aaabd2974eb471c5b01f84fc625797298c31",
+  "issue": 470,
+  "title": "--changed-within/--changed-before not working with directories",
+  "body": "Took me a while to figure out… these options work fine when searching files, they don’t currently work when searching directories (thus when `-t d` is given).\r\n\r\nGrateful for pointers.\r\n\r\nThanks for this amazing little tool.\r\n",
+  "gt": [
+   "src/walk.rs"
+  ]
+ },
+ {
+  "pr": 238,
+  "base": "ad8256c217314415d9e060920d32968192cdc3c6",
+  "issue": 234,
+  "title": "Suggest --fixed-strings on invalid regexps",
+  "body": "Inspired by https://github.com/BurntSushi/ripgrep/issues/709",
+  "gt": [
+   "src/main.rs"
+  ]
+ },
+ {
+  "pr": 193,
+  "base": "51aea57a6a13399d30d6883debc438498d012da4",
+  "issue": 178,
+  "title": "hang with exec",
+  "body": "```\r\nsudo touch foo\r\nfd foo -x rm {}\r\n```\r\n\r\nattempting to remove a write-protected file hangs",
+  "gt": [
+   "src/exec/command.rs"
+  ]
+ }
+]
