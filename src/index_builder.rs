@@ -243,6 +243,10 @@ impl IndexDb {
             "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
             params![file_id],
         )?;
+        self.conn.execute(
+            "DELETE FROM embeddings WHERE file_id = ?1",
+            params![file_id],
+        )?;
         self.conn
             .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
         Ok(())
@@ -835,6 +839,25 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
+    }
+
+    #[test]
+    fn build_index_removes_embeddings_of_files_deleted_from_git() {
+        let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO embeddings (file_id, vector, content_sha) \
+                 SELECT id, x'00000000', 'x' FROM files WHERE path='b.rs'",
+                [],
+            )
+            .unwrap();
+        commit_files(tmp.path(), &[], &["b.rs"]);
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_deleted, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM embeddings"), 0);
     }
 
     #[test]
