@@ -110,7 +110,7 @@ contextsmith index          contextsmith build
       │
       ▼
  .contextsmith/index.db (SQLite)
- ├── files        — パス・言語・blob SHA
+ ├── files        — パス・言語・作業ツリーの内容の blob SHA(未コミットの編集も索引に反映。対象は HEAD で追跡中のファイル)
  ├── symbols      — 関数/構造体/クラス名・行番号・スニペット
  ├── deps         — ファイル間の import 依存グラフ
  ├── meta         — repo_root・indexed_at
