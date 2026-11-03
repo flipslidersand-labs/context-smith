@@ -71,6 +71,44 @@ Where the Python gap comes from, from a one-off measurement made before #162 (th
 
 Speed on these repositories (about 390-510 indexed files): index 0.9-1.6 s median (2.1 s max), query 0.04-0.07 s.
 
+## Targets and current status ([#147](https://github.com/flipslidersand-labs/context-smith/issues/147))
+
+Provisional targets, in terms of the `strict`, title-only recall above. Review date: 2026-11-15. A PR that changes accuracy updates the table below.
+
+- **T1 (floor)**: in every cell (repo x 4k / 8k / 16k), context-smith >= naive keyword match - 0.02 (within one task of equal). **#135 is closed when T1 holds.**
+- **T2 (value)**: at 16k, context-smith beats the naive keyword match by 0.05 or more.
+- **T3 (reference)**: at 16k, 70% of the ceiling (the whole true files that fit). Revisit after T1 and T2.
+
+Status, measured 2026-11-03 on master `038eadc` (after #164), binary from `cargo build --release`, 9 repositories, one run each (`cs` / `kw`, difference in brackets; one task is worth 0.02-0.04):
+
+| repo (tasks) | 4k | 8k | 16k |
+|---|---|---|---|
+| axum (54) | 0.46 / 0.17 (+0.29) | 0.56 / 0.49 (+0.07) | 0.69 / 0.56 (+0.13) |
+| clap (60) | 0.26 / 0.16 (+0.10) | 0.35 / 0.27 (+0.08) | 0.53 / 0.38 (+0.15) |
+| bat (56) | 0.28 / 0.18 (+0.10) | 0.40 / 0.24 (+0.16) | 0.59 / 0.42 (+0.17) |
+| ripgrep (26) | 0.15 / 0.08 (+0.07) | 0.22 / 0.19 (+0.03) | 0.49 / 0.27 (+0.22) |
+| fd (74) | 0.40 / 0.25 (+0.15) | 0.57 / 0.37 (+0.20) | 0.75 / 0.69 (+0.06) |
+| scrapy (59) | 0.29 / 0.19 (+0.10) | 0.42 / 0.29 (+0.13) | 0.48 / 0.47 (+0.01) |
+| poetry (60) | 0.23 / 0.19 (+0.04) | 0.26 / 0.31 (**-0.05**) | 0.30 / 0.40 (**-0.10**) |
+| hono (60) | 0.60 / 0.35 (+0.25) | 0.72 / 0.56 (+0.16) | 0.83 / 0.66 (+0.17) |
+| zod (60) | 0.20 / 0.04 (+0.16) | 0.28 / 0.07 (+0.21) | 0.39 / 0.18 (+0.21) |
+
+- **T1: not met.** 25 of 27 cells hold; poetry at 8k and 16k do not. Tuning `rarest_terms` by path frequency did not close it (tried 2026-11-03, rejected: net zero across eight repositories, scrapy fell below `kw`).
+- **T2: 7 of 9 repositories.** The misses are scrapy (+0.01) and poetry (-0.10). Both are Python; see the ranking paragraph above.
+- axum, clap, bat, scrapy and poetry were used while tuning; ripgrep, fd, hono and zod were not used to choose a parameter. Gains on the tuned repositories alone do not count as evidence.
+- The tables above this section were measured at `aa4ef89`, before #164 (test and fixture files scored x0.5); where they differ, this table is current. `bench.py` was not changed.
+
+### Speed (must not get worse)
+
+Limits: index <= 3 s and query <= 0.2 s for a repository of about 500 files; the large-repository figure below is a reference, not a limit.
+
+| repo | indexed files | index (5 runs) | query (9 runs, 16k) |
+|---|---|---|---|
+| the repos above | 390-510 | 0.9-1.6 s median | 0.04-0.07 s |
+| cargo (`2be5575ba`, Rust) | 3,078 | 9.6-11.4 s (median 10.1 s) | 0.11-0.14 s |
+
+Index time grows about linearly with the file count (about 3 ms per file); query time grows slowly. Measured with `/usr/bin/time` on one machine, release binary, index deleted before each run, three different task titles for the queries. Larger repositories (10,000+ files) are not measured.
+
 ## Verified
 
 The first verification, on 2026-10-31 (master `239a17b`, i.e. before #142 and #143; binary built with `cargo build --release`, three repos run in parallel): **all 18 cells of the then-current table matched exactly** (two decimals). The current table was measured on 2026-11-01 with a binary built from master `6aea5f2` (#142 + #143 + #151), run twice per repo with identical results. Counts: axum 54 measured (55 candidates, 1 skipped by the script: checkout failed, or no truth file is in the index at the base commit), clap 60 (`cands-clap.json` holds the 60 candidates the README used; the fetch returned more), bat 56. Runtime about 1.5-2 minutes per repo (84 s / 124 s / 120 s) plus 1.2 minutes to build; the clones are the larger cost. Re-run twice (axum 2x, clap 2x, bat 2x): recall was identical every time; the reported `cost` of context-smith on bat differed slightly between the two runs (e.g. 14585 vs 14539 at 16k). The cause was the order of equal-score files, which came from a hash map; #142 breaks ties by path, and after it two runs were identical in recall and cost. The index is rebuilt per task and the random baseline is seeded.
