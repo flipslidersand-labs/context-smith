@@ -141,16 +141,17 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 
 ## 精度
 
-公開 Rust リポジトリ 4 つの、マージ済みの修正 PR で測定。タスク = その PR が閉じた Issue の題名、正解 = PR が変更した `src/**/*.rs`、インデックスは PR の**マージ前**のコミットで作成(修正の漏れ込みなし)。ファイルの内容が 50% 以上バンドルに入っている場合だけ「見つかった」と数える。比較対象は素朴な単語一致(タスクの語を含む数でファイルを並べ、パス一致は ×3 で加点、同じトークン予算を埋める)。タスク平均の再現率(recall):
+公開 Rust リポジトリ 5 つの、マージ済みの修正 PR で測定。タスク = その PR が閉じた Issue の題名、正解 = PR が変更した `src/**/*.rs`、インデックスは PR の**マージ前**のコミットで作成(修正の漏れ込みなし)。ファイルの内容が 50% 以上バンドルに入っている場合だけ「見つかった」と数える。比較対象は素朴な単語一致(タスクの語を含む数でファイルを並べ、パス一致は ×3 で加点、同じトークン予算を埋める)。タスク平均の再現率(recall):
 
 | リポ(タスク数) | 予算 | context-smith | 素朴な単語一致 |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.22 / 0.52 / 0.67 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.21 / 0.29 / 0.44 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.16 / 0.30 / 0.53 | 0.18 / 0.24 / 0.42 |
-| ripgrep (26) | 4k / 8k / 16k | 0.04 / 0.17 / 0.22 | 0.08 / 0.19 / 0.27 |
+| axum (54) | 4k / 8k / 16k | 0.45 / 0.54 / 0.67 | 0.17 / 0.49 / 0.56 |
+| clap (60) | 4k / 8k / 16k | 0.23 / 0.33 / 0.48 | 0.16 / 0.27 / 0.38 |
+| bat (56) | 4k / 8k / 16k | 0.25 / 0.35 / 0.48 | 0.18 / 0.24 / 0.42 |
+| ripgrep (26) | 4k / 8k / 16k | 0.15 / 0.22 / 0.49 | 0.08 / 0.19 / 0.27 |
+| fd (74) | 4k / 8k / 16k | 0.37 / 0.48 / 0.60 | 0.25 / 0.37 / 0.69 |
 
-context-smith は、3 リポすべての 16k で素朴な単語一致を上回り(0.06〜0.11)、8k でも 3 リポすべてで上回ります(0.02〜0.06。1 タスクは約 0.02 なので、axum と clap の 8k の差は誤差の範囲)。4k では axum と clap で上回り、bat では 0.02 下回ります(誤差)。修正の開発に使っていない ripgrep(26 件)では、どの予算でもわずかに下回ります(0.02〜0.05。ここでは 1 タスクが約 0.04 なので、最大でも約 1.3 タスク分)。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151))が入っていません。限界: Rust リポジトリ 4 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング。他の言語(Python・TypeScript)は [bench/](./bench/README.md#other-languages-python-typescript-added-2026-11-01-148) を参照: TypeScript は測定した 2 リポともで素朴な単語一致を上回るが、**Python は 2 リポとも下回る**ので、Rust の数字がそのまま通用するとは考えないこと。シンボルの重み(0.5)と、予算配分・順位づけの修正は axum・clap・bat で開発したため、この表はそれらのリポに対して楽観的。ripgrep が確認用で、正解ファイルが大きい(中央値 約 9,400 トークン。他は約 3,500)。シンボル採点だけで上がった(16k: 0.17 → 0.44)が、予算配分の変更([#142](https://github.com/flipslidersand-labs/context-smith/pull/142))で再び下がった(16k: 0.22)。詳細は [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
+Rust の 5 リポでは、context-smith は素朴な単語一致を、4k(0.07〜0.28)と 8k(0.03〜0.11)ではすべてのリポで、16k では 5 つのうち 4 つ(0.06〜0.22)で上回ります。fd の 16k は下回ります(0.09。74 件中 約 7 タスク分)。1 タスクはリポにより 0.014〜0.04(74 件〜26 件)なので、0.03 以下の差は誤差の範囲。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151)・[#162](https://github.com/flipslidersand-labs/context-smith/pull/162))が入っていません。限界: Rust リポジトリ 5 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング。他の言語(Python・TypeScript)は [bench/](./bench/README.md#other-languages-python-typescript-added-2026-11-01-148) を参照: TypeScript は測定した 2 リポともですべての予算で素朴な単語一致を上回る(hono の 16k の差 0.02 は誤差)が、**Python は 2 リポとも 16k で下回る**(scrapy 0.10、poetry 0.21。poetry は 8k でも 0.09)ので、Rust の数字がそのまま通用するとは考えないこと。poetry と hono では、16k の recall が 8k より低い。予算を増やして下がるのは本来起きないはずの現象。原因(16k で 1.00 から 0.00 に落ちた poetry の 2 タスクで確認。8k では飛ばされる 16,000 トークンのテストファイルが、断片として予算全部を使う): 半分規則([#162](https://github.com/flipslidersand-labs/context-smith/pull/162))が、予算の 2 倍以内の、上位だが正解でない大きなファイルに、予算全部を使い切らせている。詳細は [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。シンボルの重み(0.5)と予算配分の規則は axum・clap・bat・ripgrep で開発したため、この表はそれらのリポに対して楽観的。fd と、Python・TypeScript の 4 リポは、どのパラメータの選択にも使っていない。ripgrep は正解ファイルが大きく(中央値 約 9,400 トークン。他は約 3,500)、予算配分の規則が最も効く。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
 
 ## ステータス
 
