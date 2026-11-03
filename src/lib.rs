@@ -169,6 +169,11 @@ impl GitRepo {
     }
 
     /// Walk all tracked files in HEAD, returning (relative_path, Language, blob_sha, size).
+    ///
+    /// The sha and size describe the working-tree content (git blob hash), so
+    /// uncommitted edits are noticed and the sha equals HEAD's for an unchanged
+    /// file. Unknown-language files and files missing from the working tree
+    /// keep HEAD's values.
     pub fn scan(&self) -> Result<Vec<(PathBuf, Language, String, i64)>> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
@@ -183,12 +188,20 @@ impl GitRepo {
                     PathBuf::from(root).join(name)
                 };
                 let lang = Language::from_path(&rel);
-                let sha = entry.id().to_string();
-                let size = entry
+                let mut sha = entry.id().to_string();
+                let mut size = entry
                     .to_object(&repo)
                     .and_then(|o| o.peel_to_blob())
                     .map(|b| b.size() as i64)
                     .unwrap_or(0);
+                if lang != Language::Unknown {
+                    if let Ok(bytes) = std::fs::read(self.root.join(&rel)) {
+                        if let Ok(oid) = git2::Oid::hash_object(git2::ObjectType::Blob, &bytes) {
+                            sha = oid.to_string();
+                            size = bytes.len() as i64;
+                        }
+                    }
+                }
                 results.push((rel, lang, sha, size));
             }
             git2::TreeWalkResult::Ok
