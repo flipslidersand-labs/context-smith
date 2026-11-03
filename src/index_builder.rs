@@ -842,6 +842,48 @@ mod tests {
     }
 
     #[test]
+    fn build_index_reflects_uncommitted_edit() {
+        let (tmp, repo) = repo_with(&[("a.rs", "fn alpha() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn alpha() {}\nfn zzmarker() {}\n").unwrap();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='zzmarker'"),
+            1
+        );
+    }
+
+    #[test]
+    fn build_index_drops_edit_after_it_is_reverted() {
+        let (tmp, repo) = repo_with(&[("a.rs", "fn alpha() {}\n")]);
+        let db = mem_db();
+        std::fs::write(tmp.path().join("a.rs"), "fn alpha() {}\nfn yymarker() {}\n").unwrap();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='yymarker'"),
+            1
+        );
+        std::fs::write(tmp.path().join("a.rs"), "fn alpha() {}\n").unwrap();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='yymarker'"),
+            0
+        );
+    }
+
+    #[test]
+    fn build_index_skips_unchanged_files_with_head_blob_sha() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "fn alpha() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_skipped, 1);
+        assert_eq!(stats.files_indexed, 0);
+    }
+
+    #[test]
     fn build_index_removes_embeddings_of_files_deleted_from_git() {
         let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
         let db = mem_db();
