@@ -73,11 +73,19 @@ fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
 }
 
 /// Greedy budget allocation: walk candidates by score descending and take every file that
-/// still fits whole; a file that does not fit is skipped, not truncated and not the end of
-/// the search, so one huge high-ranked file cannot use up the budget and starve the smaller
-/// files below it (#135). Only when nothing fits whole is the best-ranked file truncated to
-/// the budget, so a non-empty match never yields an empty bundle.
-/// Returns selected candidates in score order.
+/// still fits whole.
+///
+/// A file that does not fit whole is handled by how much of it fits:
+///
+/// - **At least half** fits: it is truncated to the remaining budget and the search ends. A
+///   half-file is worth keeping; on ripgrep, whose right files are ~9k tokens, skipping every
+///   file that did not fit whole cost half the recall at 16k.
+/// - **Less than half** fits: it is skipped and the search goes on, so one huge high-ranked
+///   file cannot use up the budget as a small fragment and starve the smaller files below it
+///   (#135).
+///
+/// Only when nothing was taken is the best-ranked skipped file truncated to the budget, so a
+/// non-empty match never yields an empty bundle. Returns selected candidates in score order.
 pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate> {
     candidates.sort_by(|a, b| {
         b.score
@@ -102,6 +110,16 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
         if used + t <= budget {
             used += t;
             selected.push(c);
+        } else if (budget - used) * 2 >= t {
+            // at least half of the file fits: take that part and stop
+            let truncated = truncate_to_tokens(&c.content, budget - used);
+            if estimate_tokens(&truncated) > 0 {
+                selected.push(Candidate {
+                    content: truncated,
+                    ..c
+                });
+            }
+            used = budget;
         } else if best_overflow.is_none() {
             best_overflow = Some(c);
         }
@@ -186,6 +204,46 @@ mod tests {
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].path, PathBuf::from("a.rs"), "input order {order:?}");
         }
+    }
+
+    #[test]
+    fn file_of_which_at_least_half_fits_is_truncated_not_dropped() {
+        // 100 tokens used, 50 left: the next file has 100 tokens, so exactly half of it fits.
+        // A half-file is worth keeping (ripgrep's right files are ~9k tokens; skipping every
+        // file that does not fit whole dropped recall from 0.44 to 0.22 at 16k, #135).
+        let cs = vec![make(1.0, 400), make(0.5, 400)];
+        let out = allocate(cs, 150);
+        assert_eq!(out.len(), 2, "the half-fitting file must be kept");
+        assert_eq!(out[1].tokens(), 50);
+    }
+
+    #[test]
+    fn file_of_which_less_than_half_fits_is_dropped() {
+        // 51 left of a 100-token file is just over half; 49 left is just under.
+        let over = allocate(vec![make(1.0, 396), make(0.5, 400)], 150); // 99 + 51 left
+        assert_eq!(over.len(), 2, "51 of 100 tokens is more than half");
+        let under = allocate(vec![make(1.0, 404), make(0.5, 400)], 150); // 101 + 49 left
+        assert_eq!(under.len(), 1, "49 of 100 tokens is a fragment");
+    }
+
+    #[test]
+    fn truncating_in_place_ends_the_search() {
+        // after a half-file fills the budget, a small file below it must not be added
+        let cs = vec![make(1.0, 400), make(0.5, 400), make(0.4, 40)];
+        let out = allocate(cs, 150);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().map(|c| c.tokens()).sum::<usize>() <= 150);
+    }
+
+    #[test]
+    fn best_file_that_half_fits_is_kept_over_smaller_files_below_it() {
+        // 1000-token best file, 600 budget: 60% of it fits, so it is kept (truncated) rather
+        // than skipped in favour of a 100-token file.
+        let cs = vec![make(1.0, 4000), make(0.5, 400)];
+        let out = allocate(cs, 600);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].score - 1.0).abs() < f32::EPSILON);
+        assert!(out[0].tokens() <= 600);
     }
 
     #[test]

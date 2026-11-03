@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-01
+
+Retrieval fixes found while measuring accuracy on real fix PRs (#135, #160). On the `bench/`
+set (strict metric, title-only tasks) recall at a 16k-token budget, against naive keyword
+matching: axum 0.69 / 0.56, clap 0.53 / 0.38, bat 0.59 / 0.42, ripgrep 0.49 / 0.27 (Rust);
+hono 0.83 / 0.66, zod 0.39 / 0.18 (TypeScript); scrapy 0.48 / 0.47, poetry 0.30 / 0.40
+(Python). Python is the weak spot (poetry is still behind), and the symbol weight was chosen
+on axum, clap and bat, so their numbers are optimistic.
+
+### Added
+- `contextsmith --version` / `-V` (#111).
+- `bench/`: scripts, fixed candidate sets and a README that reproduce the Accuracy table
+  in the README (#140). Not included in the published crate.
+- `adapters/claude-code/`: a Claude Code skill and a thin wrapper (`ctx-select.sh`) that list
+  the files most relevant to a task in any git repository, keeping the index outside the
+  repository (#145). Not included in the published crate.
+
+### Fixed
+- Multi-word tasks no longer fail with "No matching files found": terms are OR-joined (#133).
+- `sanitize_fts_query` uses an allow-list of characters, so punctuation such as `.` or `=`
+  in a task can no longer break the FTS5 query (#134).
+- The BM25 sub-query `LIMIT` kept the first rows in rowid order instead of the best-scoring
+  ones, and long tasks let common words drown out the rare ones. Tasks are now reduced to
+  their 8 rarest terms (#137).
+- Budget allocation: one huge top-ranked file (benchmark fixtures, large tests) can no
+  longer use up the whole budget. A file that does not fit is truncated into the remainder
+  only if at least half of it fits (the fragment is then worth having); a smaller fragment is
+  skipped and the search goes on. Only when nothing fits is the best file truncated. Files
+  with equal scores are ordered by path, so output is deterministic (#142, #162).
+- Dependency expansion: each neighbour is scored from its own parent (half of the parent's
+  score) instead of half of the best seed's, so unrelated neighbours no longer outrank
+  weaker seeds (#143).
+- Symbol matches are aggregated per file (best match) and weighted 0.5 instead of 2.0, so
+  files with many symbols no longer outrank the best match (#151).
+- `--task` values that start with `-` are accepted instead of being rejected as unknown
+  options (#149).
+- `index --out <path>` creates the missing parent directories of `<path>` instead of failing
+  with "unable to open database file" (#172).
+
+### Changed
+- Test and fixture files (`tests/`, `test/`, `__tests__/`, `fixtures/` directories, and
+  `test_*`, `*_test.*`, `*.test.*`, `*.spec.*` names) have their search score halved. They
+  name the same things as the code under test and otherwise filled the top of the results
+  (60% of the top 10 on poetry). They are not excluded. The benchmark counts only source
+  files as correct, so it favours this change; its value for real use is not measured (#164).
+- A bundle no longer ends with a tiny fragment of a file that mostly did not fit (see Budget
+  allocation above).
+- `Cargo.toml` `repository` / `homepage` point to `flipslidersand-labs/context-smith`.
+- README: the Accuracy section reports measured numbers and the comparison with naive
+  keyword matching (#139, #155).
+
+### Known limitations
+- Only Rust, Python and TypeScript repositories were measured, 11 in all; the result for
+  other languages and for repositories of other shapes is unknown.
+
 ## [0.4.0] - 2026-08-27
 
 ### Added

@@ -26,6 +26,7 @@ use context_smith::budget::{allocate, Candidate};
 use context_smith::bundle_writer::{render_task_md, write_bundle};
 use context_smith::dep_builder::bfs_expand;
 use context_smith::index_builder::{build_index, IndexDb};
+use context_smith::path_kind::path_score_factor;
 use context_smith::search_index::search_bm25;
 use context_smith::GitRepo;
 
@@ -57,7 +58,8 @@ enum Command {
     Build {
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
-        #[arg(long, value_parser = non_empty_string)]
+        /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
+        #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
         task: String,
         #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
@@ -82,7 +84,8 @@ enum Command {
     Query {
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
-        #[arg(long, value_parser = non_empty_string)]
+        /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
+        #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
         task: String,
         #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
@@ -184,7 +187,6 @@ fn select_candidates(
             .collect();
 
         for file_id in scored_ids {
-            let score = scored[&file_id];
             let rel_path: String = {
                 let mut stmt = conn
                     .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
@@ -193,6 +195,7 @@ fn select_candidates(
                     Err(_) => continue,
                 }
             };
+            let score = scored[&file_id] * path_score_factor(&rel_path);
             let abs = repo.root().join(&rel_path);
             let content = match std::fs::read_to_string(&abs) {
                 Ok(s) => s,
@@ -235,7 +238,14 @@ fn main() -> anyhow::Result<()> {
         Command::Index { repo, out, force } => {
             let repo = GitRepo::new(&repo)?;
             let db_path = match out {
-                Some(p) => PathBuf::from(p),
+                Some(p) => {
+                    // Keep an index outside the repository (e.g. in a cache dir) with one command.
+                    let p = PathBuf::from(p);
+                    if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    p
+                }
                 None => {
                     let dir = repo.root().join(".contextsmith");
                     std::fs::create_dir_all(&dir)?;
