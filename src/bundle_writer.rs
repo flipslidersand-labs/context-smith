@@ -82,6 +82,28 @@ pub(crate) fn make_slug(base: &str, count: usize) -> String {
     }
 }
 
+/// Max bytes of a base slug. Leaves room for `_N` and `.md` under the 255-byte
+/// file name limit of common filesystems.
+const MAX_BASE_SLUG_BYTES: usize = 200;
+
+/// Sanitize a path into a base slug, cut to `MAX_BASE_SLUG_BYTES` on a char
+/// boundary. Paths that collide after cutting get `_N` from `make_slug`.
+fn base_slug(path: &str) -> String {
+    let mut slug = String::new();
+    for ch in path.chars() {
+        let ch = if ch.is_alphanumeric() || ch == '-' {
+            ch
+        } else {
+            '_'
+        };
+        if slug.len() + ch.len_utf8() > MAX_BASE_SLUG_BYTES {
+            break;
+        }
+        slug.push(ch);
+    }
+    slug
+}
+
 /// Return the shortest backtick fence string (minimum length 3) that does not
 /// appear as a standalone fence sequence in `content`.
 ///
@@ -151,18 +173,7 @@ pub fn write_bundle(
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for c in selected {
-        let base_slug: String = c
-            .path
-            .to_string_lossy()
-            .chars()
-            .map(|ch| {
-                if ch.is_alphanumeric() || ch == '-' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let base_slug = base_slug(&c.path.to_string_lossy());
         // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
         // so generated `_N` slugs never collide with another base slug and
         // case-insensitive filesystems don't merge files either.
@@ -386,6 +397,55 @@ mod tests {
         let md = render_task_md("t", 1000, &sel, "", true);
         assert!(md.contains("(score=0.875)"));
         assert!(!md.contains("## Recent Diff"), "empty diff must be omitted");
+    }
+
+    fn slug_file_names(out: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(out.join("relevant-code"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn write_bundle_long_ascii_path_is_truncated_under_255_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let path = format!("{}/lib.rs", "d".repeat(300));
+        write_bundle("t", 1000, &[cand(&path, 0.9, "x")], "", &out, false).unwrap();
+        let names = slug_file_names(&out);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].len() <= 255, "len={}", names[0].len());
+    }
+
+    #[test]
+    fn write_bundle_long_multibyte_path_is_cut_on_char_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        // 3 bytes per char: 100 chars = 300 bytes.
+        let path = format!("{}/lib.rs", "日".repeat(100));
+        write_bundle("t", 1000, &[cand(&path, 0.9, "x")], "", &out, false).unwrap();
+        let names = slug_file_names(&out);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].len() <= 255, "len={}", names[0].len());
+        assert!(names[0].starts_with('日'));
+    }
+
+    #[test]
+    fn write_bundle_long_paths_colliding_after_truncation_stay_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let prefix = "d".repeat(300);
+        let selected = vec![
+            cand(&format!("{prefix}/a.rs"), 0.9, "a"),
+            cand(&format!("{prefix}/b.rs"), 0.8, "b"),
+            cand(&format!("{}/c.rs", prefix.to_uppercase()), 0.7, "c"),
+        ];
+        write_bundle("t", 1000, &selected, "", &out, false).unwrap();
+        let names = slug_file_names(&out);
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.iter().all(|n| n.len() <= 255), "{names:?}");
     }
 
     #[test]
