@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::tokenizer::{tokenize_code, tokenize_path};
 
@@ -107,9 +107,11 @@ pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Resu
 /// Clears all three tables atomically before rebuilding; rolls back on any error.
 pub fn populate_fts_with_paths(
     conn: &Connection,
+    repo_root: &Path,
     rel_file_paths: &HashMap<i64, PathBuf>,
     abs_file_paths: &HashMap<i64, PathBuf>,
 ) -> Result<()> {
+    let canonical_root = repo_root.canonicalize()?;
     conn.execute_batch("BEGIN")?;
     let result = (|| -> Result<()> {
         conn.execute_batch("DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;")?;
@@ -141,7 +143,7 @@ pub fn populate_fts_with_paths(
 
         // fts_body: original source content (weight W_BODY, provides snippet())
         for (&file_id, abs_path) in abs_file_paths {
-            let content = match std::fs::read_to_string(abs_path) {
+            let content = match crate::read_within_root(&canonical_root, abs_path) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
@@ -539,7 +541,7 @@ mod tests {
     #[test]
     fn populate_fills_all_three_fts_tables() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let c = f.db.connection();
         assert_eq!(count(c, "fts_path"), 2);
         // import symbols are excluded
@@ -550,8 +552,8 @@ mod tests {
     #[test]
     fn populate_twice_does_not_duplicate_rows() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         assert_eq!(count(f.db.connection(), "fts_path"), 2);
         assert_eq!(count(f.db.connection(), "fts_body"), 2);
     }
@@ -559,8 +561,14 @@ mod tests {
     #[test]
     fn populate_with_empty_maps_clears_fts() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
-        populate_fts_with_paths(f.db.connection(), &HashMap::new(), &HashMap::new()).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(
+            f.db.connection(),
+            f.dir.path(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(count(f.db.connection(), "fts_path"), 0);
         assert_eq!(count(f.db.connection(), "fts_body"), 0);
     }
@@ -570,7 +578,7 @@ mod tests {
         let mut f = fixture();
         let id = *f.abs.keys().next().unwrap();
         f.abs.insert(id, f.dir.path().join("does_not_exist.rs"));
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         assert_eq!(count(f.db.connection(), "fts_body"), 1);
         assert_eq!(count(f.db.connection(), "fts_path"), 2);
     }
@@ -580,7 +588,7 @@ mod tests {
         let f = fixture();
         let id = *f.abs.keys().next().unwrap();
         std::fs::write(&f.abs[&id], "あ".repeat(200_000)).unwrap();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let bytes: i64 =
             f.db.connection()
                 .query_row(
@@ -595,11 +603,11 @@ mod tests {
     #[test]
     fn populate_error_rolls_back_transaction() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         f.db.connection()
             .execute_batch("DROP TABLE fts_symbols")
             .unwrap();
-        let res = populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs);
+        let res = populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs);
         assert!(res.is_err());
         // Transaction must have been closed and earlier data restored.
         assert!(f.db.connection().is_autocommit());
@@ -609,7 +617,7 @@ mod tests {
     #[test]
     fn search_finds_file_by_path_term() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let hits = search_bm25(f.db.connection(), "login", 5).unwrap();
         assert_eq!(hits.len(), 1);
         let login_id = *f
@@ -625,7 +633,7 @@ mod tests {
     #[test]
     fn search_finds_file_by_symbol_and_body_terms() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let store_id = *f
             .rel
             .iter()
@@ -641,7 +649,7 @@ mod tests {
     #[test]
     fn search_no_match_returns_empty() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         assert!(search_bm25(f.db.connection(), "zzzzqqqq", 5)
             .unwrap()
             .is_empty());
@@ -650,7 +658,7 @@ mod tests {
     #[test]
     fn search_respects_top_n() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         // "fn" appears in both bodies
         let all = search_bm25(f.db.connection(), "fn", 10).unwrap();
         assert_eq!(all.len(), 2);
@@ -661,7 +669,7 @@ mod tests {
     #[test]
     fn search_results_sorted_by_score_descending() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let hits = search_bm25(f.db.connection(), "fn authenticate", 10).unwrap();
         assert!(hits.windows(2).all(|w| w[0].1 >= w[1].1), "{hits:?}");
     }
@@ -682,7 +690,7 @@ mod tests {
     #[test]
     fn search_with_fts_operators_in_query_does_not_error() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), &f.rel, &f.abs).unwrap();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         assert!(search_bm25(f.db.connection(), "login OR (x) AND \"y\" *", 5).is_ok());
     }
 
