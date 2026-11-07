@@ -7,6 +7,10 @@ pub struct Candidate {
     pub path: PathBuf,
     pub score: f32,
     pub content: String,
+    /// True when `content` is a prefix cut by [`allocate`] to fit the budget.
+    pub truncated: bool,
+    /// Token count of the full file before truncation (meaningful only when `truncated`).
+    pub original_tokens: usize,
 }
 
 impl Candidate {
@@ -112,10 +116,12 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
             selected.push(c);
         } else if (budget - used) * 2 >= t {
             // at least half of the file fits: take that part and stop
-            let truncated = truncate_to_tokens(&c.content, budget - used);
-            if estimate_tokens(&truncated) > 0 {
+            let cut = truncate_to_tokens(&c.content, budget - used);
+            if estimate_tokens(&cut) > 0 {
                 selected.push(Candidate {
-                    content: truncated,
+                    content: cut,
+                    truncated: true,
+                    original_tokens: t,
                     ..c
                 });
             }
@@ -126,10 +132,13 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
     }
 
     if let (true, Some(c)) = (selected.is_empty(), best_overflow) {
-        let truncated = truncate_to_tokens(&c.content, budget);
-        if estimate_tokens(&truncated) > 0 {
+        let original_tokens = c.tokens().max(1);
+        let cut = truncate_to_tokens(&c.content, budget);
+        if estimate_tokens(&cut) > 0 {
             selected.push(Candidate {
-                content: truncated,
+                content: cut,
+                truncated: true,
+                original_tokens,
                 ..c
             });
         }
@@ -148,6 +157,8 @@ mod tests {
             path: PathBuf::from("x.rs"),
             score,
             content: "a".repeat(chars),
+            truncated: false,
+            original_tokens: 0,
         }
     }
 
@@ -194,6 +205,8 @@ mod tests {
             path: PathBuf::from(path),
             score: 0.5,
             content: "a".repeat(400),
+            truncated: false,
+            original_tokens: 0,
         };
         for order in [
             ["a.rs", "b.rs", "c.rs"],
@@ -257,6 +270,22 @@ mod tests {
     }
 
     #[test]
+    fn truncated_flag_set_only_on_cut_files() {
+        // whole file: not marked
+        let whole = allocate(vec![make(1.0, 400)], 1000);
+        assert!(!whole[0].truncated);
+        // half-fit path: second file cut, first untouched
+        let out = allocate(vec![make(1.0, 400), make(0.5, 400)], 150);
+        assert!(!out[0].truncated);
+        assert!(out[1].truncated);
+        assert_eq!(out[1].original_tokens, 100);
+        // best-overflow path
+        let out = allocate(vec![make(1.0, 4000)], 100);
+        assert!(out[0].truncated);
+        assert_eq!(out[0].original_tokens, 1000);
+    }
+
+    #[test]
     fn empty_when_budget_zero() {
         let cs = vec![make(1.0, 400)];
         let out = allocate(cs, 0);
@@ -308,6 +337,8 @@ mod tests {
             path: PathBuf::from("notes.md"),
             score: 1.0,
             content: "日本語のコメント。".repeat(500),
+            truncated: false,
+            original_tokens: 0,
         };
         let budget = 200;
         let out = allocate(vec![jp], budget);

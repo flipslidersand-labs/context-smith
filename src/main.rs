@@ -226,6 +226,8 @@ fn select_candidates(
                 path: PathBuf::from(rel_path),
                 score,
                 content,
+                truncated: false,
+                original_tokens: 0,
             });
         }
     }
@@ -365,6 +367,7 @@ fn main() -> anyhow::Result<()> {
                                 "path": c.path.to_string_lossy(),
                                 "score": c.score,
                                 "tokens": c.tokens(),
+                                "truncated": c.truncated,
                             })
                         })
                         .collect();
