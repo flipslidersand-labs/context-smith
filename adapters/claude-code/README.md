@@ -29,4 +29,4 @@ bash adapters/claude-code/test.sh      # builds a throwaway git repository; chec
 | Variable | Default | Use |
 |---|---|---|
 | `CONTEXTSMITH_BIN` | `contextsmith` | path to the binary |
-| `CTX_SELECT_CACHE` | `${XDG_CACHE_HOME:-~/.cache}/contextsmith` | where indexes are kept (one directory per repository) |
+| `CTX_SELECT_CACHE` | `${XDG_CACHE_HOME:-~/.cache}/contextsmith` | where indexes are kept (one directory per repository; created mode 700 because the index holds file text, and a symlink or another user's directory is refused) |
