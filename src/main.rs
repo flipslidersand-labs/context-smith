@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Clap value_parser: reject empty strings early with a clear error message.
 fn non_empty_string(s: &str) -> Result<String, String> {
@@ -197,7 +197,7 @@ fn select_candidates(
             };
             let score = scored[&file_id] * path_score_factor(&rel_path);
             let abs = repo.root().join(&rel_path);
-            let content = match std::fs::read_to_string(&abs) {
+            let content = match repo.read_tracked(Path::new(&rel_path)) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs);
@@ -367,4 +367,41 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use context_smith::index_builder::build_index;
+
+    #[test]
+    fn select_candidates_ignores_file_swapped_for_external_symlink_after_index() {
+        let outside = tempfile::TempDir::new().unwrap();
+        let ext = outside.path().join("s.rs");
+        std::fs::write(&ext, "pub fn alpha_widget() {}\n// EXTSECRET\n").unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "pub fn alpha_widget() {}\n").unwrap();
+        let mut index = git.index().unwrap();
+        index.add_path(Path::new("a.rs")).unwrap();
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let dbdir = tempfile::TempDir::new().unwrap();
+        let db = IndexDb::open(&dbdir.path().join("i.db")).unwrap();
+        build_index(&repo, &db, false).unwrap();
+
+        // Swap after indexing: query time must not follow the new symlink.
+        std::fs::remove_file(tmp.path().join("a.rs")).unwrap();
+        std::os::unix::fs::symlink(&ext, tmp.path().join("a.rs")).unwrap();
+
+        if let Ok(sel) = select_candidates(&repo, &db, "alpha_widget", 10_000, true) {
+            assert!(sel.iter().all(|c| !c.content.contains("EXTSECRET")));
+        }
+    }
 }
