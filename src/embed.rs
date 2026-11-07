@@ -110,6 +110,7 @@ pub fn populate_embeddings(
     if stale_files.is_empty() {
         return Ok(0);
     }
+    let canonical_root = repo_root.canonicalize()?;
 
     let mut written = 0usize;
 
@@ -123,7 +124,7 @@ pub fn populate_embeddings(
 
         for (id, rel, sha) in chunk {
             let abs_path = repo_root.join(rel);
-            let content = match std::fs::read_to_string(&abs_path) {
+            let content = match crate::read_within_root(&canonical_root, &abs_path) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);

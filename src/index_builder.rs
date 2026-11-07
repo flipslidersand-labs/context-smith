@@ -330,7 +330,7 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
             }
 
             let abs_path = repo.root().join(rel_path);
-            let source = match std::fs::read_to_string(&abs_path) {
+            let source = match repo.read_tracked(rel_path) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
@@ -914,6 +914,198 @@ mod tests {
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM symbols WHERE name='gone'"),
             0
+        );
+    }
+
+    /// Commit the given already-present worktree paths (may be symlinks).
+    #[cfg(unix)]
+    fn commit_existing(dir: &Path, rels: &[&str]) {
+        let git = git2::Repository::open(dir).unwrap();
+        let mut index = git.index().unwrap();
+        for r in rels {
+            index.add_path(Path::new(r)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "more", &tree, &[&parent])
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn assert_no_leak(db: &IndexDb, needle: &str) {
+        assert_eq!(
+            count(
+                db,
+                &format!("SELECT COUNT(*) FROM symbols WHERE name='{needle}'")
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                db,
+                &format!("SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH '{needle}'")
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                db,
+                &format!("SELECT COUNT(*) FROM fts_symbols WHERE fts_symbols MATCH '{needle}'")
+            ),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_ignores_regular_file_swapped_for_external_symlink() {
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("s.rs"), "pub fn swapleak() {}\n").unwrap();
+        let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
+        std::fs::remove_file(tmp.path().join("a.rs")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("s.rs"), tmp.path().join("a.rs")).unwrap();
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "swapleak");
+        assert!(repo.read_tracked(Path::new("a.rs")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_ignores_file_behind_external_directory_symlink() {
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("x.rs"), "pub fn dirleak() {}\n").unwrap();
+        let (tmp, repo) = repo_with(&[("d/x.rs", "fn x() {}\n")]);
+        std::fs::remove_dir_all(tmp.path().join("d")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("d")).unwrap();
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "dirleak");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_ignores_symlink_into_dot_git() {
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n")]);
+        std::fs::write(
+            tmp.path().join(".git").join("secret.rs"),
+            "pub fn gitleak() {}\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(".git/secret.rs", tmp.path().join("cfg.rs")).unwrap();
+        commit_existing(tmp.path(), &["cfg.rs"]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "gitleak");
+        assert!(repo.read_tracked(Path::new("cfg.rs")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_ignores_chained_and_dotdot_symlinks_leaving_repo() {
+        let outside = TempDir::new().unwrap();
+        let ext = outside.path().join("e.rs");
+        std::fs::write(&ext, "pub fn chainleak() {}\n").unwrap();
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n")]);
+        // inner link -> external; chain -> inner link
+        std::os::unix::fs::symlink(&ext, tmp.path().join("hop.rs")).unwrap();
+        std::os::unix::fs::symlink("hop.rs", tmp.path().join("chain.rs")).unwrap();
+        // relative `..` link escaping the repo
+        let rel = format!(
+            "../{}/e.rs",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        std::os::unix::fs::symlink(&rel, tmp.path().join("up.rs")).unwrap();
+        commit_existing(tmp.path(), &["hop.rs", "chain.rs", "up.rs"]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "chainleak");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_keeps_unreadable_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n")]);
+        let p = tmp.path().join("ok.rs");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            return; // running as root: chmod does not restrict reads
+        }
+        let files = repo.scan().unwrap();
+        assert!(files.iter().any(|(rel, ..)| rel == Path::new("ok.rs")));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_nested_dot_git() {
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n")]);
+        let nested = tmp.path().join("sub/.git");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("config"), "token\n").unwrap();
+        let e = repo.read_tracked(Path::new("sub/.git/config")).unwrap_err();
+        assert!(crate::is_path_escape(&e));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_still_reads_in_repo_symlink() {
+        let (tmp, repo) = repo_with(&[("inner.rs", "fn inner_ok() {}\n")]);
+        std::os::unix::fs::symlink("inner.rs", tmp.path().join("l.rs")).unwrap();
+        assert!(repo
+            .read_tracked(Path::new("l.rs"))
+            .unwrap()
+            .contains("inner_ok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_ignores_symlink_pointing_outside_repo() {
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.rs");
+        std::fs::write(&secret, "pub fn leaked_secret_fn() {}\n").unwrap();
+
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n"), ("inner.rs", "fn inner() {}\n")]);
+        std::os::unix::fs::symlink(&secret, tmp.path().join("link.rs")).unwrap();
+        // In-repo symlink keeps working.
+        std::os::unix::fs::symlink("inner.rs", tmp.path().join("inner_link.rs")).unwrap();
+        let git = git2::Repository::open(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        index.add_path(Path::new("link.rs")).unwrap();
+        index.add_path(Path::new("inner_link.rs")).unwrap();
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "add links", &tree, &[&parent])
+            .unwrap();
+
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name='leaked_secret_fn'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH 'leaked_secret_fn'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='link.rs'"),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='inner_link.rs'"),
+            1
         );
     }
 
