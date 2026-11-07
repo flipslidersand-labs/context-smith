@@ -398,15 +398,14 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
         }
         "use_declaration" => {
             // Take the `argument` field so visibility modifiers (`pub`,
-            // `pub(crate)`, `pub(in path)`) are excluded; fall back to text trimming.
-            let text = match node.child_by_field_name("argument") {
-                Some(arg) => node_text(arg, src).to_owned(),
-                None => node_text(node, src)
-                    .trim_end_matches(';')
-                    .trim_start_matches("use ")
-                    .to_owned(),
-            };
-            out.push((text, SymbolKind::Import, line));
+            // `pub(crate)`, `pub(in path)`) are excluded. A missing/empty argument
+            // (syntax-error recovery such as `pub use ;`) is not recorded.
+            if let Some(arg) = node.child_by_field_name("argument") {
+                let text = node_text(arg, src).trim();
+                if !text.is_empty() {
+                    out.push((text.to_owned(), SymbolKind::Import, line));
+                }
+            }
         }
         _ => {}
     }
@@ -875,6 +874,17 @@ mod tests {
                 "std::fmt"
             ]
         );
+    }
+
+    #[test]
+    fn extract_rust_use_without_argument_is_not_imported() {
+        for src in ["pub use ;\n", "use ;\n", "pub(crate) use ;\nfn f() {}\n"] {
+            let out = SymbolExtractor::extract(Path::new("a.rs"), src, Language::Rust).unwrap();
+            assert!(
+                names(&out, SymbolKind::Import).is_empty(),
+                "empty import saved for {src:?}: {out:?}"
+            );
+        }
     }
 
     #[test]
