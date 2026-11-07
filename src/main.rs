@@ -190,9 +190,12 @@ fn select_candidates(
             let rel_path: String = {
                 let mut stmt = conn
                     .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
-                match stmt.query_row([file_id], |row| row.get(0)) {
-                    Ok(p) => p,
-                    Err(_) => continue,
+                // Only "no row" (unscored/unknown-lang file) is expected; any
+                // other DB error must propagate rather than drop candidates.
+                use rusqlite::OptionalExtension;
+                match stmt.query_row([file_id], |row| row.get(0)).optional()? {
+                    Some(p) => p,
+                    None => continue,
                 }
             };
             let score = scored[&file_id] * path_score_factor(&rel_path);
@@ -403,5 +406,46 @@ mod tests {
         if let Ok(sel) = select_candidates(&repo, &db, "alpha_widget", 10_000, true) {
             assert!(sel.iter().all(|c| !c.content.contains("EXTSECRET")));
         }
+    }
+
+    fn indexed_repo(files: &[&str]) -> (tempfile::TempDir, GitRepo, tempfile::TempDir, IndexDb) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        for f in files {
+            std::fs::write(tmp.path().join(f), "pub fn alpha_widget() {}\n").unwrap();
+            index.add_path(Path::new(f)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let dbdir = tempfile::TempDir::new().unwrap();
+        let db = IndexDb::open(&dbdir.path().join("i.db")).unwrap();
+        build_index(&repo, &db, false).unwrap();
+        (tmp, repo, dbdir, db)
+    }
+
+    #[test]
+    fn select_candidates_propagates_files_query_error() {
+        let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
+        db.connection()
+            .execute_batch("UPDATE files SET path = CAST(path AS BLOB)")
+            .unwrap();
+        let res = select_candidates(&repo, &db, "alpha_widget", 10_000, true);
+        assert!(res.is_err(), "non-NoRows DB error must not be swallowed");
+    }
+
+    #[test]
+    fn select_candidates_skips_candidate_with_no_files_row() {
+        let (_t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
+        db.connection()
+            .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM files WHERE path = 'b.rs'")
+            .unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
 }
