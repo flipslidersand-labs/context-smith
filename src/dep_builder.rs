@@ -142,6 +142,18 @@ fn resolve_ts_js(
     for ext in EXTS {
         candidates.push(joined.join(format!("index.{}", ext)));
     }
+    // #189: TS ESM convention writes `./a.js` for a source file `a.ts`. Tried last
+    // so that a real `a.js` (the as-is candidate above) always wins.
+    let ts_alts: &[&str] = match joined.extension().and_then(|e| e.to_str()) {
+        Some("js") => &["ts", "tsx"],
+        Some("jsx") => &["tsx"],
+        Some("mjs") => &["mts"],
+        Some("cjs") => &["cts"],
+        _ => &[],
+    };
+    for ext in ts_alts {
+        candidates.push(joined.with_extension(ext));
+    }
 
     for candidate in candidates {
         if let Some(&id) = path_to_id.get(&candidate) {
@@ -650,6 +662,39 @@ mod tests {
         assert!(resolve_ts_js("import r from 'react'", from, &map).is_empty());
         assert!(resolve_ts_js("require('../../etc/shadow')", from, &map).is_empty());
         assert!(resolve_ts_js("require('./missing')", from, &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_ts_js_esm_js_extension_maps_to_ts_sources() {
+        let map = ids(&[
+            ("src/a.ts", 1),
+            ("src/b.tsx", 2),
+            ("src/c.mts", 3),
+            ("src/d.cts", 4),
+            ("src/e.js", 5),
+            ("src/e.ts", 6),
+            ("src/x.ts", 7),
+        ]);
+        let from = Path::new("src/x.ts");
+        assert_eq!(resolve_ts_js("import a from './a.js'", from, &map), vec![1]);
+        assert_eq!(resolve_ts_js("import b from './b.js'", from, &map), vec![2]);
+        assert_eq!(
+            resolve_ts_js("import b from './b.jsx'", from, &map),
+            vec![2]
+        );
+        assert_eq!(
+            resolve_ts_js("import c from './c.mjs'", from, &map),
+            vec![3]
+        );
+        assert_eq!(
+            resolve_ts_js("import d from './d.cjs'", from, &map),
+            vec![4]
+        );
+        // an existing .js file wins over the .ts counterpart
+        assert_eq!(resolve_ts_js("import e from './e.js'", from, &map), vec![5]);
+        // no cross mapping, and traversal guard still applies
+        assert!(resolve_ts_js("import c from './c.cjs'", from, &map).is_empty());
+        assert!(resolve_ts_js("import a from '../../a.js'", from, &map).is_empty());
     }
 
     #[test]
