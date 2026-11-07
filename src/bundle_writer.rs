@@ -11,11 +11,23 @@ pub struct Citation {
     pub score: f32,
     pub tokens: usize,
     pub reason: String,
+    pub truncated: bool,
 }
 
 /// Render the `task.md` document (task description, selected file list, and the
 /// recent diff) as a String. Shared by [`write_bundle`] and the `query` command
 /// so both produce identical Markdown.
+/// `[truncated: first N of M tokens]` note for a budget-cut file, or `None` if whole.
+pub fn truncation_note(c: &Candidate) -> Option<String> {
+    c.truncated.then(|| {
+        format!(
+            "[truncated: first {} of {} tokens]",
+            c.tokens(),
+            c.original_tokens
+        )
+    })
+}
+
 pub fn render_task_md(
     task: &str,
     budget: usize,
@@ -36,12 +48,14 @@ pub fn render_task_md(
         } else {
             String::new()
         };
+        let note = truncation_note(c).map_or(String::new(), |n| format!(" {n}"));
         task_md.push_str(&format!(
-            "{}. `{}`{} — {} tokens\n",
+            "{}. `{}`{} — {} tokens{}\n",
             i + 1,
             c.path.display(),
             explain_str,
             c.tokens(),
+            note,
         ));
     }
 
@@ -66,6 +80,28 @@ pub(crate) fn make_slug(base: &str, count: usize) -> String {
     } else {
         format!("{}_{}", base, count - 1)
     }
+}
+
+/// Max bytes of a base slug. Leaves room for `_N` and `.md` under the 255-byte
+/// file name limit of common filesystems.
+const MAX_BASE_SLUG_BYTES: usize = 200;
+
+/// Sanitize a path into a base slug, cut to `MAX_BASE_SLUG_BYTES` on a char
+/// boundary. Paths that collide after cutting get `_N` from `make_slug`.
+fn base_slug(path: &str) -> String {
+    let mut slug = String::new();
+    for ch in path.chars() {
+        let ch = if ch.is_alphanumeric() || ch == '-' {
+            ch
+        } else {
+            '_'
+        };
+        if slug.len() + ch.len_utf8() > MAX_BASE_SLUG_BYTES {
+            break;
+        }
+        slug.push(ch);
+    }
+    slug
 }
 
 /// Return the shortest backtick fence string (minimum length 3) that does not
@@ -137,18 +173,7 @@ pub fn write_bundle(
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for c in selected {
-        let base_slug: String = c
-            .path
-            .to_string_lossy()
-            .chars()
-            .map(|ch| {
-                if ch.is_alphanumeric() || ch == '-' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let base_slug = base_slug(&c.path.to_string_lossy());
         // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
         // so generated `_N` slugs never collide with another base slug and
         // case-insensitive filesystems don't merge files either.
@@ -163,11 +188,14 @@ pub fn write_bundle(
 
         let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
         let fence = safe_fence(&c.content);
-        let file_md = format!(
+        let mut file_md = format!(
             "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
             c.path.display(),
             c.content,
         );
+        if let Some(note) = truncation_note(c) {
+            file_md.push_str(&format!("\n{note}\n"));
+        }
         std::fs::write(
             out_dir.join("relevant-code").join(format!("{slug}.md")),
             file_md,
@@ -182,6 +210,7 @@ pub fn write_bundle(
             score: c.score,
             tokens: c.tokens(),
             reason: format!("bm25_score={:.3}", c.score),
+            truncated: c.truncated,
         })
         .collect();
     let json = serde_json::to_string_pretty(&citations)?;
@@ -200,6 +229,8 @@ mod tests {
             path: PathBuf::from(path),
             score,
             content: content.into(),
+            truncated: false,
+            original_tokens: 0,
         }
     }
 
@@ -368,6 +399,55 @@ mod tests {
         assert!(!md.contains("## Recent Diff"), "empty diff must be omitted");
     }
 
+    fn slug_file_names(out: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(out.join("relevant-code"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn write_bundle_long_ascii_path_is_truncated_under_255_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let path = format!("{}/lib.rs", "d".repeat(300));
+        write_bundle("t", 1000, &[cand(&path, 0.9, "x")], "", &out, false).unwrap();
+        let names = slug_file_names(&out);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].len() <= 255, "len={}", names[0].len());
+    }
+
+    #[test]
+    fn write_bundle_long_multibyte_path_is_cut_on_char_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        // 3 bytes per char: 100 chars = 300 bytes.
+        let path = format!("{}/lib.rs", "日".repeat(100));
+        write_bundle("t", 1000, &[cand(&path, 0.9, "x")], "", &out, false).unwrap();
+        let names = slug_file_names(&out);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].len() <= 255, "len={}", names[0].len());
+        assert!(names[0].starts_with('日'));
+    }
+
+    #[test]
+    fn write_bundle_long_paths_colliding_after_truncation_stay_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let prefix = "d".repeat(300);
+        let selected = vec![
+            cand(&format!("{prefix}/a.rs"), 0.9, "a"),
+            cand(&format!("{prefix}/b.rs"), 0.8, "b"),
+            cand(&format!("{}/c.rs", prefix.to_uppercase()), 0.7, "c"),
+        ];
+        write_bundle("t", 1000, &selected, "", &out, false).unwrap();
+        let names = slug_file_names(&out);
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.iter().all(|n| n.len() <= 255), "{names:?}");
+    }
+
     #[test]
     fn make_slug_no_collision_returns_base() {
         assert_eq!(make_slug("src_lib_rs", 0), "src_lib_rs");
@@ -527,5 +607,30 @@ mod tests {
                 .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
             "slug contains unexpected char: {name:?}"
         );
+    }
+
+    #[test]
+    fn truncated_file_gets_note_in_task_md_file_md_and_citations() {
+        let mut c = cand("src/a.rs", 1.0, &"a".repeat(400));
+        c.truncated = true;
+        c.original_tokens = 300;
+        let whole = cand("src/b.rs", 0.5, "fn b() {}");
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle("t", 1000, &[c, whole], "", dir.path(), false).unwrap();
+
+        let note = "[truncated: first 100 of 300 tokens]";
+        let task_md = std::fs::read_to_string(dir.path().join("task.md")).unwrap();
+        assert!(task_md.contains(note), "{task_md}");
+        assert_eq!(task_md.matches("[truncated").count(), 1);
+
+        let a = std::fs::read_to_string(dir.path().join("relevant-code/src_a_rs.md")).unwrap();
+        assert!(a.trim_end().ends_with(note), "{a}");
+        let b = std::fs::read_to_string(dir.path().join("relevant-code/src_b_rs.md")).unwrap();
+        assert!(!b.contains("truncated"));
+
+        let cj = std::fs::read_to_string(dir.path().join("citations.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cj).unwrap();
+        assert_eq!(v[0]["truncated"], true);
+        assert_eq!(v[1]["truncated"], false);
     }
 }

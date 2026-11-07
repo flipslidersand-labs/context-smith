@@ -320,12 +320,51 @@ fn query_json_stdout_no_files_written() {
     assert!(!files.is_empty(), "expected at least one selected file");
     assert_eq!(files[0]["path"], "src/budget.rs");
     assert!(files[0]["tokens"].as_u64().unwrap() > 0);
+    assert_eq!(files[0]["truncated"], false);
 
     // query must not create a bundle directory anywhere.
     assert!(
         !repo_dir.join("context.bundle").exists(),
         "query must not write a bundle to disk"
     );
+}
+
+/// #201: a file cut to fit the budget is reported with `"truncated": true` in query JSON.
+#[test]
+fn query_json_marks_truncated_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let big = format!(
+        "pub fn allocate_budget(tokens: usize) -> usize {{ tokens }}\n{}",
+        "// budget tokens padding line\n".repeat(200)
+    );
+    make_git_repo(&repo_dir, &[("src/budget.rs", big.as_str())]);
+
+    let db_path = tmp.path().join("index.db");
+    let repo = GitRepo::new(&repo_dir).unwrap();
+    let db = IndexDb::open(&db_path).unwrap();
+    build_index(&repo, &db, false).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_contextsmith"))
+        .args([
+            "query",
+            "--repo",
+            repo_dir.to_str().unwrap(),
+            "--task",
+            "budget tokens",
+            "--budget",
+            "100",
+            "--index",
+            db_path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run contextsmith query");
+    assert!(out.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["files"][0]["truncated"], true);
 }
 
 #[test]
@@ -472,6 +511,8 @@ fn regression_17_short_file_selected() {
         path: PathBuf::from("tiny.rs"),
         score: 1.0,
         content: "ok".into(), // 2 chars -> tokens() == 0 without the max(1) guard
+        truncated: false,
+        original_tokens: 0,
     };
     let selected = allocate(vec![tiny], 100);
     assert_eq!(
@@ -494,6 +535,8 @@ fn regression_20_slug_collision_distinct_files() {
         path: PathBuf::from("src/a.rs"),
         score: 1.0,
         content: content.into(),
+        truncated: false,
+        original_tokens: 0,
     };
     let selected = vec![dup("first version"), dup("second version")];
 
