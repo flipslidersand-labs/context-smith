@@ -607,16 +607,16 @@ fn collect_ruby_node(
     }
 }
 
-/// Shared helpers for unit tests that need a real git repository.
 /// COMMIT the open transaction; if COMMIT fails, ROLLBACK so the connection is
 /// not left inside a transaction (#231). The original COMMIT error is returned;
 /// a failing ROLLBACK is ignored.
-pub fn commit_or_rollback(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+pub(crate) fn commit_or_rollback(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch("COMMIT").inspect_err(|_| {
         let _ = conn.execute_batch("ROLLBACK");
     })
 }
 
+/// Shared helpers for unit tests that need a real git repository.
 #[cfg(test)]
 pub(crate) mod test_util {
     use std::path::Path;
