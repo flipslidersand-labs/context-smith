@@ -231,6 +231,11 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
     while let Some(row) = rows.next()? {
         let fid: i64 = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
+        // Skip rows whose dimension differs from the query (stale/malformed
+        // vectors) rather than ranking them with a meaningless score.
+        if !blob.len().is_multiple_of(4) || blob.len() / 4 != query.len() {
+            continue;
+        }
         let score = cosine(query, &blob_to_vec(&blob));
         heap.push(MinEntry(score, fid));
         if heap.len() > effective_n {
@@ -263,8 +268,21 @@ pub fn fuse_seeds(
     bm25: &[(i64, f32)],
     top_n: usize,
 ) -> Result<Vec<(i64, f32)>> {
+    fuse_seeds_with_status(conn, embedder, task, bm25, top_n).map(|(seeds, _)| seeds)
+}
+
+/// Like [`fuse_seeds`], but also reports whether vector fusion actually ran
+/// (`true`) or the BM25 seeds were returned unchanged (`false`: no stored
+/// embeddings, empty query vector, or dimension mismatch / mixed dimensions).
+pub fn fuse_seeds_with_status(
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    task: &str,
+    bm25: &[(i64, f32)],
+    top_n: usize,
+) -> Result<(Vec<(i64, f32)>, bool)> {
     if !has_embeddings(conn)? {
-        return Ok(bm25.to_vec());
+        return Ok((bm25.to_vec(), false));
     }
     let query_vec = embedder
         .embed(&[task.to_string()], EmbedMode::Search)?
@@ -273,24 +291,25 @@ pub fn fuse_seeds(
         .unwrap_or_default();
     // An empty query vector, or one whose dimension differs from the stored
     // vectors (e.g. the model changed), would yield meaningless scores; fall
-    // back to BM25 only.
-    let stored_dim: Option<i64> = conn
-        .query_row(
-            "SELECT length(vector) / 4 FROM embeddings LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
-    if query_vec.is_empty() || stored_dim != Some(query_vec.len() as i64) {
+    // back to BM25 only. Stored vectors must all share one valid length
+    // (multiple of 4 bytes) equal to the query dimension.
+    let (distinct_lens, min_len): (i64, i64) = conn.query_row(
+        "SELECT COUNT(DISTINCT length(vector)), MIN(length(vector)) FROM embeddings",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let consistent =
+        distinct_lens == 1 && min_len % 4 == 0 && min_len / 4 == query_vec.len() as i64;
+    if query_vec.is_empty() || !consistent {
         eprintln!("warn: query embedding empty or dimension mismatch; using BM25 seeds only");
-        return Ok(bm25.to_vec());
+        return Ok((bm25.to_vec(), false));
     }
     // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
     // files that sit just outside `top_n` in the vector list still participate
     // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
     let vec_candidates = top_n.saturating_mul(3);
     let vector = search_vectors(conn, &query_vec, vec_candidates)?;
-    Ok(rrf_fuse(&[bm25, &vector], 60.0, top_n))
+    Ok((rrf_fuse(&[bm25, &vector], 60.0, top_n), true))
 }
 
 /// HTTP embedding client for the MINIPC embedding-svc (e5, :9092).
@@ -501,6 +520,58 @@ mod tests {
         let bm25 = vec![(7i64, 1.0f32)];
         let out = fuse_seeds(&conn, &MockEmbedder, "task", &bm25, 10).unwrap();
         assert_eq!(out, bm25, "no embeddings → BM25 seeds unchanged");
+    }
+
+    #[test]
+    fn search_vectors_excludes_dim_mismatched_rows() {
+        let conn = mem_db();
+        conn.execute(
+            "INSERT INTO embeddings (file_id, vector) VALUES (1, ?1), (2, ?2)",
+            rusqlite::params![vec_to_blob(&[-1.0, 0.0]), vec_to_blob(&[1.0, 0.0, 0.0])],
+        )
+        .unwrap();
+        let hits = search_vectors(&conn, &[1.0, 0.0], 10).unwrap();
+        let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
+        assert_eq!(ids, vec![1], "mismatched row must not enter the ranking");
+    }
+
+    #[test]
+    fn fuse_seeds_falls_back_on_mixed_stored_dims() {
+        let conn = conn_with_two_dim_vectors();
+        conn.execute(
+            "INSERT INTO embeddings (file_id, vector) VALUES (3, ?1)",
+            rusqlite::params![vec_to_blob(&[1.0, 0.0, 0.0])],
+        )
+        .unwrap();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let out = fuse_seeds(&conn, &FixedEmbedder(vec![1.0, 0.0]), "task", &bm25, 10).unwrap();
+        assert_eq!(out, bm25);
+    }
+
+    #[test]
+    fn fuse_seeds_falls_back_on_malformed_blob() {
+        let conn = mem_db();
+        conn.execute(
+            "INSERT INTO embeddings (file_id, vector) VALUES (1, ?1)",
+            rusqlite::params![vec![0u8; 9]],
+        )
+        .unwrap();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let out = fuse_seeds(&conn, &FixedEmbedder(vec![0.0, 0.0]), "task", &bm25, 10).unwrap();
+        assert_eq!(out, bm25);
+    }
+
+    #[test]
+    fn fuse_seeds_with_status_reports_fusion() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let (_, fused) =
+            fuse_seeds_with_status(&conn, &FixedEmbedder(vec![1.0, 0.0]), "t", &bm25, 10).unwrap();
+        assert!(fused);
+        let (out, fused) =
+            fuse_seeds_with_status(&conn, &FixedEmbedder(vec![1.0]), "t", &bm25, 10).unwrap();
+        assert!(!fused);
+        assert_eq!(out, bm25);
     }
 
     #[test]
