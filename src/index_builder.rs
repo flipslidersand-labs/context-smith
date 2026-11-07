@@ -917,6 +917,54 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn build_index_ignores_symlink_pointing_outside_repo() {
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.rs");
+        std::fs::write(&secret, "pub fn leaked_secret_fn() {}\n").unwrap();
+
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n"), ("inner.rs", "fn inner() {}\n")]);
+        std::os::unix::fs::symlink(&secret, tmp.path().join("link.rs")).unwrap();
+        // In-repo symlink keeps working.
+        std::os::unix::fs::symlink("inner.rs", tmp.path().join("inner_link.rs")).unwrap();
+        let git = git2::Repository::open(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        index.add_path(Path::new("link.rs")).unwrap();
+        index.add_path(Path::new("inner_link.rs")).unwrap();
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "add links", &tree, &[&parent])
+            .unwrap();
+
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name='leaked_secret_fn'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH 'leaked_secret_fn'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='link.rs'"),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='inner_link.rs'"),
+            1
+        );
+    }
+
     #[test]
     fn build_index_truncates_large_body_on_char_boundary() {
         // 3-byte chars: 512 KiB is not a multiple of 3, so the cut must back up.
