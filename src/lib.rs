@@ -209,9 +209,18 @@ impl GitRepo {
                 return true;
             }
             if let Ok(s) = std::str::from_utf8(line.content()) {
-                if patch.len() + s.len() > DIFF_MAX_BYTES {
+                // content() omits the +/-/space origin char for body lines; header
+                // ('F'/'H'), binary ('B') and no-newline ('=', '>', '<') lines
+                // already carry their full text.
+                let prefix = match line.origin() {
+                    o @ ('+' | '-' | ' ') => Some(o),
+                    _ => None,
+                };
+                let extra = prefix.map_or(0, char::len_utf8);
+                if patch.len() + extra + s.len() > DIFF_MAX_BYTES {
                     truncated = true;
                 } else {
+                    patch.extend(prefix);
                     patch.push_str(s);
                 }
             }
@@ -785,13 +794,65 @@ mod tests {
     // ---- GitRepo::recent_diff ----
 
     #[test]
-    // Note: DiffFormat::Patch callback content() excludes the +/- origin char.
+    // DiffFormat::Patch callback content() excludes the +/-/space origin char;
+    // recent_diff re-adds it from line.origin().
     fn recent_diff_root_commit_shows_initial_files() {
         let tmp = TempDir::new().unwrap();
         commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
-        assert!(diff.contains("first"), "{diff}");
+        assert!(diff.contains("\n+first\n"), "{diff}");
+    }
+
+    #[test]
+    fn recent_diff_prefixes_added_removed_and_context_lines() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "keep\nold\ntail\n")], &[]);
+        commit_files(tmp.path(), &[("a.txt", "keep\nnew\ntail\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        assert!(diff.contains("\n-old\n"), "{diff}");
+        assert!(diff.contains("\n+new\n"), "{diff}");
+        assert!(diff.contains("\n keep\n"), "{diff}");
+        assert!(diff.contains("\n tail\n"), "{diff}");
+        // File/hunk headers are not double-prefixed.
+        assert!(diff.starts_with("diff --git"), "{diff}");
+        assert!(diff.contains("\n@@ "), "{diff}");
+    }
+
+    #[test]
+    fn recent_diff_keeps_no_newline_marker_unprefixed() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "old")], &[]);
+        commit_files(tmp.path(), &[("a.txt", "new")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        assert!(
+            diff.contains("-old\n\\ No newline at end of file\n"),
+            "{diff}"
+        );
+        assert!(
+            diff.contains("+new\n\\ No newline at end of file\n"),
+            "{diff}"
+        );
+    }
+
+    #[test]
+    fn recent_diff_cap_counts_origin_byte() {
+        // Body lines are 3 bytes ("+x\n"). A first line of 0..=2 extra bytes
+        // shifts where the cap lands relative to the line stride; for one of
+        // the three shifts the patch stops exactly 2 bytes short of the cap,
+        // where a check that ignored the origin byte would accept one more
+        // line and overshoot the cap by 1.
+        for pad in ["", "y", "yy"] {
+            let tmp = TempDir::new().unwrap();
+            let big = format!("{pad}\n{}", "x\n".repeat(300_000));
+            commit_files(tmp.path(), &[("n", big.as_str())], &[]);
+            let repo = GitRepo::new(tmp.path()).unwrap();
+            let diff = repo.recent_diff(1).unwrap();
+            let body = diff.strip_suffix("\n[diff truncated]\n").expect("marker");
+            assert!(body.len() <= 512 * 1024, "pad {pad:?}: {}", body.len());
+        }
     }
 
     #[test]
