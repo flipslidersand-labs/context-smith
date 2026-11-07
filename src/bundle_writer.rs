@@ -24,7 +24,9 @@ pub fn render_task_md(
     explain: bool,
 ) -> String {
     let used: usize = selected.iter().map(|c| c.tokens()).sum();
-    // Collapse newlines/whitespace runs so the task cannot inject Markdown structure.
+    // Collapse newlines/whitespace runs so the task cannot inject block-level
+    // Markdown structure (inline HTML in the task is out of scope). Paths are
+    // escaped separately by `inline_code`.
     let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
 
     let mut task_md = format!(
@@ -37,9 +39,9 @@ pub fn render_task_md(
             String::new()
         };
         task_md.push_str(&format!(
-            "{}. `{}`{} — {} tokens\n",
+            "{}. {}{} — {} tokens\n",
             i + 1,
-            c.path.display(),
+            inline_code(&c.path.to_string_lossy()),
             explain_str,
             c.tokens(),
         ));
@@ -53,6 +55,34 @@ pub fn render_task_md(
     }
 
     task_md
+}
+
+/// Replace line breaks with visible escapes so a path stays on one line.
+fn escape_newlines(p: &str) -> String {
+    p.replace('\r', "\\r").replace('\n', "\\n")
+}
+
+/// Render a path as a single-line Markdown inline code span. The delimiter is
+/// longer than the longest backtick run in the path (CommonMark code spans), and
+/// a space pads content that starts or ends with a backtick.
+fn inline_code(p: &str) -> String {
+    let p = escape_newlines(p);
+    let delim = "`".repeat(longest_backtick_run(&p) + 1);
+    if p.starts_with('`') || p.ends_with('`') {
+        format!("{delim} {p} {delim}")
+    } else {
+        format!("{delim}{p}{delim}")
+    }
+}
+
+/// Render a path for use inside `<!-- ... -->`: one line, and no `>` so neither
+/// `-->` nor `--!>` can end the comment early.
+fn comment_path(p: &str) -> String {
+    escape_newlines(p).replace('>', "&gt;")
+}
+
+fn longest_backtick_run(s: &str) -> usize {
+    s.split(|c| c != '`').map(str::len).max().unwrap_or(0)
 }
 
 /// Compute a collision-free slug for a file's output `.md` filename.
@@ -165,7 +195,7 @@ pub fn write_bundle(
         let fence = safe_fence(&c.content);
         let file_md = format!(
             "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
-            c.path.display(),
+            comment_path(&c.path.to_string_lossy()),
             c.content,
         );
         std::fs::write(
@@ -240,6 +270,58 @@ mod tests {
             md.contains(malicious_content),
             "original content must appear unchanged"
         );
+    }
+
+    const HOSTILE_PATH: &str = "a`b``c\n## injected --> x\r\n<b>.rs";
+
+    #[test]
+    fn task_md_hostile_path_keeps_list_line_intact() {
+        let md = render_task_md("t", 100, &[cand(HOSTILE_PATH, 0.5, "x")], "", false);
+        let list: Vec<&str> = md
+            .lines()
+            .skip_while(|l| *l != "## Selected Files")
+            .collect();
+        // heading, blank, exactly one list line.
+        assert_eq!(list.len(), 3, "path must not add lines; got:\n{md}");
+        assert!(list[2].starts_with("1. ``` ") || list[2].starts_with("1. ```"));
+        assert!(list[2].ends_with(" — 1 tokens"), "got: {}", list[2]);
+        assert!(!md.lines().any(|l| l.starts_with("## injected")));
+    }
+
+    #[test]
+    fn relevant_code_hostile_path_comment_is_single_closed_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        write_bundle("t", 100, &[cand(HOSTILE_PATH, 0.5, "x")], "", &out, false).unwrap();
+        let dir = out.join("relevant-code");
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        let md = std::fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
+        let first = md.lines().next().unwrap();
+        assert!(
+            first.starts_with("<!-- ") && first.ends_with(" -->"),
+            "got: {first}"
+        );
+        let inner = &first[5..first.len() - 4];
+        assert!(!inner.contains("-->"), "comment closed early: {first}");
+        assert!(md.lines().nth(1).unwrap().starts_with("```"), "got:\n{md}");
+        assert!(!md.lines().any(|l| l.starts_with("## injected")));
+    }
+
+    #[test]
+    fn inline_code_picks_longer_delimiter_and_escapes_newlines() {
+        assert_eq!(inline_code("src/a.rs"), "`src/a.rs`");
+        assert_eq!(inline_code("a`b"), "``a`b``");
+        assert_eq!(inline_code("`a"), "`` `a ``");
+        assert_eq!(inline_code("a\nb\rc"), "`a\\nb\\rc`");
+    }
+
+    #[test]
+    fn comment_path_escapes_terminator_and_newlines() {
+        assert_eq!(comment_path("src/a.rs"), "src/a.rs");
+        assert_eq!(comment_path("a-->b"), "a--&gt;b");
+        assert_eq!(comment_path("a--!>b"), "a--!&gt;b");
+        assert_eq!(comment_path("a\nb"), "a\\nb");
     }
 
     #[test]
