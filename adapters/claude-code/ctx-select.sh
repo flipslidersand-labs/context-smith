@@ -36,7 +36,12 @@ fi
 repo=$(git -C "$repo_arg" rev-parse --show-toplevel 2>/dev/null) || die 2 "$repo_arg is not inside a git repository"
 key=$(printf '%s' "$repo" | sha1sum | cut -c1-16)
 cache="$CACHE_ROOT/$key"
+# The cache holds a copy of the repository's text: keep it private to this user (umask also
+# covers index.db and the logs), and refuse a symlink or another user's directory.
+umask 077
 mkdir -p "$cache"
+{ [ ! -L "$cache" ] && [ -O "$cache" ]; } || die 2 "$cache is a symlink or owned by another user; refusing to use it"
+chmod 700 "$cache"
 printf '%s\n' "$repo" > "$cache/repo.txt"
 
 # Incremental: unchanged files are skipped, so repeated calls are cheap.

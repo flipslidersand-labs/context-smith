@@ -47,4 +47,23 @@ printf '#!/bin/sh\necho "contextsmith 0.4.0"\n' > "$tmp/old"; chmod +x "$tmp/old
 CONTEXTSMITH_BIN=$tmp/old "$sel" "$repo" invoice >/dev/null 2>&1; check "old version -> exit 3" "$?" 3
 CONTEXTSMITH_BIN=$tmp/absent "$sel" "$repo" invoice >/dev/null 2>&1; check "missing binary -> exit 2" "$?" 2
 
+# The cache holds a copy of the repository's text, so it must not be readable by other users,
+# whatever the caller's umask is.
+perm() { stat -c %a "$1"; }
+umask 022
+rm -rf "$tmp/cache"
+"$sel" "$repo" invoice tax >/dev/null 2>&1
+cdir=$(dirname "$(ls "$tmp"/cache/*/index.db)")
+check "cache dir is 700 under umask 022" "$(perm "$cdir")" 700
+check "index.db is 600 under umask 022" "$(perm "$cdir/index.db")" 600
+chmod 755 "$cdir"
+"$sel" "$repo" invoice tax >/dev/null 2>&1
+check "an existing 755 cache dir is tightened to 700" "$(perm "$cdir")" 700
+
+# A cache dir that is a symlink (planted by someone else) is refused.
+key_link=$tmp/cache2; mkdir -p "$tmp/target-dir" "$key_link"
+ln -s "$tmp/target-dir" "$key_link/$(basename "$cdir")"
+CTX_SELECT_CACHE=$key_link "$sel" "$repo" invoice tax >/dev/null 2>&1; check "symlinked cache dir -> exit 2" "$?" 2
+check "nothing written through the symlink" "$(ls -A "$tmp/target-dir" | wc -l | tr -d ' ')" "0"
+
 exit $fail
