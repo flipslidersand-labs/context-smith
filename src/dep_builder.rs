@@ -366,12 +366,7 @@ fn resolve_python(
             } else {
                 format!("{}/{}", rel, name)
             };
-            push(lookup_py_module(
-                &sub,
-                base_dir,
-                !module.is_empty(),
-                path_to_id,
-            ));
+            push(lookup_py_module(&sub, base_dir, dot_count == 0, path_to_id));
         }
     } else if let Some(tail) = cleaned.strip_prefix("import ") {
         for part in tail.split(',').map(strip_as) {
@@ -855,6 +850,26 @@ mod tests {
         assert_eq!(resolve_python("import c.d as e", from, &map), vec![8]);
         // 重複は除く
         assert_eq!(resolve_python("import a, a", from, &map), vec![6]);
+    }
+
+    #[test]
+    fn resolve_python_relative_submodule_does_not_fall_back_to_root() {
+        let map = ids(&[
+            ("pkg/main.py", 1),
+            ("pkg/mod.py", 2),
+            ("mod/x.py", 3),
+            ("pkg/__init__.py", 4),
+            ("pkg/helper.py", 5),
+        ]);
+        let from = Path::new("pkg/main.py");
+        // 相対 import ではルート直下の mod/x.py に解決されない
+        assert_eq!(resolve_python("from .mod import x", from, &map), vec![2]);
+        // 絶対 import は従来どおりルートから解決される
+        assert_eq!(
+            resolve_python("from pkg import helper", from, &map),
+            vec![4, 5]
+        );
+        assert_eq!(resolve_python("from mod import x", from, &map), vec![3]);
     }
 
     #[test]
