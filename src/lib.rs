@@ -829,14 +829,20 @@ mod tests {
 
     #[test]
     fn recent_diff_cap_counts_origin_byte() {
-        let tmp = TempDir::new().unwrap();
-        // 1-byte lines: each body line is 2 bytes ("x\n") + 1 origin byte.
-        let big = "x\n".repeat(300_000);
-        commit_files(tmp.path(), &[("big.txt", big.as_str())], &[]);
-        let repo = GitRepo::new(tmp.path()).unwrap();
-        let diff = repo.recent_diff(1).unwrap();
-        assert!(diff.ends_with("[diff truncated]\n"));
-        assert!(diff.len() <= 512 * 1024 + "\n[diff truncated]\n".len());
+        // Body lines are 3 bytes ("+x\n"). A first line of 0..=2 extra bytes
+        // shifts where the cap lands relative to the line stride; for one of
+        // the three shifts the patch stops exactly 2 bytes short of the cap,
+        // where a check that ignored the origin byte would accept one more
+        // line and overshoot the cap by 1.
+        for pad in ["", "y", "yy"] {
+            let tmp = TempDir::new().unwrap();
+            let big = format!("{pad}\n{}", "x\n".repeat(300_000));
+            commit_files(tmp.path(), &[("n", big.as_str())], &[]);
+            let repo = GitRepo::new(tmp.path()).unwrap();
+            let diff = repo.recent_diff(1).unwrap();
+            let body = diff.strip_suffix("\n[diff truncated]\n").expect("marker");
+            assert!(body.len() <= 512 * 1024, "pad {pad:?}: {}", body.len());
+        }
     }
 
     #[test]
