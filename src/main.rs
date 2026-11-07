@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Clap value_parser: reject empty strings early with a clear error message.
 fn non_empty_string(s: &str) -> Result<String, String> {
@@ -197,7 +197,7 @@ fn select_candidates(
             };
             let score = scored[&file_id] * path_score_factor(&rel_path);
             let abs = repo.root().join(&rel_path);
-            let content = match std::fs::read_to_string(&abs) {
+            let content = match repo.read_tracked(Path::new(&rel_path)) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs);

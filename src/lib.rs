@@ -79,6 +79,36 @@ pub struct Symbol {
 
 pub struct GitRepo {
     root: PathBuf,
+    /// Canonicalized `root`, computed once; used to validate file reads.
+    canonical_root: PathBuf,
+}
+
+/// Read `path` as UTF-8 text only if its fully resolved target lies inside
+/// `canonical_root` and not under `<root>/.git` (#202). Anything else yields
+/// `PermissionDenied`. Symlinks, `..` and symlinked directories are all
+/// resolved by canonicalize immediately before the read.
+pub fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<String> {
+    let bytes = read_bytes_within_root(canonical_root, path)?;
+    String::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
+    let real = path.canonicalize()?;
+    let denied = match real.strip_prefix(canonical_root) {
+        Err(_) => true,
+        Ok(rest) => rest
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == ".git"),
+    };
+    if denied {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "path resolves outside the repository (or into .git)",
+        ));
+    }
+    std::fs::read(real)
 }
 
 impl GitRepo {
@@ -104,7 +134,19 @@ impl GitRepo {
                 )
             })?
             .to_path_buf();
-        Ok(GitRepo { root })
+        let canonical_root = root
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize repo root {:?}", root))?;
+        Ok(GitRepo {
+            root,
+            canonical_root,
+        })
+    }
+
+    /// Validated read of a tracked file (relative to the repo root). Refuses
+    /// targets outside the repo or under `.git`, regardless of file mode.
+    pub fn read_tracked(&self, rel: &Path) -> std::io::Result<String> {
+        read_within_root(&self.canonical_root, &self.root.join(rel))
     }
 
     pub fn root(&self) -> &Path {
@@ -168,16 +210,6 @@ impl GitRepo {
         Ok(patch)
     }
 
-    /// True if `rel` is a symlink whose resolved target is outside the repo
-    /// root, or cannot be resolved (dangling).
-    fn symlink_escapes_root(&self, rel: &Path) -> bool {
-        let abs = self.root.join(rel);
-        match (abs.canonicalize(), self.root.canonicalize()) {
-            (Ok(target), Ok(root)) => !target.starts_with(root),
-            _ => true,
-        }
-    }
-
     /// Walk all tracked files in HEAD, returning (relative_path, Language, blob_sha, size).
     ///
     /// The sha and size describe the working-tree content (git blob hash), so
@@ -197,11 +229,6 @@ impl GitRepo {
                 } else {
                     PathBuf::from(root).join(name)
                 };
-                // Never follow a tracked symlink out of the repository (#202).
-                if entry.filemode() == 0o120000 && self.symlink_escapes_root(&rel) {
-                    eprintln!("warn: skip symlink pointing outside repo: {:?}", rel);
-                    return git2::TreeWalkResult::Ok;
-                }
                 let lang = Language::from_path(&rel);
                 let mut sha = entry.id().to_string();
                 let mut size = entry
@@ -210,11 +237,19 @@ impl GitRepo {
                     .map(|b| b.size() as i64)
                     .unwrap_or(0);
                 if lang != Language::Unknown {
-                    if let Ok(bytes) = std::fs::read(self.root.join(&rel)) {
-                        if let Ok(oid) = git2::Oid::hash_object(git2::ObjectType::Blob, &bytes) {
-                            sha = oid.to_string();
-                            size = bytes.len() as i64;
+                    match read_bytes_within_root(&self.canonical_root, &self.root.join(&rel)) {
+                        Ok(bytes) => {
+                            if let Ok(oid) = git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
+                            {
+                                sha = oid.to_string();
+                                size = bytes.len() as i64;
+                            }
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                            eprintln!("warn: skip {:?}: {e}", rel);
+                            return git2::TreeWalkResult::Ok;
+                        }
+                        Err(_) => {}
                     }
                 }
                 results.push((rel, lang, sha, size));
