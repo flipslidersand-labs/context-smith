@@ -848,6 +848,18 @@ mod tests {
         let db = mem_db();
         build_index(&repo, &db, false).unwrap();
         commit_files(tmp.path(), &[], &["b.rs"]);
+        let tables = [
+            "files",
+            "symbols",
+            "fts_path",
+            "fts_symbols",
+            "fts_body",
+            "deps",
+        ];
+        let before: Vec<i64> = tables
+            .iter()
+            .map(|t| count(&db, &format!("SELECT COUNT(*) FROM {t}")))
+            .collect();
         db.connection()
             .execute_batch(
                 "CREATE TRIGGER fail_files_delete BEFORE DELETE ON files
@@ -857,6 +869,11 @@ mod tests {
         assert!(build_index(&repo, &db, false).is_err());
         assert!(db.connection().is_autocommit());
         // Nothing from the failed run was kept, and the connection is reusable.
+        let after: Vec<i64> = tables
+            .iter()
+            .map(|t| count(&db, &format!("SELECT COUNT(*) FROM {t}")))
+            .collect();
+        assert_eq!(before, after, "row counts must be unchanged: {tables:?}");
         assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 2);
         db.connection()
             .execute_batch("DROP TRIGGER fail_files_delete")
