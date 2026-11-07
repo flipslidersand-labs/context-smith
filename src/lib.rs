@@ -182,6 +182,12 @@ impl GitRepo {
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head_commit = repo.head()?.peel_to_commit()?;
 
+        // 0 means "no diff". Without this, a root-only history would fall into the
+        // empty-tree branch below and return the whole initial commit.
+        if n_commits == 0 {
+            return Ok(String::new());
+        }
+
         let mut ancestor = head_commit.clone();
         for _ in 0..n_commits {
             if ancestor.parent_count() == 0 {
@@ -885,6 +891,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
         commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert_eq!(repo.recent_diff(0).unwrap(), "");
+    }
+
+    #[test]
+    fn recent_diff_zero_commits_is_empty_for_root_only_history() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert_eq!(repo.recent_diff(0).unwrap(), "");
     }
