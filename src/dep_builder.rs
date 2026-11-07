@@ -98,7 +98,7 @@ fn resolve_import(
     }
 }
 
-/// Resolve an ES `import ... from './x'` or CommonJS `require('./x')` to a file id.
+/// Resolve an ES `import ... from './x'`, a re-export `export ... from './x'`, or CommonJS `require('./x')` to a file id.
 /// Only relative specifiers (`./` or `../`) are resolved; bare package imports are ignored.
 ///
 /// # Security (#87)
