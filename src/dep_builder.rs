@@ -72,7 +72,7 @@ pub fn build_deps(conn: &Connection, file_paths: &HashMap<i64, PathBuf>) -> Resu
     })();
 
     match result {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(Into::into),
+        Ok(()) => crate::commit_or_rollback(conn).map_err(Into::into),
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(e)
@@ -716,6 +716,33 @@ mod tests {
             vec![1]
         );
         assert!(resolve_import("x", Path::new("README.md"), &map, &go).is_empty());
+    }
+
+    /// #231: a failing COMMIT (deferred FK violation) must not leave the
+    /// transaction open on the connection.
+    #[test]
+    fn build_deps_rolls_back_when_commit_fails() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE files (id INTEGER PRIMARY KEY);
+             CREATE TABLE symbols (file_id INTEGER, name TEXT, kind TEXT);
+             CREATE TABLE deps (from_file INTEGER, to_file INTEGER
+                                  REFERENCES files(id) DEFERRABLE INITIALLY DEFERRED,
+                                PRIMARY KEY (from_file, to_file));
+             INSERT INTO symbols VALUES (1, 'crate::b', 'import');",
+        )
+        .unwrap();
+        let paths: HashMap<i64, PathBuf> = [
+            (1, PathBuf::from("src/a.rs")),
+            (2, PathBuf::from("src/b.rs")),
+        ]
+        .into();
+        assert!(build_deps(&conn, &paths).is_err());
+        assert!(
+            conn.is_autocommit(),
+            "transaction left open after failed COMMIT"
+        );
     }
 
     #[test]

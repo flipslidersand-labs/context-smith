@@ -173,7 +173,7 @@ pub fn populate_embeddings(
 
         match result {
             Ok(()) => {
-                conn.execute_batch("COMMIT")?;
+                crate::commit_or_rollback(conn)?;
                 written += ids.len();
             }
             Err(e) => {
