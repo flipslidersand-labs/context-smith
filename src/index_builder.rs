@@ -412,9 +412,7 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
         Ok(())
     })();
     match pass1_result {
-        Ok(()) => db
-            .connection()
-            .execute_batch("COMMIT")
+        Ok(()) => crate::commit_or_rollback(db.connection())
             .context("Failed to commit cleanup+Pass-1 transaction")?,
         Err(e) => {
             // Roll back both the stale-file deletions and any Pass-1 writes so

@@ -170,7 +170,7 @@ pub fn populate_fts_with_paths(
     })();
 
     match result {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(Into::into),
+        Ok(()) => crate::commit_or_rollback(conn).map_err(Into::into),
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(e)
