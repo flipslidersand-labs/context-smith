@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -114,11 +114,14 @@ pub fn write_bundle(
             );
         }
         // Remove stale *.md from a previous run (regular files only, no recursion).
-        for entry in std::fs::read_dir(&rc_dir)? {
-            let entry = entry?;
+        let clean_err = |p: &Path| format!("failed to clean {}", p.display());
+        for entry in std::fs::read_dir(&rc_dir).with_context(|| clean_err(&rc_dir))? {
+            let entry = entry.with_context(|| clean_err(&rc_dir))?;
             let path = entry.path();
-            if entry.file_type()?.is_file() && path.extension().is_some_and(|e| e == "md") {
-                std::fs::remove_file(&path)?;
+            let ft = entry.file_type().with_context(|| clean_err(&path))?;
+            // Symlinked .md: remove_file deletes the link itself, never the target.
+            if (ft.is_file() || ft.is_symlink()) && path.extension().is_some_and(|e| e == "md") {
+                std::fs::remove_file(&path).with_context(|| clean_err(&path))?;
             }
         }
     }
@@ -276,6 +279,28 @@ mod tests {
             out.join("other.md").exists(),
             "outside relevant-code must remain"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_removes_symlink_md_without_touching_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let external = tmp.path().join("external.txt");
+        std::fs::write(&external, "precious").unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        std::fs::create_dir_all(&rc).unwrap();
+        std::os::unix::fs::symlink(&external, rc.join("src_a_rs.md")).unwrap();
+
+        write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "new")], "", &out, false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&external).unwrap(), "precious");
+        let md = rc.join("src_a_rs.md");
+        assert!(!std::fs::symlink_metadata(&md)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(&md).unwrap().contains("new"));
     }
 
     #[cfg(unix)]
