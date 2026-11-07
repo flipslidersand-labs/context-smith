@@ -83,10 +83,29 @@ pub struct GitRepo {
     canonical_root: PathBuf,
 }
 
+/// Marker payload of the `io::Error` returned when a read is refused because
+/// the resolved target is outside the repo or inside a `.git` directory.
+#[derive(Debug)]
+pub struct PathEscape;
+
+impl std::fmt::Display for PathEscape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("path resolves outside the repository (or into .git)")
+    }
+}
+
+impl std::error::Error for PathEscape {}
+
+/// True if `e` is a [`PathEscape`] refusal (as opposed to a genuine I/O error
+/// such as EACCES).
+pub fn is_path_escape(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<PathEscape>())
+}
+
 /// Read `path` as UTF-8 text only if its fully resolved target lies inside
-/// `canonical_root` and not under `<root>/.git` (#202). Anything else yields
-/// `PermissionDenied`. Symlinks, `..` and symlinked directories are all
-/// resolved by canonicalize immediately before the read.
+/// `canonical_root` and has no `.git` path component at any depth (#202).
+/// Refusals carry a [`PathEscape`] payload. Symlinks, `..` and symlinked
+/// directories are all resolved by canonicalize immediately before the read.
 pub fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<String> {
     let bytes = read_bytes_within_root(canonical_root, path)?;
     String::from_utf8(bytes)
@@ -97,16 +116,10 @@ pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Re
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
         Err(_) => true,
-        Ok(rest) => rest
-            .components()
-            .next()
-            .is_some_and(|c| c.as_os_str() == ".git"),
+        Ok(rest) => rest.components().any(|c| c.as_os_str() == ".git"),
     };
     if denied {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "path resolves outside the repository (or into .git)",
-        ));
+        return Err(std::io::Error::other(PathEscape));
     }
     std::fs::read(real)
 }
@@ -245,7 +258,7 @@ impl GitRepo {
                                 size = bytes.len() as i64;
                             }
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        Err(e) if is_path_escape(&e) => {
                             eprintln!("warn: skip {:?}: {e}", rel);
                             return git2::TreeWalkResult::Ok;
                         }
