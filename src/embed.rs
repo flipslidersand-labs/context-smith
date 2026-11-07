@@ -47,8 +47,12 @@ pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Cosine similarity in [-1, 1]; returns 0.0 if either vector is zero-length.
+/// Cosine similarity in [-1, 1]; returns 0.0 if either vector is zero-length
+/// or if the lengths differ (a dimension mismatch is never silently truncated).
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -143,6 +147,13 @@ pub fn populate_embeddings(
 
         // Embed this batch.
         let vecs = embedder.embed(&texts, EmbedMode::Index)?;
+        if vecs.len() != texts.len() {
+            anyhow::bail!(
+                "embedder returned {} vectors for {} texts",
+                vecs.len(),
+                texts.len()
+            );
+        }
 
         // Persist each vector with its content_sha in a single transaction.
         conn.execute_batch("BEGIN")?;
@@ -260,6 +271,20 @@ pub fn fuse_seeds(
         .into_iter()
         .next()
         .unwrap_or_default();
+    // An empty query vector, or one whose dimension differs from the stored
+    // vectors (e.g. the model changed), would yield meaningless scores; fall
+    // back to BM25 only.
+    let stored_dim: Option<i64> = conn
+        .query_row(
+            "SELECT length(vector) / 4 FROM embeddings LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if query_vec.is_empty() || stored_dim != Some(query_vec.len() as i64) {
+        eprintln!("warn: query embedding empty or dimension mismatch; using BM25 seeds only");
+        return Ok(bm25.to_vec());
+    }
     // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
     // files that sit just outside `top_n` in the vector list still participate
     // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
@@ -476,6 +501,72 @@ mod tests {
         let bm25 = vec![(7i64, 1.0f32)];
         let out = fuse_seeds(&conn, &MockEmbedder, "task", &bm25, 10).unwrap();
         assert_eq!(out, bm25, "no embeddings → BM25 seeds unchanged");
+    }
+
+    #[test]
+    fn cosine_length_mismatch_is_zero() {
+        assert_eq!(cosine(&[1.0, 0.0], &[1.0, 0.0, 0.0]), 0.0);
+        assert_eq!(cosine(&[], &[1.0]), 0.0);
+    }
+
+    /// Embedder returning a fixed vector (possibly empty) for every text.
+    struct FixedEmbedder(Vec<f32>);
+    impl Embedder for FixedEmbedder {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| self.0.clone()).collect())
+        }
+    }
+
+    /// Embedder that returns one vector too few.
+    struct ShortEmbedder;
+    impl Embedder for ShortEmbedder {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().skip(1).map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    fn conn_with_two_dim_vectors() -> Connection {
+        let conn = mem_db();
+        conn.execute(
+            "INSERT INTO embeddings (file_id, vector) VALUES (1, ?1), (2, ?2)",
+            rusqlite::params![vec_to_blob(&[1.0, 0.0]), vec_to_blob(&[0.0, 1.0])],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn fuse_seeds_falls_back_to_bm25_on_empty_query_vector() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let out = fuse_seeds(&conn, &FixedEmbedder(vec![]), "task", &bm25, 10).unwrap();
+        assert_eq!(out, bm25);
+    }
+
+    #[test]
+    fn fuse_seeds_falls_back_to_bm25_on_dim_mismatch() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let out = fuse_seeds(
+            &conn,
+            &FixedEmbedder(vec![1.0, 0.0, 0.0]),
+            "task",
+            &bm25,
+            10,
+        )
+        .unwrap();
+        assert_eq!(out, bm25);
+    }
+
+    #[test]
+    fn populate_embeddings_errors_on_count_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
+        let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
+        let r = populate_embeddings(db.connection(), dir.path(), &ShortEmbedder, &db);
+        assert!(r.is_err(), "count mismatch must be an error");
+        assert!(!has_embeddings(db.connection()).unwrap());
     }
 
     /// Build an in-memory [`crate::index_builder::IndexDb`] and populate it
