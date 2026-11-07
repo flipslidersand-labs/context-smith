@@ -1026,6 +1026,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn build_index_keeps_unreadable_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n")]);
+        let p = tmp.path().join("ok.rs");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            return; // running as root: chmod does not restrict reads
+        }
+        let files = repo.scan().unwrap();
+        assert!(files.iter().any(|(rel, ..)| rel == Path::new("ok.rs")));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_nested_dot_git() {
+        let (tmp, repo) = repo_with(&[("ok.rs", "fn ok() {}\n")]);
+        let nested = tmp.path().join("sub/.git");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("config"), "token\n").unwrap();
+        let e = repo.read_tracked(Path::new("sub/.git/config")).unwrap_err();
+        assert!(crate::is_path_escape(&e));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn read_tracked_still_reads_in_repo_symlink() {
         let (tmp, repo) = repo_with(&[("inner.rs", "fn inner_ok() {}\n")]);
         std::os::unix::fs::symlink("inner.rs", tmp.path().join("l.rs")).unwrap();
