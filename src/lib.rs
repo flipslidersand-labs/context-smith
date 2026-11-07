@@ -438,6 +438,12 @@ fn collect_ecma_node(
         "import_statement" => {
             out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
         }
+        // Re-exports (`export ... from './x'`) are dependencies; plain `export { a }` is not.
+        "export_statement" => {
+            if node.child_by_field_name("source").is_some() {
+                out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+            }
+        }
         // CommonJS `require('./x')` — recorded as an import for dependency resolution.
         "call_expression" => {
             if let Some(func) = node.child_by_field_name("function") {
@@ -833,6 +839,27 @@ mod tests {
         let funcs = names(&out, SymbolKind::Function);
         assert!(funcs.contains(&"h") && funcs.contains(&"gen"), "{funcs:?}");
         assert!(!funcs.contains(&"plain"));
+    }
+
+    #[test]
+    fn extract_ecma_export_from_is_import() {
+        let src = "export * from './a';\nexport { b } from './b';\nexport * as ns from './c';\nexport { d };\nexport const e = 1;\n";
+        for (path, lang) in [
+            ("a.ts", Language::TypeScript),
+            ("a.js", Language::JavaScript),
+        ] {
+            let out = SymbolExtractor::extract(Path::new(path), src, lang).unwrap();
+            let imports = names(&out, SymbolKind::Import);
+            assert_eq!(
+                imports,
+                vec![
+                    "export * from './a';",
+                    "export { b } from './b';",
+                    "export * as ns from './c';"
+                ],
+                "{path}"
+            );
+        }
     }
 
     #[test]
