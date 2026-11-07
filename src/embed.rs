@@ -879,4 +879,285 @@ mod tests {
         assert_eq!(remote_requests_for_status(503), MAX_ATTEMPTS as usize);
         assert_eq!(remote_requests_for_status(429), MAX_ATTEMPTS as usize);
     }
+
+    /// Serve a 200 response with `body` for every request; returns (url, counter).
+    #[cfg(feature = "remote-embed")]
+    fn body_server(body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = s.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_lowercase();
+                    if let Some(h) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                c.fetch_add(1, Ordering::SeqCst);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        (url, count)
+    }
+
+    #[cfg(feature = "remote-embed")]
+    fn remote_for(url: String) -> RemoteEmbedder {
+        RemoteEmbedder {
+            url,
+            api_key: None,
+            collection: "t".into(),
+            timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_returns_vectors_on_valid_response() {
+        let (url, count) = body_server(r#"{"vectors": [[1.0, 0.5]]}"#);
+        let out = remote_for(url)
+            .embed(&["x".to_string()], EmbedMode::Index)
+            .unwrap();
+        assert_eq!(out, vec![vec![1.0f32, 0.5]]);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_errors_after_retries_on_invalid_json() {
+        let (url, count) = body_server("not json at all");
+        let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("decode failed"), "got: {msg}");
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_ATTEMPTS as usize
+        );
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_errors_when_vector_count_differs_from_texts() {
+        let (url, count) = body_server(r#"{"vectors": []}"#);
+        let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
+        assert!(r.is_err(), "count mismatch must be an error");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Serializes tests that mutate process-wide `EMBEDDING_*` env vars.
+    #[cfg(feature = "remote-embed")]
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "remote-embed")]
+    const EMBED_ENV: [&str; 5] = [
+        "EMBEDDING_SVC_URL",
+        "EMBEDDING_API_KEY",
+        "EMBEDDING_COLLECTION",
+        "EMBEDDING_TIMEOUT_SECS",
+        "EMBEDDING_ALLOW_INSECURE",
+    ];
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_returns_none_when_url_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        assert!(RemoteEmbedder::from_env().is_none());
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_applies_defaults_and_trims_trailing_slash() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("EMBEDDING_SVC_URL", "http://127.0.0.1:9092/");
+        let e = RemoteEmbedder::from_env().expect("url set");
+        std::env::remove_var("EMBEDDING_SVC_URL");
+        assert_eq!(e.url, "http://127.0.0.1:9092");
+        assert_eq!(e.collection, "context-smith");
+        assert!(e.api_key.is_none());
+        assert_eq!(
+            e.timeout,
+            std::time::Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS)
+        );
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_invalid_timeout_falls_back_to_default() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("EMBEDDING_SVC_URL", "http://127.0.0.1:9092");
+        std::env::set_var("EMBEDDING_TIMEOUT_SECS", "abc");
+        let e = RemoteEmbedder::from_env().expect("url set");
+        std::env::remove_var("EMBEDDING_SVC_URL");
+        std::env::remove_var("EMBEDDING_TIMEOUT_SECS");
+        assert_eq!(
+            e.timeout,
+            std::time::Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS)
+        );
+    }
+
+    // ---- rrf_fuse boundaries ----
+
+    #[test]
+    fn rrf_fuse_no_rankings_returns_empty() {
+        assert!(rrf_fuse(&[], 60.0, 10).is_empty());
+    }
+
+    #[test]
+    fn rrf_fuse_empty_lists_return_empty() {
+        let empty: Vec<(i64, f32)> = vec![];
+        assert!(rrf_fuse(&[&empty, &empty], 60.0, 10).is_empty());
+    }
+
+    #[test]
+    fn rrf_fuse_top_n_zero_returns_empty() {
+        let a = vec![(1i64, 1.0f32), (2, 0.5)];
+        assert!(rrf_fuse(&[&a], 60.0, 0).is_empty());
+    }
+
+    #[test]
+    fn rrf_fuse_k_zero_scores_by_reciprocal_rank() {
+        let a = vec![(1i64, 0.0f32), (2, 0.0)];
+        let out = rrf_fuse(&[&a], 0.0, 10);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, 1);
+        assert!((out[0].1 - 1.0).abs() < 1e-6, "1/(0+1) = 1");
+        assert!((out[1].1 - 0.5).abs() < 1e-6, "1/(0+2) = 0.5");
+    }
+
+    // ---- search_vectors boundaries ----
+
+    #[test]
+    fn search_vectors_empty_db_returns_empty() {
+        let conn = mem_db();
+        assert!(search_vectors(&conn, &[1.0, 0.0], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_vectors_top_n_zero_returns_empty() {
+        let conn = conn_with_two_dim_vectors();
+        assert!(search_vectors(&conn, &[1.0, 0.0], 0).unwrap().is_empty());
+    }
+
+    // ---- fuse_seeds with embeddings / embedder failure ----
+
+    /// Embedder that always fails (service down).
+    struct FailingEmbedder;
+    impl Embedder for FailingEmbedder {
+        fn embed(&self, _texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            anyhow::bail!("embedding service unavailable")
+        }
+    }
+
+    #[test]
+    fn fuse_seeds_returns_err_when_embedder_fails_and_embeddings_exist() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let r = fuse_seeds(&conn, &FailingEmbedder, "task", &bm25, 10);
+        assert!(r.is_err(), "caller relies on Err to fall back to BM25");
+    }
+
+    #[test]
+    fn fuse_seeds_does_not_call_embedder_when_no_embeddings() {
+        let conn = mem_db();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let out = fuse_seeds(&conn, &FailingEmbedder, "task", &bm25, 10).unwrap();
+        assert_eq!(out, bm25);
+    }
+
+    #[test]
+    fn fuse_seeds_fuses_vector_hits_with_bm25_via_rrf() {
+        let conn = conn_with_two_dim_vectors();
+        // File 2 is ranked first by BM25 and 2nd by vectors; file 1 is first by vectors.
+        let bm25 = vec![(2i64, 1.0f32), (7, 0.5)];
+        let out = fuse_seeds(&conn, &FixedEmbedder(vec![1.0, 0.0]), "t", &bm25, 10).unwrap();
+        let ids: Vec<i64> = out.iter().map(|(id, _)| *id).collect();
+        // 2: 1/61 + 1/62, 1: 1/61, 7: 1/62.
+        assert_eq!(ids, vec![2, 1, 7]);
+    }
+
+    #[test]
+    fn fuse_seeds_truncates_fused_result_to_top_n() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(2i64, 1.0f32), (7, 0.5)];
+        let out = fuse_seeds(&conn, &FixedEmbedder(vec![1.0, 0.0]), "t", &bm25, 1).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 2);
+    }
+
+    // ---- populate_embeddings failures ----
+
+    #[test]
+    fn populate_embeddings_propagates_embedder_error_and_stores_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        let db = index_db_with_files(&[("a.rs", "sha-a")]);
+        let r = populate_embeddings(db.connection(), dir.path(), &FailingEmbedder, &db);
+        assert!(r.is_err());
+        assert!(!has_embeddings(db.connection()).unwrap());
+    }
+
+    /// Embedder that succeeds for the first batch and fails afterwards.
+    struct FailOnSecondCall(std::sync::atomic::AtomicUsize);
+    impl Embedder for FailOnSecondCall {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 {
+                anyhow::bail!("embedding service unavailable");
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[test]
+    fn populate_embeddings_second_batch_failure_returns_err_keeps_first_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..EMBED_BATCH + 1).map(|i| format!("f{i}.rs")).collect();
+        for n in &names {
+            std::fs::write(dir.path().join(n), "fn f() {}").unwrap();
+        }
+        let rows: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "sha")).collect();
+        let db = index_db_with_files(&rows);
+        let embedder = FailOnSecondCall(std::sync::atomic::AtomicUsize::new(0));
+        let r = populate_embeddings(db.connection(), dir.path(), &embedder, &db);
+        assert!(r.is_err(), "later batch failure must surface");
+        let stored: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, EMBED_BATCH as i64, "first batch stays committed");
+        // A retry only needs to embed the remaining file.
+        let n = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        assert_eq!(n, 1);
+    }
 }
