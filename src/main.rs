@@ -125,10 +125,15 @@ fn build_seeds(
     {
         if !no_embed {
             if let Some(embedder) = context_smith::embed::RemoteEmbedder::from_env() {
-                match context_smith::embed::fuse_seeds(conn, &embedder, task, &bm25, 20) {
-                    Ok(fused) => {
-                        eprintln!("semantic: RRF-fused BM25 with embedding seeds");
-                        return Ok(fused);
+                match context_smith::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, 20)
+                {
+                    Ok((seeds, fused)) => {
+                        if fused {
+                            eprintln!("semantic: RRF-fused BM25 with embedding seeds");
+                        } else {
+                            eprintln!("semantic: no usable embeddings; using BM25 seeds only");
+                        }
+                        return Ok(seeds);
                     }
                     Err(e) => {
                         eprintln!("semantic: embedding failed ({e}); falling back to BM25")
