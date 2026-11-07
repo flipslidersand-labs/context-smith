@@ -111,6 +111,7 @@ pub fn write_bundle(
 
     // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
+    let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for c in selected {
         let base_slug: String = c
             .path
@@ -124,9 +125,17 @@ pub fn write_bundle(
                 }
             })
             .collect();
+        // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
+        // so generated `_N` slugs never collide with another base slug and
+        // case-insensitive filesystems don't merge files either.
         let count = slug_counts.entry(base_slug.clone()).or_insert(0);
-        let slug = make_slug(&base_slug, *count);
-        *count += 1;
+        let slug = loop {
+            let candidate = make_slug(&base_slug, *count);
+            *count += 1;
+            if used_slugs.insert(candidate.to_uppercase()) {
+                break candidate;
+            }
+        };
 
         let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
         let fence = safe_fence(&c.content);
@@ -282,6 +291,75 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(entries.len(), 3, "exactly three slug files: {entries:?}");
+    }
+
+    fn count_files_and_contents(rc: &Path) -> (usize, Vec<String>) {
+        let mut contents: Vec<String> = std::fs::read_dir(rc)
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        contents.sort();
+        (contents.len(), contents)
+    }
+
+    #[test]
+    fn write_bundle_slug_generated_suffix_does_not_overwrite_other_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        // 2nd candidate gets `a_b_rs_0`; 3rd has that exact base slug.
+        let selected = vec![
+            cand("a/b.rs", 0.9, "one"),
+            cand("a/b.rs", 0.8, "two"),
+            cand("a_b_rs_0", 0.7, "three"),
+        ];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+        let (n, contents) = count_files_and_contents(&out.join("relevant-code"));
+        assert_eq!(n, selected.len(), "no file may be overwritten");
+        for word in ["one", "two", "three"] {
+            assert!(contents.iter().any(|c| c.contains(word)), "{word} lost");
+        }
+    }
+
+    #[test]
+    fn write_bundle_slug_case_insensitive_collision_keeps_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let selected = vec![cand("Foo.rs", 0.9, "upper"), cand("foo.rs", 0.8, "lower")];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+        let (n, contents) = count_files_and_contents(&out.join("relevant-code"));
+        assert_eq!(n, 2);
+        assert!(contents.iter().any(|c| c.contains("upper")));
+        assert!(contents.iter().any(|c| c.contains("lower")));
+    }
+
+    #[test]
+    fn write_bundle_slug_reverse_order_keeps_all_three() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let selected = vec![
+            cand("a_b_rs_0", 0.9, "three"),
+            cand("a/b.rs", 0.8, "one"),
+            cand("a/b.rs", 0.7, "two"),
+        ];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+        let (n, contents) = count_files_and_contents(&out.join("relevant-code"));
+        assert_eq!(n, 3, "no file may be overwritten");
+        for word in ["one", "two", "three"] {
+            assert!(contents.iter().any(|c| c.contains(word)), "{word} lost");
+        }
+    }
+
+    #[test]
+    fn write_bundle_slug_final_sigma_names_are_case_insensitively_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let selected = vec![cand("ΑΣ.rs", 0.9, "x"), cand("ασ.rs", 0.8, "y")];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+        let names: std::collections::HashSet<String> = std::fs::read_dir(out.join("relevant-code"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap().to_uppercase())
+            .collect();
+        assert_eq!(names.len(), 2, "names must differ ignoring case: {names:?}");
     }
 
     #[test]

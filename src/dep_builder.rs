@@ -98,7 +98,7 @@ fn resolve_import(
     }
 }
 
-/// Resolve an ES `import ... from './x'` or CommonJS `require('./x')` to a file id.
+/// Resolve an ES `import ... from './x'`, a re-export `export ... from './x'`, or CommonJS `require('./x')` to a file id.
 /// Only relative specifiers (`./` or `../`) are resolved; bare package imports are ignored.
 ///
 /// # Security (#87)
@@ -217,18 +217,25 @@ fn split_brace_aware(s: &str) -> impl Iterator<Item = &str> {
 fn resolve_rust(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64> {
     let mut ids = Vec::new();
     for expanded in expand_rust_use(import_str) {
-        let rel = match expanded.strip_prefix("crate::") {
-            Some(tail) => tail.replace("::", "/"),
-            None => continue,
+        let Some(tail) = expanded.strip_prefix("crate::") else {
+            continue;
         };
-        for candidate in [
-            PathBuf::from(format!("src/{}.rs", rel)),
-            PathBuf::from(format!("src/{}/mod.rs", rel)),
-        ] {
-            if let Some(&id) = path_to_id.get(&candidate) {
-                ids.push(id);
-                break;
+        // 最長一致: 末尾が型・関数名の場合に備え、1セグメントずつ削って再試行する
+        let mut segs: Vec<&str> = tail.split("::").collect();
+        'search: while !segs.is_empty() {
+            let rel = segs.join("/");
+            for candidate in [
+                PathBuf::from(format!("src/{}.rs", rel)),
+                PathBuf::from(format!("src/{}/mod.rs", rel)),
+            ] {
+                if let Some(&id) = path_to_id.get(&candidate) {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                    break 'search;
+                }
             }
+            segs.pop();
         }
     }
     ids
@@ -600,6 +607,19 @@ mod tests {
         let map = ids(&[("src/a.rs", 1), ("src/b/mod.rs", 2)]);
         assert_eq!(resolve_rust("crate::{a, b}", &map), vec![1, 2]);
         assert!(resolve_rust("std::fmt", &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_drops_trailing_item_segments() {
+        let map = ids(&[("src/budget.rs", 1), ("src/a/mod.rs", 2), ("src/a/b.rs", 3)]);
+        assert_eq!(resolve_rust("crate::budget::Candidate", &map), vec![1]);
+        assert_eq!(resolve_rust("crate::a::Item::method", &map), vec![2]);
+        // 最長一致: a::b があれば a より優先する
+        assert_eq!(resolve_rust("crate::a::b::Thing", &map), vec![3]);
+        // 同じ親に解決される複数 item は重複しない
+        assert_eq!(resolve_rust("crate::a::{x, y}", &map), vec![2]);
+        assert!(resolve_rust("std::fmt", &map).is_empty());
+        assert!(resolve_rust("crate::missing::Item", &map).is_empty());
     }
 
     #[test]
