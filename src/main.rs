@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,7 @@ use context_smith::index_builder::{build_index, IndexDb};
 use context_smith::path_kind::path_score_factor;
 use context_smith::search_index::search_bm25;
 use context_smith::GitRepo;
+use rusqlite::OptionalExtension;
 
 #[derive(Parser)]
 #[command(
@@ -192,8 +194,15 @@ fn select_candidates(
                     .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
                 // Only "no row" (unscored/unknown-lang file) is expected; any
                 // other DB error must propagate rather than drop candidates.
-                use rusqlite::OptionalExtension;
-                match stmt.query_row([file_id], |row| row.get(0)).optional()? {
+                match stmt
+                    .query_row([file_id], |row| row.get(0))
+                    .optional()
+                    .with_context(|| {
+                        format!(
+                            "failed to read files row id={file_id} from index \
+                             (rebuild with `contextsmith index --force`)"
+                        )
+                    })? {
                     Some(p) => p,
                     None => continue,
                 }
