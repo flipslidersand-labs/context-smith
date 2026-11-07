@@ -125,14 +125,14 @@ pub fn write_bundle(
                 }
             })
             .collect();
-        // Advance the per-base counter until the (lowercased) slug is unused,
+        // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
         // so generated `_N` slugs never collide with another base slug and
         // case-insensitive filesystems don't merge files either.
         let count = slug_counts.entry(base_slug.clone()).or_insert(0);
         let slug = loop {
             let candidate = make_slug(&base_slug, *count);
             *count += 1;
-            if used_slugs.insert(candidate.to_lowercase()) {
+            if used_slugs.insert(candidate.to_uppercase()) {
                 break candidate;
             }
         };
@@ -330,6 +330,36 @@ mod tests {
         assert_eq!(n, 2);
         assert!(contents.iter().any(|c| c.contains("upper")));
         assert!(contents.iter().any(|c| c.contains("lower")));
+    }
+
+    #[test]
+    fn write_bundle_slug_reverse_order_keeps_all_three() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let selected = vec![
+            cand("a_b_rs_0", 0.9, "three"),
+            cand("a/b.rs", 0.8, "one"),
+            cand("a/b.rs", 0.7, "two"),
+        ];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+        let (n, contents) = count_files_and_contents(&out.join("relevant-code"));
+        assert_eq!(n, 3, "no file may be overwritten");
+        for word in ["one", "two", "three"] {
+            assert!(contents.iter().any(|c| c.contains(word)), "{word} lost");
+        }
+    }
+
+    #[test]
+    fn write_bundle_slug_final_sigma_names_are_case_insensitively_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let selected = vec![cand("ΑΣ.rs", 0.9, "x"), cand("ασ.rs", 0.8, "y")];
+        write_bundle("task", 10000, &selected, "", &out, false).unwrap();
+        let names: std::collections::HashSet<String> = std::fs::read_dir(out.join("relevant-code"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap().to_uppercase())
+            .collect();
+        assert_eq!(names.len(), 2, "names must differ ignoring case: {names:?}");
     }
 
     #[test]
