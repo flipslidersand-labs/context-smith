@@ -63,7 +63,7 @@ enum Command {
         task: String,
         #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
         budget: usize,
-        #[arg(long, default_value = "context.bundle")]
+        #[arg(long, default_value = "context.bundle", value_parser = non_empty_string)]
         out: String,
         /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
         #[arg(long)]
