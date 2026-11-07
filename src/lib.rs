@@ -406,14 +406,15 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
             }
         }
         "use_declaration" => {
-            out.push((
-                node_text(node, src)
-                    .trim_end_matches(';')
-                    .trim_start_matches("use ")
-                    .to_owned(),
-                SymbolKind::Import,
-                line,
-            ));
+            // Take the `argument` field so visibility modifiers (`pub`,
+            // `pub(crate)`, `pub(in path)`) are excluded. A missing/empty argument
+            // (syntax-error recovery such as `pub use ;`) is not recorded.
+            if let Some(arg) = node.child_by_field_name("argument") {
+                let text = node_text(arg, src).trim();
+                if !text.is_empty() {
+                    out.push((text.to_owned(), SymbolKind::Import, line));
+                }
+            }
         }
         _ => {}
     }
@@ -614,6 +615,15 @@ fn collect_ruby_node(
             collect_ruby_node(child, src, out);
         }
     }
+}
+
+/// COMMIT the open transaction; if COMMIT fails, ROLLBACK so the connection is
+/// not left inside a transaction (#231). The original COMMIT error is returned;
+/// a failing ROLLBACK is ignored.
+pub(crate) fn commit_or_rollback(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("COMMIT").inspect_err(|_| {
+        let _ = conn.execute_batch("ROLLBACK");
+    })
 }
 
 /// Shared helpers for unit tests that need a real git repository.
@@ -918,6 +928,41 @@ mod tests {
         // `use ` prefix and trailing `;` are trimmed; line numbers are 1-based.
         assert_eq!(out[0], ("std::fmt".to_string(), SymbolKind::Import, 1));
         assert!(out.contains(&("run".to_string(), SymbolKind::Function, 7)));
+    }
+
+    #[test]
+    fn extract_rust_pub_use_reexports() {
+        let src = "pub use crate::foo::Bar;\npub(crate) use crate::a::B;\npub(super) use super::c::D;\npub(in crate::x) use crate::x::E;\nuse std::fmt;\n";
+        let out = SymbolExtractor::extract(Path::new("lib.rs"), src, Language::Rust).unwrap();
+        assert_eq!(
+            names(&out, SymbolKind::Import),
+            vec![
+                "crate::foo::Bar",
+                "crate::a::B",
+                "super::c::D",
+                "crate::x::E",
+                "std::fmt"
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_rust_use_without_argument_is_not_imported() {
+        for src in ["pub use ;\n", "use ;\n", "pub(crate) use ;\nfn f() {}\n"] {
+            let out = SymbolExtractor::extract(Path::new("a.rs"), src, Language::Rust).unwrap();
+            assert!(
+                names(&out, SymbolKind::Import).is_empty(),
+                "empty import saved for {src:?}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_rust_use_lookalikes_not_imports() {
+        let src =
+            "fn reuse() {}\n// use crate::commented::X;\nconst S: &str = \"use crate::s::Y;\";\n";
+        let out = SymbolExtractor::extract(Path::new("a.rs"), src, Language::Rust).unwrap();
+        assert!(names(&out, SymbolKind::Import).is_empty());
     }
 
     #[test]
