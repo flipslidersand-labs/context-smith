@@ -412,9 +412,7 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
         Ok(())
     })();
     match pass1_result {
-        Ok(()) => db
-            .connection()
-            .execute_batch("COMMIT")
+        Ok(()) => crate::commit_or_rollback(db.connection())
             .context("Failed to commit cleanup+Pass-1 transaction")?,
         Err(e) => {
             // Roll back both the stale-file deletions and any Pass-1 writes so
@@ -840,6 +838,25 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
+    }
+
+    /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
+    /// not leave the transaction open.
+    #[test]
+    fn build_index_rolls_back_when_commit_fails() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
+        let db = mem_db();
+        db.connection()
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
+                 CREATE TABLE fk_child (r INTEGER REFERENCES fk_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER defer_fk AFTER INSERT ON files
+                 BEGIN INSERT INTO fk_child VALUES (999); END;",
+            )
+            .unwrap();
+        assert!(build_index(&repo, &db, false).is_err());
+        assert!(db.connection().is_autocommit());
     }
 
     #[test]
