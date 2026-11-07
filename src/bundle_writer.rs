@@ -449,6 +449,34 @@ mod tests {
     }
 
     #[test]
+    fn base_slug_keeps_exactly_200_bytes_and_cuts_201() {
+        assert_eq!(base_slug(&"a".repeat(200)), "a".repeat(200));
+        assert_eq!(base_slug(&"a".repeat(201)), "a".repeat(200));
+        // Non-alphanumerics become `_` (1 byte) and count toward the limit.
+        assert_eq!(base_slug(&"/".repeat(201)), "_".repeat(200));
+    }
+
+    #[test]
+    fn base_slug_multibyte_char_straddling_limit_is_dropped_whole() {
+        for ch in ['é', '日', '𝐀'] {
+            let w = ch.len_utf8();
+            assert!(ch.is_alphanumeric(), "{ch} must be kept as-is");
+            // Place the char so it starts before byte 200 and ends after it.
+            for pad in (200 - w + 1)..200 {
+                let input = format!("{}{ch}{ch}", "a".repeat(pad));
+                let slug = base_slug(&input);
+                assert_eq!(slug, "a".repeat(pad), "ch={ch} pad={pad}");
+                assert!(slug.len() <= 200);
+            }
+            // Char ending exactly at byte 200 is kept.
+            let input = format!("{}{ch}{ch}", "a".repeat(200 - w));
+            let slug = base_slug(&input);
+            assert_eq!(slug.len(), 200, "ch={ch}");
+            assert!(slug.ends_with(ch));
+        }
+    }
+
+    #[test]
     fn make_slug_no_collision_returns_base() {
         assert_eq!(make_slug("src_lib_rs", 0), "src_lib_rs");
     }
