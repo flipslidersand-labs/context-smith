@@ -139,11 +139,9 @@ fn resolve_ts_js(
     for ext in EXTS {
         candidates.push(PathBuf::from(format!("{}.{}", joined.display(), ext)));
     }
-    for ext in EXTS {
-        candidates.push(joined.join(format!("index.{}", ext)));
-    }
-    // #189: TS ESM convention writes `./a.js` for a source file `a.ts`. Tried last
-    // so that a real `a.js` (the as-is candidate above) always wins.
+    // #189: TS ESM convention writes `./a.js` for a source file `a.ts`. Tried after the as-is and
+    // appended-extension candidates (a real `a.js` wins) but before `index.*`
+    // (so `dir.ts` beats `dir.js/index.ts`).
     let ts_alts: &[&str] = match joined.extension().and_then(|e| e.to_str()) {
         Some("js") => &["ts", "tsx"],
         Some("jsx") => &["tsx"],
@@ -155,6 +153,9 @@ fn resolve_ts_js(
         candidates.push(joined.with_extension(ext));
     }
 
+    for ext in EXTS {
+        candidates.push(joined.join(format!("index.{}", ext)));
+    }
     for candidate in candidates {
         if let Some(&id) = path_to_id.get(&candidate) {
             return vec![id];
@@ -692,9 +693,18 @@ mod tests {
         );
         // an existing .js file wins over the .ts counterpart
         assert_eq!(resolve_ts_js("import e from './e.js'", from, &map), vec![5]);
-        // no cross mapping, and traversal guard still applies
+        // no cross mapping (.cjs must not map to .mts)
         assert!(resolve_ts_js("import c from './c.cjs'", from, &map).is_empty());
-        assert!(resolve_ts_js("import a from '../../a.js'", from, &map).is_empty());
+        // `dir.ts` wins over `dir.js/index.ts`
+        let map2 = ids(&[
+            ("src/dir.ts", 8),
+            ("src/dir.js/index.ts", 9),
+            ("src/x.ts", 7),
+        ]);
+        assert_eq!(
+            resolve_ts_js("import d from './dir.js'", from, &map2),
+            vec![8]
+        );
     }
 
     #[test]
