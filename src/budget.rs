@@ -132,7 +132,8 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
     }
 
     if let (true, Some(c)) = (selected.is_empty(), best_overflow) {
-        let original_tokens = c.tokens().max(1);
+        // best_overflow only holds non-empty candidates, so tokens() >= 1 here.
+        let original_tokens = c.tokens();
         let cut = truncate_to_tokens(&c.content, budget);
         if estimate_tokens(&cut) > 0 {
             selected.push(Candidate {

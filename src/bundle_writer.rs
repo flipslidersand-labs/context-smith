@@ -14,9 +14,6 @@ pub struct Citation {
     pub truncated: bool,
 }
 
-/// Render the `task.md` document (task description, selected file list, and the
-/// recent diff) as a String. Shared by [`write_bundle`] and the `query` command
-/// so both produce identical Markdown.
 /// `[truncated: first N of M tokens]` note for a budget-cut file, or `None` if whole.
 pub fn truncation_note(c: &Candidate) -> Option<String> {
     c.truncated.then(|| {
@@ -28,6 +25,9 @@ pub fn truncation_note(c: &Candidate) -> Option<String> {
     })
 }
 
+/// Render the `task.md` document (task description, selected file list, and the
+/// recent diff) as a String. Shared by [`write_bundle`] and the `query` command
+/// so both produce identical Markdown.
 pub fn render_task_md(
     task: &str,
     budget: usize,
