@@ -600,6 +600,30 @@ mod tests {
         assert!(bytes <= 512 * 1024 && bytes > 512 * 1024 - 3, "{bytes}");
     }
 
+    /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
+    /// not leave the transaction open.
+    #[test]
+    fn populate_rolls_back_when_commit_fails() {
+        let f = fixture();
+        f.db.connection()
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
+                 CREATE TABLE fk_child (r INTEGER REFERENCES fk_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                 DROP TABLE fts_path;
+                 CREATE TABLE fts_path_store (file_id INTEGER, path TEXT);
+                 CREATE VIEW fts_path AS SELECT file_id, path FROM fts_path_store;
+                 CREATE TRIGGER fts_path_del INSTEAD OF DELETE ON fts_path
+                 BEGIN SELECT 1; END;
+                 CREATE TRIGGER fts_path_ins INSTEAD OF INSERT ON fts_path
+                 BEGIN INSERT INTO fk_child VALUES (999); END;",
+            )
+            .unwrap();
+        let res = populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs);
+        assert!(res.is_err(), "COMMIT failure must surface as an error");
+        assert!(f.db.connection().is_autocommit());
+    }
+
     #[test]
     fn populate_error_rolls_back_transaction() {
         let f = fixture();
