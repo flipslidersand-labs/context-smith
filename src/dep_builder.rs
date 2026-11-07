@@ -164,14 +164,71 @@ fn resolve_ts_js(
     vec![]
 }
 
-/// Pull the quoted module path out of an import/require statement.
+/// Pull the quoted module path out of an import/export/require statement.
 /// `import { a } from "./b"` → `./b`,  `require('./c')` → `./c`
+///
+/// Comments and string literals are tokenized first (#220), so a quote inside a
+/// comment (`export /* 'cm' */ * from './x'`, `// don't`) or a string-literal
+/// export name (`export { "n" as m } from './x'`) is not mistaken for the
+/// specifier. The specifier is the string right after the last `from` keyword;
+/// without one (`import './x'`, `require('./x')`) it is the first string.
 fn extract_module_specifier(s: &str) -> Option<String> {
-    let start = s.find(['"', '\'', '`'])?;
-    let quote = s.as_bytes()[start] as char;
-    let rest = &s[start + 1..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_string())
+    enum Tok {
+        Word(String),
+        Str(String),
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut toks: Vec<Tok> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i += 2;
+        } else if matches!(c, '"' | '\'' | '`') {
+            let mut j = i + 1;
+            let mut lit = String::new();
+            while j < chars.len() && chars[j] != c {
+                if chars[j] == '\\' && j + 1 < chars.len() {
+                    j += 1;
+                }
+                lit.push(chars[j]);
+                j += 1;
+            }
+            if j >= chars.len() {
+                return None; // unterminated string
+            }
+            toks.push(Tok::Str(lit));
+            i = j + 1;
+        } else if c.is_alphanumeric() || c == '_' || c == '$' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+            {
+                i += 1;
+            }
+            toks.push(Tok::Word(chars[start..i].iter().collect()));
+        } else {
+            i += 1;
+        }
+    }
+    let after_from = toks.windows(2).rev().find_map(|w| match w {
+        [Tok::Word(f), Tok::Str(spec)] if f == "from" => Some(spec.clone()),
+        _ => None,
+    });
+    after_from.or_else(|| {
+        toks.iter().find_map(|t| match t {
+            Tok::Str(spec) => Some(spec.clone()),
+            _ => None,
+        })
+    })
 }
 
 /// Collapse `.` and `..` segments in a path lexically (no filesystem access),
@@ -593,6 +650,47 @@ mod tests {
         );
         assert_eq!(extract_module_specifier("no quotes"), None);
         assert_eq!(extract_module_specifier("\"unterminated"), None);
+    }
+
+    #[test]
+    fn module_specifier_skips_comments_and_string_names() {
+        let want =
+            |s: &str, e: &str| assert_eq!(extract_module_specifier(s), Some(e.into()), "{s}");
+        // #220 forms
+        want("export /* 'cm' */ * from './cmt'", "./cmt");
+        want("export {\n  a, // don't\n  b,\n} from './multi'", "./multi");
+        want(
+            "export { \"str-name\" as sn } from './strname'",
+            "./strname",
+        );
+        want("export { \"from\" as f } from './x'", "./x");
+        want("export { from as f } from './x'", "./x");
+        // import counterparts
+        want("import /* 'cm' */ a from './cmt'", "./cmt");
+        want("import {\n  a, // don't\n} from \"./imp\"", "./imp");
+        want(
+            "import { \"str-name\" as sn } from './strname'",
+            "./strname",
+        );
+        // unchanged forms
+        want("import './x'", "./x");
+        want("import /* from 'no' */ './side'", "./side");
+        want("import a from \"x\"", "x");
+        want("export * from 'y'", "y");
+        want("export * as ns from 'y'", "y");
+    }
+
+    #[test]
+    fn resolve_ts_js_uses_specifier_after_from() {
+        let ids: HashMap<PathBuf, i64> = [(PathBuf::from("src/cmt.ts"), 7)].into();
+        let from = Path::new("src/a.ts");
+        for stmt in [
+            "export /* 'cm' */ * from './cmt'",
+            "export {\n // don't\n a } from './cmt'",
+            "import { \"s\" as t } from './cmt'",
+        ] {
+            assert_eq!(resolve_ts_js(stmt, from, &ids), vec![7], "{stmt}");
+        }
     }
 
     #[test]
