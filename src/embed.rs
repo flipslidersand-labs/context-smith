@@ -281,9 +281,9 @@ pub fn fuse_seeds(
 ///   - `EMBEDDING_TIMEOUT_SECS` (optional, read timeout in seconds; default 30)
 ///
 /// Requests use a 5-second connect timeout and a configurable read timeout
-/// (default 30 s). Transient errors (connection reset, 5xx, 429) are retried up to
-/// 3 times with exponential back-off (1 s, 2 s, 4 s). Other 4xx responses
-/// (e.g. 401/403/404) are not retried.
+/// (default 30 s). Transient errors (connection reset, 5xx, 408/425/429) are
+/// retried; each chunk is attempted at most 3 times (2 retries, waiting 1 s then
+/// 2 s). Other 4xx responses (e.g. 401/403/404) are not retried.
 #[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     url: String,
@@ -364,9 +364,9 @@ impl Embedder for RemoteEmbedder {
                         }
                     },
                     Err(e) => {
-                        // Non-retryable client errors (4xx except 429): fail fast.
+                        // Non-retryable client errors (4xx except 408/425/429): fail fast.
                         if let ureq::Error::Status(code, _) = &e {
-                            if *code < 500 && *code != 429 {
+                            if *code < 500 && !matches!(*code, 408 | 425 | 429) {
                                 return Err(anyhow::anyhow!("embedding request failed: {e}"));
                             }
                         }
@@ -583,6 +583,12 @@ mod tests {
     #[test]
     fn remote_embedder_does_not_retry_401() {
         assert_eq!(remote_requests_for_status(401), 1);
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_retries_408() {
+        assert_eq!(remote_requests_for_status(408), MAX_ATTEMPTS as usize);
     }
 
     #[cfg(feature = "remote-embed")]
