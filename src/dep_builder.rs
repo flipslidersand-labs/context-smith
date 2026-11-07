@@ -316,45 +316,99 @@ fn resolve_python(
     from_path: &Path,
     path_to_id: &HashMap<PathBuf, i64>,
 ) -> Vec<i64> {
-    let raw_module = if let Some(tail) = import_str.strip_prefix("from ") {
-        tail.split_whitespace().next().unwrap_or("")
-    } else if let Some(tail) = import_str.strip_prefix("import ") {
-        tail.split_whitespace().next().unwrap_or("")
-    } else {
-        return vec![];
+    // 文全体(複数行・括弧・バックスラッシュ継続・コメント)を1行の空白区切りに正規化する
+    let cleaned: String = import_str
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(['(', ')', '\\'], " ");
+    let cleaned = cleaned.trim();
+    let base = from_path.parent().unwrap_or(Path::new(""));
+    let mut ids: Vec<i64> = Vec::new();
+    let mut push = |id: Option<i64>| {
+        if let Some(id) = id {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
     };
+    // `X as Y` の X だけを取り出す
+    let strip_as = |s: &str| s.split_whitespace().next().unwrap_or("").to_string();
 
-    // Count leading dots for relative imports: `.foo` = 1 dot (current pkg), `..foo` = 2 dots (parent)
-    let dot_count = raw_module.chars().take_while(|&c| c == '.').count();
-    let module = raw_module.trim_start_matches('.');
-
-    // Compute base directory: each dot beyond the first goes up one level
-    let mut base_dir = from_path.parent().unwrap_or(Path::new(""));
-    for _ in 1..dot_count {
-        base_dir = base_dir.parent().unwrap_or(Path::new(""));
-    }
-
-    if module.is_empty() {
-        // e.g. `from .. import something` — resolve to the package itself
-        let candidate = base_dir.join("__init__.py");
-        return path_to_id
-            .get(&candidate)
-            .map(|&id| vec![id])
-            .unwrap_or_default();
-    }
-
-    let rel = module.replace('.', "/");
-    for candidate in [
-        base_dir.join(format!("{}.py", rel)),
-        base_dir.join(format!("{}/__init__.py", rel)),
-        PathBuf::from(format!("{}.py", rel)),
-        PathBuf::from(format!("{}/__init__.py", rel)),
-    ] {
-        if let Some(&id) = path_to_id.get(&candidate) {
-            return vec![id];
+    if let Some(tail) = cleaned.strip_prefix("from ") {
+        let tail = tail.trim_start();
+        let (raw_module, names) = match tail.split_once(char::is_whitespace) {
+            Some((m, rest)) => (m, rest.trim_start().strip_prefix("import").unwrap_or("")),
+            None => (tail, ""),
+        };
+        let dot_count = raw_module.chars().take_while(|&c| c == '.').count();
+        let module = raw_module.trim_start_matches('.');
+        // 各ドットは(最初の1つを除き)1階層上がる
+        let mut base_dir = base;
+        for _ in 1..dot_count {
+            base_dir = base_dir.parent().unwrap_or(Path::new(""));
+        }
+        let rel = module.replace('.', "/");
+        if module.is_empty() {
+            // `from .. import z` — パッケージ自身
+            push(path_to_id.get(&base_dir.join("__init__.py")).copied());
+        } else {
+            push(lookup_py_module(&rel, base_dir, true, path_to_id));
+        }
+        // `from X import a, b` — X/a.py, X/a/__init__.py などサブモジュール候補
+        for name in names.split(',').map(strip_as) {
+            if name.is_empty() || name == "*" || name.contains('.') {
+                continue;
+            }
+            let sub = if module.is_empty() {
+                name
+            } else {
+                format!("{}/{}", rel, name)
+            };
+            push(lookup_py_module(&sub, base_dir, dot_count == 0, path_to_id));
+        }
+    } else if let Some(tail) = cleaned.strip_prefix("import ") {
+        for part in tail.split(',').map(strip_as) {
+            let dot_count = part.chars().take_while(|&c| c == '.').count();
+            let module = part.trim_start_matches('.');
+            if module.is_empty() {
+                continue;
+            }
+            let mut base_dir = base;
+            for _ in 1..dot_count {
+                base_dir = base_dir.parent().unwrap_or(Path::new(""));
+            }
+            push(lookup_py_module(
+                &module.replace('.', "/"),
+                base_dir,
+                true,
+                path_to_id,
+            ));
         }
     }
-    vec![]
+    ids
+}
+
+/// `rel`(スラッシュ区切り)に対応する .py / __init__.py を探す。`allow_root` で
+/// リポジトリルート相対のフォールバックも試す。
+fn lookup_py_module(
+    rel: &str,
+    base_dir: &Path,
+    allow_root: bool,
+    path_to_id: &HashMap<PathBuf, i64>,
+) -> Option<i64> {
+    let mut candidates = vec![
+        base_dir.join(format!("{}.py", rel)),
+        base_dir.join(format!("{}/__init__.py", rel)),
+    ];
+    if allow_root {
+        candidates.push(PathBuf::from(format!("{}.py", rel)));
+        candidates.push(PathBuf::from(format!("{}/__init__.py", rel)));
+    }
+    candidates
+        .into_iter()
+        .find_map(|c| path_to_id.get(&c).copied())
 }
 
 /// Resolve a Go import path to file IDs using a pre-built directory index.
@@ -746,9 +800,77 @@ mod tests {
         assert_eq!(resolve_python("from ..util import y", from, &map), vec![2]);
         assert_eq!(resolve_python("from .. import z", from, &map), vec![3]);
         assert_eq!(resolve_python("import top", from, &map), vec![4]);
+        // 同ディレクトリに z.py が無ければ空(下の resolve_python_submodules で解決を確認)
         assert!(resolve_python("from . import z", from, &map).is_empty());
         assert!(resolve_python("garbage", from, &map).is_empty());
         assert!(resolve_python("import nope", from, &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_python_submodules_and_comma_lists() {
+        let map = ids(&[
+            ("pkg/__init__.py", 1),
+            ("pkg/helper.py", 2),
+            ("pkg/other/__init__.py", 3),
+            ("pkg/main.py", 4),
+            ("pkg/z.py", 5),
+            ("a.py", 6),
+            ("b.py", 7),
+            ("c/d.py", 8),
+        ]);
+        let from = Path::new("pkg/main.py");
+        // サブモジュール import: X 自体(__init__) と X/name.py の両方
+        assert_eq!(
+            resolve_python("from pkg import helper", from, &map),
+            vec![1, 2]
+        );
+        assert_eq!(
+            resolve_python("from pkg import helper, other", from, &map),
+            vec![1, 2, 3]
+        );
+        // 括弧・複数行・as・コメント
+        assert_eq!(
+            resolve_python(
+                "from pkg import (\n    helper as h,  # c\n    other,\n)",
+                from,
+                &map
+            ),
+            vec![1, 2, 3]
+        );
+        // `*` は名前として扱わない
+        assert_eq!(resolve_python("from pkg import *", from, &map), vec![1]);
+        // 相対: パッケージ自身(__init__)と同ディレクトリの z.py
+        assert_eq!(resolve_python("from . import z", from, &map), vec![1, 5]);
+        // カンマ区切り import と as
+        assert_eq!(resolve_python("import a, b", from, &map), vec![6, 7]);
+        assert_eq!(
+            resolve_python("import a as x, b as y", from, &map),
+            vec![6, 7]
+        );
+        assert_eq!(resolve_python("import c.d as e", from, &map), vec![8]);
+        // 重複は除く
+        assert_eq!(resolve_python("import a, a", from, &map), vec![6]);
+    }
+
+    #[test]
+    fn resolve_python_relative_submodule_does_not_fall_back_to_root() {
+        let map = ids(&[
+            ("pkg/main.py", 1),
+            ("pkg/mod.py", 2),
+            ("mod/x.py", 3),
+            ("pkg/__init__.py", 4),
+            ("pkg/helper.py", 5),
+            ("lib/y.py", 6),
+        ]);
+        let from = Path::new("pkg/main.py");
+        // 相対 import ではルート直下の mod/x.py に解決されない
+        assert_eq!(resolve_python("from .mod import x", from, &map), vec![2]);
+        // 絶対 import は従来どおりルートから解決される
+        assert_eq!(
+            resolve_python("from pkg import helper", from, &map),
+            vec![4, 5]
+        );
+        assert_eq!(resolve_python("from lib import y", from, &map), vec![6]);
     }
 
     #[test]
