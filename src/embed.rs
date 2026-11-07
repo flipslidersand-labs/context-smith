@@ -67,7 +67,8 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Each list is ordered best-first; an item's fused score is the sum of
 /// `1 / (k + rank)` (rank is 1-based) across the lists it appears in. `k=60` is
-/// the standard constant. Returns the top `top_n` file ids by fused score.
+/// the standard constant. Returns the top `top_n` file ids by fused score; equal
+/// scores are ordered by ascending file id so the result is deterministic.
 pub fn rrf_fuse(rankings: &[&[(i64, f32)]], k: f64, top_n: usize) -> Vec<(i64, f32)> {
     use std::collections::HashMap;
     let mut acc: HashMap<i64, f64> = HashMap::new();
@@ -76,10 +77,17 @@ pub fn rrf_fuse(rankings: &[&[(i64, f32)]], k: f64, top_n: usize) -> Vec<(i64, f
             *acc.entry(*fid).or_insert(0.0) += 1.0 / (k + (rank as f64) + 1.0);
         }
     }
-    let mut fused: Vec<(i64, f32)> = acc.into_iter().map(|(id, s)| (id, s as f32)).collect();
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort on the f64 sums with the file id as tie-break: HashMap iteration order is
+    // random per run, so without it equal scores (common in RRF) would reorder and
+    // the `top_n` cut would change between runs.
+    let mut fused: Vec<(i64, f64)> = acc.into_iter().collect();
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     fused.truncate(top_n);
-    fused
+    fused.into_iter().map(|(id, s)| (id, s as f32)).collect()
 }
 
 /// True if the `embeddings` table has at least one stored vector.
@@ -512,6 +520,29 @@ mod tests {
         assert!((cosine(&[1.0, 2.0], &[1.0, 2.0]) - 1.0).abs() < 1e-6);
         assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
         assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn rrf_ties_break_by_file_id_deterministically() {
+        // Two opposite orderings make items i and 11-i tie exactly. Ties must come out
+        // by ascending file id every time, not in HashMap iteration order.
+        let fwd: Vec<(i64, f32)> = (1..=10).map(|i| (i, 0.0)).collect();
+        let rev: Vec<(i64, f32)> = (1..=10).rev().map(|i| (i, 0.0)).collect();
+        let expect: Vec<i64> = vec![1, 10, 2, 9, 3, 8, 4, 7, 5, 6];
+        for _ in 0..50 {
+            let fused = rrf_fuse(&[&fwd, &rev], 60.0, 10);
+            let ids: Vec<i64> = fused.iter().map(|(id, _)| *id).collect();
+            assert_eq!(ids, expect);
+        }
+        // The cut at top_n must not depend on iteration order either: of the tied
+        // pair (2, 9) at the boundary, the lower id is kept.
+        for _ in 0..50 {
+            let ids: Vec<i64> = rrf_fuse(&[&fwd, &rev], 60.0, 3)
+                .iter()
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(ids, vec![1, 10, 2]);
+        }
     }
 
     #[test]
