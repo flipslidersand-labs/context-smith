@@ -58,8 +58,11 @@ pub fn render_task_md(
 }
 
 /// Replace line breaks with visible escapes so a path stays on one line.
+/// Backslashes are doubled first so a literal `\n` in a name stays distinguishable.
 fn escape_newlines(p: &str) -> String {
-    p.replace('\r', "\\r").replace('\n', "\\n")
+    p.replace('\\', "\\\\")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
 }
 
 /// Render a path as a single-line Markdown inline code span. The delimiter is
@@ -78,7 +81,9 @@ fn inline_code(p: &str) -> String {
 /// Render a path for use inside `<!-- ... -->`: one line, and no `>` so neither
 /// `-->` nor `--!>` can end the comment early.
 fn comment_path(p: &str) -> String {
-    escape_newlines(p).replace('>', "&gt;")
+    escape_newlines(p)
+        .replace('&', "&amp;")
+        .replace('>', "&gt;")
 }
 
 fn longest_backtick_run(s: &str) -> usize {
@@ -283,8 +288,10 @@ mod tests {
             .collect();
         // heading, blank, exactly one list line.
         assert_eq!(list.len(), 3, "path must not add lines; got:\n{md}");
-        assert!(list[2].starts_with("1. ``` ") || list[2].starts_with("1. ```"));
-        assert!(list[2].ends_with(" — 1 tokens"), "got: {}", list[2]);
+        assert_eq!(
+            list[2],
+            "1. ```a`b``c\\n## injected --> x\\r\\n<b>.rs``` — 1 tokens"
+        );
         assert!(!md.lines().any(|l| l.starts_with("## injected")));
     }
 
@@ -314,6 +321,9 @@ mod tests {
         assert_eq!(inline_code("a`b"), "``a`b``");
         assert_eq!(inline_code("`a"), "`` `a ``");
         assert_eq!(inline_code("a\nb\rc"), "`a\\nb\\rc`");
+        // A literal backslash-n in the name must differ from a real newline.
+        assert_eq!(inline_code("a\\nb"), "`a\\\\nb`");
+        assert_ne!(inline_code("a\\nb"), inline_code("a\nb"));
     }
 
     #[test]
@@ -322,6 +332,10 @@ mod tests {
         assert_eq!(comment_path("a-->b"), "a--&gt;b");
         assert_eq!(comment_path("a--!>b"), "a--!&gt;b");
         assert_eq!(comment_path("a\nb"), "a\\nb");
+        // A literal `&gt;` in the name must differ from an escaped `>`.
+        assert_eq!(comment_path("a&gt;b"), "a&amp;gt;b");
+        assert_ne!(comment_path("a&gt;b"), comment_path("a>b"));
+        assert_ne!(comment_path("a\\nb"), comment_path("a\nb"));
     }
 
     #[test]
