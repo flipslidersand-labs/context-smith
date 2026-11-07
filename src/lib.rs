@@ -168,6 +168,16 @@ impl GitRepo {
         Ok(patch)
     }
 
+    /// True if `rel` is a symlink whose resolved target is outside the repo
+    /// root, or cannot be resolved (dangling).
+    fn symlink_escapes_root(&self, rel: &Path) -> bool {
+        let abs = self.root.join(rel);
+        match (abs.canonicalize(), self.root.canonicalize()) {
+            (Ok(target), Ok(root)) => !target.starts_with(root),
+            _ => true,
+        }
+    }
+
     /// Walk all tracked files in HEAD, returning (relative_path, Language, blob_sha, size).
     ///
     /// The sha and size describe the working-tree content (git blob hash), so
@@ -187,6 +197,11 @@ impl GitRepo {
                 } else {
                     PathBuf::from(root).join(name)
                 };
+                // Never follow a tracked symlink out of the repository (#202).
+                if entry.filemode() == 0o120000 && self.symlink_escapes_root(&rel) {
+                    eprintln!("warn: skip symlink pointing outside repo: {:?}", rel);
+                    return git2::TreeWalkResult::Ok;
+                }
                 let lang = Language::from_path(&rel);
                 let mut sha = entry.id().to_string();
                 let mut size = entry
