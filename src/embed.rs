@@ -324,6 +324,8 @@ pub fn fuse_seeds_with_status(
 ///   - `EMBEDDING_COLLECTION`  (optional, default `context-smith`; must be a
 ///     collection registered on the service)
 ///   - `EMBEDDING_TIMEOUT_SECS` (optional, read timeout in seconds; default 30)
+///   - `EMBEDDING_ALLOW_INSECURE` (optional, `1` silences the warning printed for
+///     plain `http://` to a non-loopback host; prefer `https://`)
 ///
 /// Requests use a 5-second connect timeout and a configurable read timeout
 /// (default 30 s). Transient errors (connection reset, 5xx, 408/425/429) are
@@ -348,11 +350,49 @@ const DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
 #[cfg(feature = "remote-embed")]
 const MAX_ATTEMPTS: u32 = 3;
 
+/// True when `url` is plain `http://` to a host that is not loopback, i.e. the
+/// `X-API-Key` and the embedded source text would cross the network unencrypted.
+#[cfg(feature = "remote-embed")]
+fn is_insecure_remote(url: &str) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let url = url.trim();
+    let Some(rest) = url
+        .get(..7)
+        .filter(|s| s.eq_ignore_ascii_case("http://"))
+        .map(|_| &url[7..])
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or("");
+    let host = match hostport.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => hostport.split(':').next().unwrap_or(""),
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<Ipv4Addr>().is_ok_and(|a| a.is_loopback())
+        || host.parse::<Ipv6Addr>().is_ok_and(|a| a.is_loopback());
+    !loopback
+}
+
 #[cfg(feature = "remote-embed")]
 impl RemoteEmbedder {
     /// Construct from env; returns `None` if `EMBEDDING_SVC_URL` is unset.
+    ///
+    /// Plain `http://` to a non-loopback host prints a warning to stderr, since the
+    /// API key and file contents would travel unencrypted. Prefer `https://`; set
+    /// `EMBEDDING_ALLOW_INSECURE=1` to silence the warning for a trusted network.
     pub fn from_env() -> Option<Self> {
         let url = std::env::var("EMBEDDING_SVC_URL").ok()?;
+        if is_insecure_remote(&url)
+            && std::env::var("EMBEDDING_ALLOW_INSECURE").as_deref() != Ok("1")
+        {
+            eprintln!(
+                "warning: EMBEDDING_SVC_URL uses plain http:// to a non-loopback host; \
+                 the API key and file contents are sent unencrypted. Use https:// or set \
+                 EMBEDDING_ALLOW_INSECURE=1 to silence this warning."
+            );
+        }
         let timeout_secs = std::env::var("EMBEDDING_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -684,6 +724,33 @@ mod tests {
             .unwrap();
         let n3 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n3, 1, "only the changed file should be re-embedded");
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn is_insecure_remote_flags_plain_http_to_non_loopback_only() {
+        // Plain http to a non-loopback host sends the API key and source in clear text.
+        for u in [
+            "http://embedding-svc.local:9092",
+            "http://10.0.0.5:9092/",
+            "HTTP://example.com",
+            "http://localhost.evil.example:80",
+            "http://127.evil.example",
+        ] {
+            assert!(is_insecure_remote(u), "{u} should be flagged");
+        }
+        // https and loopback http are fine.
+        for u in [
+            "https://embedding-svc.example.com",
+            "HTTPS://example.com:443",
+            "http://localhost:9092",
+            "http://127.0.0.1:9092",
+            "http://127.1.2.3",
+            "http://[::1]:9092",
+            "http://user:pw@localhost:9092/x",
+        ] {
+            assert!(!is_insecure_remote(u), "{u} should not be flagged");
+        }
     }
 
     /// Serve `status` for every request on a local port; returns (url, counter).
