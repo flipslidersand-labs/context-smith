@@ -247,6 +247,31 @@ fn js_require_parent_resolves_edge() {
     );
 }
 
+/// #190: `export ... from` re-exports in barrel files resolve to edges; bare packages do not.
+#[test]
+fn ecma_export_from_barrel_resolves_edges() {
+    let barrel = "export * from './a';\nexport { b } from './b';\nexport * as ns from './c';\nexport * from '../up/x';\nexport * from 'pkg';\n";
+    for ext in ["ts", "js"] {
+        let barrel_path = format!("src/index.{ext}");
+        let (_tmp, db) = build_index_for(&[
+            (barrel_path.as_str(), barrel),
+            (format!("src/a.{ext}").as_str(), "export const a = 1;\n"),
+            (format!("src/b.{ext}").as_str(), "export const b = 1;\n"),
+            (format!("src/c.{ext}").as_str(), "export const c = 1;\n"),
+            (format!("up/x.{ext}").as_str(), "export const x = 1;\n"),
+        ]);
+        let edges = dep_edges(&db);
+        for to in ["src/a", "src/b", "src/c", "up/x"] {
+            let to = format!("{to}.{ext}");
+            assert!(
+                edges.contains(&(barrel_path.clone(), to.clone())),
+                "expected {barrel_path} -> {to}, got {edges:?}"
+            );
+        }
+        assert_eq!(edges.len(), 4, "pkg must add no edge: {edges:?}");
+    }
+}
+
 /// #28: `query` prints machine-readable JSON to stdout and writes nothing to disk.
 #[test]
 fn query_json_stdout_no_files_written() {
