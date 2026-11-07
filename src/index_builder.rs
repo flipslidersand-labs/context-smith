@@ -296,21 +296,22 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
         .execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin cleanup+Pass-1 transaction")?;
 
-    // --- Cleanup: remove DB entries for files no longer in git ---
-    let db_files = db.all_file_ids_and_paths()?;
-    for (file_id, path) in &db_files {
-        if !git_paths.contains(path) {
-            db.delete_file_records(*file_id)?;
-            stats.files_deleted += 1;
-        }
-    }
-
-    // --- Pass 1: upsert files + incremental symbol / FTS update ---
     let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
-    // Pass 1: upsert files + symbols — part of the same transaction started
-    // above (covers cleanup + upserts to avoid N+1 fsync and SQLITE_BUSY risk).
+    // Cleanup + Pass 1 run inside this closure so that every `?` is followed
+    // by the ROLLBACK below (covers cleanup + upserts to avoid N+1 fsync and
+    // SQLITE_BUSY risk).
     let pass1_result = (|| -> Result<()> {
+        // --- Cleanup: remove DB entries for files no longer in git ---
+        let db_files = db.all_file_ids_and_paths()?;
+        for (file_id, path) in &db_files {
+            if !git_paths.contains(path) {
+                db.delete_file_records(*file_id)?;
+                stats.files_deleted += 1;
+            }
+        }
+
+        // --- Pass 1: upsert files + incremental symbol / FTS update ---
         for (rel_path, lang, blob_sha, size) in &files {
             stats.files_total += 1;
             let (file_id, sha_changed) = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
@@ -839,6 +840,30 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
+    }
+
+    #[test]
+    fn build_index_cleanup_failure_rolls_back_transaction() {
+        let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        commit_files(tmp.path(), &[], &["b.rs"]);
+        db.connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_files_delete BEFORE DELETE ON files
+                 BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
+            )
+            .unwrap();
+        assert!(build_index(&repo, &db, false).is_err());
+        assert!(db.connection().is_autocommit());
+        // Nothing from the failed run was kept, and the connection is reusable.
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 2);
+        db.connection()
+            .execute_batch("DROP TRIGGER fail_files_delete")
+            .unwrap();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_deleted, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 1);
     }
 
     #[test]
