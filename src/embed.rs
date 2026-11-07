@@ -181,7 +181,7 @@ pub fn populate_embeddings(
 
         match result {
             Ok(()) => {
-                conn.execute_batch("COMMIT")?;
+                crate::commit_or_rollback(conn)?;
                 written += ids.len();
             }
             Err(e) => {
@@ -709,6 +709,27 @@ mod tests {
         let r = populate_embeddings(db.connection(), dir.path(), &ShortEmbedder, &db);
         assert!(r.is_err(), "count mismatch must be an error");
         assert!(!has_embeddings(db.connection()).unwrap());
+    }
+
+    /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
+    /// not leave the transaction open.
+    #[test]
+    fn populate_embeddings_rolls_back_when_commit_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        let db = index_db_with_files(&[("a.rs", "sha-a")]);
+        db.connection()
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
+                 CREATE TABLE fk_child (r INTEGER REFERENCES fk_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER defer_fk AFTER INSERT ON embeddings
+                 BEGIN INSERT INTO fk_child VALUES (999); END;",
+            )
+            .unwrap();
+        let r = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db);
+        assert!(r.is_err(), "COMMIT failure must surface as an error");
+        assert!(db.connection().is_autocommit());
     }
 
     /// Build an in-memory [`crate::index_builder::IndexDb`] and populate it
