@@ -860,6 +860,7 @@ mod tests {
             ("mod/x.py", 3),
             ("pkg/__init__.py", 4),
             ("pkg/helper.py", 5),
+            ("lib/y.py", 6),
         ]);
         let from = Path::new("pkg/main.py");
         // 相対 import ではルート直下の mod/x.py に解決されない
@@ -869,7 +870,7 @@ mod tests {
             resolve_python("from pkg import helper", from, &map),
             vec![4, 5]
         );
-        assert_eq!(resolve_python("from mod import x", from, &map), vec![3]);
+        assert_eq!(resolve_python("from lib import y", from, &map), vec![6]);
     }
 
     #[test]
