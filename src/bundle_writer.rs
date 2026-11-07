@@ -24,6 +24,8 @@ pub fn render_task_md(
     explain: bool,
 ) -> String {
     let used: usize = selected.iter().map(|c| c.tokens()).sum();
+    // Collapse newlines/whitespace runs so the task cannot inject Markdown structure.
+    let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
 
     let mut task_md = format!(
         "# Context Bundle\n\n**Task:** {task}\n\n**Budget:** {budget} tokens  \n**Used:** {used} tokens\n\n## Selected Files\n\n",
@@ -44,9 +46,10 @@ pub fn render_task_md(
     }
 
     if !diff_summary.is_empty() {
-        task_md.push_str("\n## Recent Diff\n\n```diff\n");
+        let fence = safe_fence(diff_summary);
+        task_md.push_str(&format!("\n## Recent Diff\n\n{fence}diff\n"));
         task_md.push_str(diff_summary);
-        task_md.push_str("\n```\n");
+        task_md.push_str(&format!("\n{fence}\n"));
     }
 
     task_md
@@ -229,6 +232,28 @@ mod tests {
         assert!(md.contains("diff body"));
         // Without --explain the score annotation is omitted.
         assert!(!md.contains("score="));
+    }
+
+    #[test]
+    fn render_task_md_diff_with_codefence_uses_longer_fence() {
+        let diff = "+```rust\n+fn x() {}\n+```\n## injected";
+        let md = render_task_md("t", 1000, &[], diff, false);
+        assert!(
+            md.contains("\n````diff\n"),
+            "diff fence must be longer than content run; got:\n{md}"
+        );
+        assert!(md.contains(diff), "diff must be preserved verbatim");
+        assert!(md.ends_with("\n````\n"), "closing fence must match opener");
+    }
+
+    #[test]
+    fn render_task_md_multiline_task_is_collapsed_to_one_line() {
+        let md = render_task_md("line1\n\n## Injected\r\nline3", 1000, &[], "", false);
+        assert!(
+            md.contains("**Task:** line1 ## Injected line3\n"),
+            "got:\n{md}"
+        );
+        assert!(!md.contains("\n## Injected"));
     }
 
     #[test]
