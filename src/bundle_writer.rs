@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,7 +104,28 @@ pub fn write_bundle(
     explain: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(out_dir)?;
-    std::fs::create_dir_all(out_dir.join("relevant-code"))?;
+    let rc_dir = out_dir.join("relevant-code");
+    // Refuse to follow a symlinked relevant-code/ (never delete outside out_dir).
+    if let Ok(meta) = std::fs::symlink_metadata(&rc_dir) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink; refusing to write bundle",
+                rc_dir.display()
+            );
+        }
+        // Remove stale *.md from a previous run (regular files only, no recursion).
+        let clean_err = |p: &Path| format!("failed to clean {}", p.display());
+        for entry in std::fs::read_dir(&rc_dir).with_context(|| clean_err(&rc_dir))? {
+            let entry = entry.with_context(|| clean_err(&rc_dir))?;
+            let path = entry.path();
+            let ft = entry.file_type().with_context(|| clean_err(&path))?;
+            // Symlinked .md: remove_file deletes the link itself, never the target.
+            if (ft.is_file() || ft.is_symlink()) && path.extension().is_some_and(|e| e == "md") {
+                std::fs::remove_file(&path).with_context(|| clean_err(&path))?;
+            }
+        }
+    }
+    std::fs::create_dir_all(&rc_dir)?;
 
     let task_md = render_task_md(task, budget, selected, diff_summary, explain);
     std::fs::write(out_dir.join("task.md"), &task_md)?;
@@ -215,6 +236,89 @@ mod tests {
         assert!(
             md.contains(malicious_content),
             "original content must appear unchanged"
+        );
+    }
+
+    #[test]
+    fn write_bundle_regeneration_removes_stale_md_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        write_bundle(
+            "t1",
+            1000,
+            &[cand("src/old.rs", 0.9, "old")],
+            "",
+            &out,
+            false,
+        )
+        .unwrap();
+        std::fs::write(rc.join("keep.txt"), "x").unwrap();
+        std::fs::create_dir_all(rc.join("sub")).unwrap();
+        std::fs::write(rc.join("sub").join("nested.md"), "x").unwrap();
+        std::fs::write(out.join("other.md"), "x").unwrap();
+
+        write_bundle(
+            "t2",
+            1000,
+            &[cand("src/new.rs", 0.9, "new")],
+            "",
+            &out,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            !rc.join("src_old_rs.md").exists(),
+            "stale md must be removed"
+        );
+        assert!(rc.join("src_new_rs.md").exists());
+        assert!(rc.join("keep.txt").exists(), "non-md must remain");
+        assert!(rc.join("sub").join("nested.md").exists(), "no recursion");
+        assert!(
+            out.join("other.md").exists(),
+            "outside relevant-code must remain"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_removes_symlink_md_without_touching_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let external = tmp.path().join("external.txt");
+        std::fs::write(&external, "precious").unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        std::fs::create_dir_all(&rc).unwrap();
+        std::os::unix::fs::symlink(&external, rc.join("src_a_rs.md")).unwrap();
+
+        write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "new")], "", &out, false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&external).unwrap(), "precious");
+        let md = rc.join("src_a_rs.md");
+        assert!(!std::fs::symlink_metadata(&md)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(&md).unwrap().contains("new"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_rejects_symlinked_relevant_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("a.md"), "x").unwrap();
+        let out = tmp.path().join("bundle");
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&victim, out.join("relevant-code")).unwrap();
+
+        let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false);
+        assert!(r.is_err());
+        assert!(
+            victim.join("a.md").exists(),
+            "symlink target must be untouched"
         );
     }
 
