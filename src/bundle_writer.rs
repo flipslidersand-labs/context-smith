@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,8 @@ pub fn render_task_md(
     explain: bool,
 ) -> String {
     let used: usize = selected.iter().map(|c| c.tokens()).sum();
+    // Collapse newlines/whitespace runs so the task cannot inject Markdown structure.
+    let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
 
     let mut task_md = format!(
         "# Context Bundle\n\n**Task:** {task}\n\n**Budget:** {budget} tokens  \n**Used:** {used} tokens\n\n## Selected Files\n\n",
@@ -44,9 +46,10 @@ pub fn render_task_md(
     }
 
     if !diff_summary.is_empty() {
-        task_md.push_str("\n## Recent Diff\n\n```diff\n");
+        let fence = safe_fence(diff_summary);
+        task_md.push_str(&format!("\n## Recent Diff\n\n{fence}diff\n"));
         task_md.push_str(diff_summary);
-        task_md.push_str("\n```\n");
+        task_md.push_str(&format!("\n{fence}\n"));
     }
 
     task_md
@@ -104,7 +107,28 @@ pub fn write_bundle(
     explain: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(out_dir)?;
-    std::fs::create_dir_all(out_dir.join("relevant-code"))?;
+    let rc_dir = out_dir.join("relevant-code");
+    // Refuse to follow a symlinked relevant-code/ (never delete outside out_dir).
+    if let Ok(meta) = std::fs::symlink_metadata(&rc_dir) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink; refusing to write bundle",
+                rc_dir.display()
+            );
+        }
+        // Remove stale *.md from a previous run (regular files only, no recursion).
+        let clean_err = |p: &Path| format!("failed to clean {}", p.display());
+        for entry in std::fs::read_dir(&rc_dir).with_context(|| clean_err(&rc_dir))? {
+            let entry = entry.with_context(|| clean_err(&rc_dir))?;
+            let path = entry.path();
+            let ft = entry.file_type().with_context(|| clean_err(&path))?;
+            // Symlinked .md: remove_file deletes the link itself, never the target.
+            if (ft.is_file() || ft.is_symlink()) && path.extension().is_some_and(|e| e == "md") {
+                std::fs::remove_file(&path).with_context(|| clean_err(&path))?;
+            }
+        }
+    }
+    std::fs::create_dir_all(&rc_dir)?;
 
     let task_md = render_task_md(task, budget, selected, diff_summary, explain);
     std::fs::write(out_dir.join("task.md"), &task_md)?;
@@ -219,6 +243,89 @@ mod tests {
     }
 
     #[test]
+    fn write_bundle_regeneration_removes_stale_md_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        write_bundle(
+            "t1",
+            1000,
+            &[cand("src/old.rs", 0.9, "old")],
+            "",
+            &out,
+            false,
+        )
+        .unwrap();
+        std::fs::write(rc.join("keep.txt"), "x").unwrap();
+        std::fs::create_dir_all(rc.join("sub")).unwrap();
+        std::fs::write(rc.join("sub").join("nested.md"), "x").unwrap();
+        std::fs::write(out.join("other.md"), "x").unwrap();
+
+        write_bundle(
+            "t2",
+            1000,
+            &[cand("src/new.rs", 0.9, "new")],
+            "",
+            &out,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            !rc.join("src_old_rs.md").exists(),
+            "stale md must be removed"
+        );
+        assert!(rc.join("src_new_rs.md").exists());
+        assert!(rc.join("keep.txt").exists(), "non-md must remain");
+        assert!(rc.join("sub").join("nested.md").exists(), "no recursion");
+        assert!(
+            out.join("other.md").exists(),
+            "outside relevant-code must remain"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_removes_symlink_md_without_touching_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let external = tmp.path().join("external.txt");
+        std::fs::write(&external, "precious").unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        std::fs::create_dir_all(&rc).unwrap();
+        std::os::unix::fs::symlink(&external, rc.join("src_a_rs.md")).unwrap();
+
+        write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "new")], "", &out, false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&external).unwrap(), "precious");
+        let md = rc.join("src_a_rs.md");
+        assert!(!std::fs::symlink_metadata(&md)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_to_string(&md).unwrap().contains("new"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_rejects_symlinked_relevant_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("a.md"), "x").unwrap();
+        let out = tmp.path().join("bundle");
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&victim, out.join("relevant-code")).unwrap();
+
+        let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false);
+        assert!(r.is_err());
+        assert!(
+            victim.join("a.md").exists(),
+            "symlink target must be untouched"
+        );
+    }
+
+    #[test]
     fn render_task_md_lists_files_and_diff() {
         let sel = vec![cand("src/a.rs", 0.9, "fn a() {}")];
         let md = render_task_md("do X", 1000, &sel, "diff body", false);
@@ -229,6 +336,28 @@ mod tests {
         assert!(md.contains("diff body"));
         // Without --explain the score annotation is omitted.
         assert!(!md.contains("score="));
+    }
+
+    #[test]
+    fn render_task_md_diff_with_codefence_uses_longer_fence() {
+        let diff = "+```rust\n+fn x() {}\n+```\n## injected";
+        let md = render_task_md("t", 1000, &[], diff, false);
+        assert!(
+            md.contains("\n````diff\n"),
+            "diff fence must be longer than content run; got:\n{md}"
+        );
+        assert!(md.contains(diff), "diff must be preserved verbatim");
+        assert!(md.ends_with("\n````\n"), "closing fence must match opener");
+    }
+
+    #[test]
+    fn render_task_md_multiline_task_is_collapsed_to_one_line() {
+        let md = render_task_md("line1\n\n## Injected\r\nline3", 1000, &[], "", false);
+        assert!(
+            md.contains("**Task:** line1 ## Injected line3\n"),
+            "got:\n{md}"
+        );
+        assert!(!md.contains("\n## Injected"));
     }
 
     #[test]
