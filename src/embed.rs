@@ -281,8 +281,9 @@ pub fn fuse_seeds(
 ///   - `EMBEDDING_TIMEOUT_SECS` (optional, read timeout in seconds; default 30)
 ///
 /// Requests use a 5-second connect timeout and a configurable read timeout
-/// (default 30 s). Transient errors (connection reset, 5xx) are retried up to
-/// 3 times with exponential back-off (1 s, 2 s, 4 s).
+/// (default 30 s). Transient errors (connection reset, 5xx, 429) are retried up to
+/// 3 times with exponential back-off (1 s, 2 s, 4 s). Other 4xx responses
+/// (e.g. 401/403/404) are not retried.
 #[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     url: String,
@@ -363,6 +364,12 @@ impl Embedder for RemoteEmbedder {
                         }
                     },
                     Err(e) => {
+                        // Non-retryable client errors (4xx except 429): fail fast.
+                        if let ureq::Error::Status(code, _) = &e {
+                            if *code < 500 && *code != 429 {
+                                return Err(anyhow::anyhow!("embedding request failed: {e}"));
+                            }
+                        }
                         last_err = anyhow::anyhow!("embedding request failed: {e}");
                     }
                 }
@@ -514,5 +521,74 @@ mod tests {
             .unwrap();
         let n3 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n3, 1, "only the changed file should be re-embedded");
+    }
+
+    /// Serve `status` for every request on a local port; returns (url, counter).
+    #[cfg(feature = "remote-embed")]
+    fn status_server(status: u16) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                // Read headers, then the body per Content-Length.
+                loop {
+                    let n = s.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_lowercase();
+                    if let Some(h) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                c.fetch_add(1, Ordering::SeqCst);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        });
+        (url, count)
+    }
+
+    #[cfg(feature = "remote-embed")]
+    fn remote_requests_for_status(status: u16) -> usize {
+        let (url, count) = status_server(status);
+        let e = RemoteEmbedder {
+            url,
+            api_key: None,
+            collection: "t".into(),
+            timeout: std::time::Duration::from_secs(5),
+        };
+        assert!(e.embed(&["x".to_string()], EmbedMode::Index).is_err());
+        count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_does_not_retry_401() {
+        assert_eq!(remote_requests_for_status(401), 1);
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_retries_503_and_429() {
+        assert_eq!(remote_requests_for_status(503), MAX_ATTEMPTS as usize);
+        assert_eq!(remote_requests_for_status(429), MAX_ATTEMPTS as usize);
     }
 }
