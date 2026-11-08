@@ -9,6 +9,9 @@ fn git(dir: &Path, args: &[&str]) {
         .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
         .args(args)
         .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .expect("run git");
     assert!(st.success(), "git {args:?} failed");
@@ -18,7 +21,7 @@ fn bin(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_contextsmith"))
         .args(args)
         .env_remove("EMBEDDING_SVC_URL")
-        .env_remove("EMBEDDING_SVC_TOKEN")
+        .env_remove("EMBEDDING_API_KEY")
         .output()
         .expect("run contextsmith")
 }
@@ -96,7 +99,7 @@ fn budget_non_numeric_or_overflow_is_rejected() {
         ]);
         assert_eq!(out.status.code(), Some(2), "budget {v}");
         assert!(
-            stderr(&out).contains("--budget"),
+            stderr(&out).contains("is not a valid integer"),
             "budget {v}: {}",
             stderr(&out)
         );
