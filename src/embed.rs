@@ -391,8 +391,13 @@ impl RemoteEmbedder {
     /// API key and file contents would travel unencrypted. Prefer `https://`; set
     /// `EMBEDDING_ALLOW_INSECURE=1` to silence the warning for a trusted network.
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("EMBEDDING_SVC_URL").ok()?;
-        if is_insecure_remote(&url)
+        let raw_url = std::env::var("EMBEDDING_SVC_URL").ok()?;
+        let trimmed_url = raw_url.trim();
+        if trimmed_url.is_empty() {
+            return None;
+        }
+        let url = trimmed_url;
+        if is_insecure_remote(url)
             && std::env::var("EMBEDDING_ALLOW_INSECURE").as_deref() != Ok("1")
         {
             eprintln!(
@@ -988,6 +993,20 @@ mod tests {
             std::env::remove_var(k);
         }
         assert!(RemoteEmbedder::from_env().is_none());
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_returns_none_when_url_empty_or_whitespace() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("EMBEDDING_SVC_URL", "");
+        assert!(RemoteEmbedder::from_env().is_none());
+        std::env::set_var("EMBEDDING_SVC_URL", "   \t\n  ");
+        assert!(RemoteEmbedder::from_env().is_none());
+        std::env::remove_var("EMBEDDING_SVC_URL");
     }
 
     #[cfg(feature = "remote-embed")]
