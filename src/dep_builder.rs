@@ -1186,4 +1186,132 @@ mod tests {
         assert_eq!(d0[&1], 0.9);
         assert!(bfs_expand(&conn, &[], 2).unwrap().is_empty());
     }
+
+    fn insert_edges(conn: &Connection, edges: &[(i64, i64)]) {
+        for (a, b) in edges {
+            conn.execute("INSERT INTO deps VALUES (?1, ?2)", [a, b])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn bfs_expand_depth_zero_returns_only_seeds_even_with_edges() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2), (3, 1)]);
+        let r = bfs_expand(&conn, &[(1, 0.8)], 0).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[&1], 0.8);
+    }
+
+    #[test]
+    fn bfs_expand_empty_seeds_with_edges_is_empty() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2)]);
+        assert!(bfs_expand(&conn, &[], 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn bfs_expand_stops_when_frontier_exhausted() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2)]);
+        // Isolated seed: nothing to expand even at a large depth.
+        let r = bfs_expand(&conn, &[(7, 1.0)], 10).unwrap();
+        assert_eq!(r.len(), 1);
+        // Graph exhausted after one hop: depth 10 equals depth 1.
+        let r = bfs_expand(&conn, &[(1, 1.0)], 10).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[&2], 0.5);
+    }
+
+    #[test]
+    fn bfs_expand_decays_half_then_quarter_over_two_hops() {
+        let conn = mem_db();
+        // 1 -> 2 (outgoing), 3 -> 2 (incoming to 2), 3 is two hops from 1.
+        insert_edges(&conn, &[(1, 2), (3, 2), (4, 3)]);
+        let r = bfs_expand(&conn, &[(1, 1.0)], 2).unwrap();
+        assert_eq!(r[&1], 1.0);
+        assert_eq!(r[&2], 0.5);
+        assert_eq!(r[&3], 0.25);
+        assert!(!r.contains_key(&4));
+    }
+
+    #[test]
+    fn bfs_expand_takes_max_over_multiple_parents() {
+        let conn = mem_db();
+        // 9 is reached from both seeds; the stronger parent wins in either order.
+        insert_edges(&conn, &[(1, 9), (9, 2)]);
+        let r = bfs_expand(&conn, &[(1, 1.0), (2, 0.4)], 1).unwrap();
+        assert_eq!(r[&9], 0.5);
+        let r = bfs_expand(&conn, &[(2, 0.4), (1, 1.0)], 1).unwrap();
+        assert_eq!(r[&9], 0.5);
+    }
+
+    #[test]
+    fn bfs_expand_keeps_better_score_found_at_shallower_depth() {
+        let conn = mem_db();
+        // 3 is reachable at depth 1 (0.5) and depth 2 (0.25): the larger one stays.
+        insert_edges(&conn, &[(1, 2), (2, 3), (1, 3)]);
+        let r = bfs_expand(&conn, &[(1, 1.0)], 2).unwrap();
+        assert_eq!(r[&3], 0.5);
+    }
+
+    #[test]
+    fn bfs_expand_decays_per_parent_not_from_frontier_max() {
+        let conn = mem_db();
+        // Non-seed neighbours must inherit their own parent's score (#135), not the
+        // best score in the whole frontier.
+        insert_edges(&conn, &[(1, 10), (2, 11)]);
+        let r = bfs_expand(&conn, &[(1, 1.0), (2, 0.2)], 1).unwrap();
+        assert_eq!(r[&10], 0.5);
+        assert_eq!(r[&11], 0.1);
+    }
+
+    #[test]
+    fn bfs_expand_terminates_on_cycles_and_never_raises_seed_score() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2), (2, 1), (2, 3), (3, 1)]);
+        let r = bfs_expand(&conn, &[(1, 1.0)], 50).unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[&1], 1.0);
+        assert_eq!(r[&2], 0.5);
+        assert_eq!(r[&3], 0.5);
+    }
+
+    #[test]
+    fn query_neighbors_batch_empty_ids_returns_empty() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2)]);
+        assert!(query_neighbors_batch(&conn, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn query_neighbors_batch_returns_both_directions_and_excludes_inputs() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2), (3, 1), (1, 4), (1, 5)]);
+        let mut e = query_neighbors_batch(&conn, &[1, 4]).unwrap();
+        e.sort();
+        // (1,4) is internal to the input set and dropped.
+        assert_eq!(e, vec![(1, 2), (1, 3), (1, 5)]);
+    }
+
+    #[test]
+    fn bfs_expand_handles_frontier_over_1000_ids() {
+        let conn = mem_db();
+        let n: i64 = 1500;
+        let tx = conn.unchecked_transaction().unwrap();
+        for i in 1..=n {
+            // Alternate directions so both IN queries return rows.
+            if i % 2 == 0 {
+                insert_edges(&conn, &[(i, 100_000 + i)]);
+            } else {
+                insert_edges(&conn, &[(100_000 + i, i)]);
+            }
+        }
+        tx.commit().unwrap();
+        let seeds: Vec<(i64, f32)> = (1..=n).map(|i| (i, 1.0)).collect();
+        let r = bfs_expand(&conn, &seeds, 1).unwrap();
+        assert_eq!(r.len(), 2 * n as usize);
+        assert!(r.get(&(100_000 + n)).copied() == Some(0.5));
+        assert_eq!(r[&(100_001)], 0.5);
+    }
 }
