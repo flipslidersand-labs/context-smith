@@ -336,25 +336,46 @@ fn resolve_python(
     // `X as Y` の X だけを取り出す
     let strip_as = |s: &str| s.split_whitespace().next().unwrap_or("").to_string();
 
-    if let Some(tail) = cleaned.strip_prefix("from ") {
-        let tail = tail.trim_start();
-        let (raw_module, names) = match tail.split_once(char::is_whitespace) {
-            Some((m, rest)) => (m, rest.trim_start().strip_prefix("import").unwrap_or("")),
-            None => (tail, ""),
-        };
-        let dot_count = raw_module.chars().take_while(|&c| c == '.').count();
-        let module = raw_module.trim_start_matches('.');
-        // 各ドットは(最初の1つを除き)1階層上がる
-        let mut base_dir = base;
+    // キーワード直後は空白全般(タブ等)を許す
+    let after_kw = |kw: &str| -> Option<String> {
+        let rest = cleaned.strip_prefix(kw)?;
+        rest.starts_with(char::is_whitespace)
+            .then(|| rest.trim_start().to_string())
+    };
+    // base から `ups` 階層上がる。リポジトリルートを超えるなら None
+    let ascend = |dot_count: usize| -> Option<&Path> {
+        let mut dir = base;
         for _ in 1..dot_count {
-            base_dir = base_dir.parent().unwrap_or(Path::new(""));
+            if dir.as_os_str().is_empty() {
+                return None;
+            }
+            dir = dir.parent().unwrap_or(Path::new(""));
         }
+        Some(dir)
+    };
+
+    if let Some(tail) = after_kw("from") {
+        let dot_count = tail.chars().take_while(|&c| c == '.').count();
+        let after_dots = &tail[dot_count..];
+        // `from .import x` のように、ドット直後に空白なしで import が続く形も許す
+        let (module, names) = match after_dots.strip_prefix("import") {
+            Some(rest) if dot_count > 0 && rest.starts_with(char::is_whitespace) => ("", rest),
+            _ => match after_dots.split_once(char::is_whitespace) {
+                Some((m, rest)) => (m, rest.trim_start().strip_prefix("import").unwrap_or("")),
+                None => (after_dots, ""),
+            },
+        };
+        let Some(base_dir) = ascend(dot_count) else {
+            return ids;
+        };
         let rel = module.replace('.', "/");
+        // 相対 import(ドットあり)ではリポジトリルート探索をしない
+        let allow_root = dot_count == 0;
         if module.is_empty() {
             // `from .. import z` — パッケージ自身
             push(path_to_id.get(&base_dir.join("__init__.py")).copied());
         } else {
-            push(lookup_py_module(&rel, base_dir, true, path_to_id));
+            push(lookup_py_module(&rel, base_dir, allow_root, path_to_id));
         }
         // `from X import a, b` — X/a.py, X/a/__init__.py などサブモジュール候補
         for name in names.split(',').map(strip_as) {
@@ -366,23 +387,22 @@ fn resolve_python(
             } else {
                 format!("{}/{}", rel, name)
             };
-            push(lookup_py_module(&sub, base_dir, dot_count == 0, path_to_id));
+            push(lookup_py_module(&sub, base_dir, allow_root, path_to_id));
         }
-    } else if let Some(tail) = cleaned.strip_prefix("import ") {
+    } else if let Some(tail) = after_kw("import") {
         for part in tail.split(',').map(strip_as) {
             let dot_count = part.chars().take_while(|&c| c == '.').count();
             let module = part.trim_start_matches('.');
             if module.is_empty() {
                 continue;
             }
-            let mut base_dir = base;
-            for _ in 1..dot_count {
-                base_dir = base_dir.parent().unwrap_or(Path::new(""));
-            }
+            let Some(base_dir) = ascend(dot_count) else {
+                continue;
+            };
             push(lookup_py_module(
                 &module.replace('.', "/"),
                 base_dir,
-                true,
+                dot_count == 0,
                 path_to_id,
             ));
         }
@@ -925,6 +945,63 @@ mod tests {
             vec![4, 5]
         );
         assert_eq!(resolve_python("from lib import y", from, &map), vec![6]);
+    }
+
+    fn py_boundary_map() -> HashMap<PathBuf, i64> {
+        ids(&[
+            ("pkg/main.py", 1),
+            ("pkg/mod.py", 2),
+            ("mod/x.py", 3),
+            ("pkg/__init__.py", 4),
+            ("pkg/helper.py", 5),
+            ("import.py", 6),
+            ("z.py", 7),
+        ])
+    }
+
+    #[test]
+    fn resolve_python_relative_module_has_no_root_search() {
+        let from = Path::new("pkg/main.py");
+        // pkg/mod.py が無く、ルートに mod/__init__.py だけある場合は解決しない
+        let map = ids(&[("pkg/main.py", 1), ("mod/__init__.py", 3)]);
+        assert!(resolve_python("from .mod import x", from, &map).is_empty());
+        // pkg/mod.py があればそれだけ
+        assert_eq!(
+            resolve_python("from .mod import x", from, &py_boundary_map()),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn resolve_python_from_dot_import_without_space() {
+        let from = Path::new("pkg/main.py");
+        assert_eq!(
+            resolve_python("from .import helper", from, &py_boundary_map()),
+            vec![4, 5]
+        );
+    }
+
+    #[test]
+    fn resolve_python_dots_above_root_do_not_resolve() {
+        let from = Path::new("pkg/main.py");
+        let map = py_boundary_map();
+        assert!(resolve_python("from ... import z", from, &map).is_empty());
+        assert!(resolve_python("from ...z import q", from, &map).is_empty());
+        // `..` はルート直下までなので有効
+        assert_eq!(resolve_python("from .. import z", from, &map), vec![7]);
+    }
+
+    #[test]
+    fn resolve_python_accepts_any_whitespace_after_keywords() {
+        let from = Path::new("pkg/main.py");
+        assert_eq!(
+            resolve_python("from\tpkg import helper", from, &py_boundary_map()),
+            vec![4, 5]
+        );
+        assert_eq!(
+            resolve_python("import\ttop", from, &ids(&[("top.py", 9)])),
+            vec![9]
+        );
     }
 
     #[test]
