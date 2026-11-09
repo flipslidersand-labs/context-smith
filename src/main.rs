@@ -317,7 +317,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let repo = GitRepo::new(&repo)?;
             let db_path = resolve_index_path(&repo, index)?;
-            let db = IndexDb::open(&db_path)?;
+            let db = IndexDb::open_for_read(&db_path)?;
 
             let selected = select_candidates(&repo, &db, &task, budget, no_embed)?;
 
@@ -353,7 +353,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let repo = GitRepo::new(&repo)?;
             let db_path = resolve_index_path(&repo, index)?;
-            let db = IndexDb::open(&db_path)?;
+            let db = IndexDb::open_for_read(&db_path)?;
 
             let selected = select_candidates(&repo, &db, &task, budget, no_embed)?;
             let used: usize = selected.iter().map(|c| c.tokens()).sum();
