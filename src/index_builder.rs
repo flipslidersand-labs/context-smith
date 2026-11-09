@@ -840,6 +840,32 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
     }
 
+    #[test]
+    fn build_index_removes_deps_of_files_deleted_from_git() {
+        let (tmp, repo) = repo_with(&[
+            ("pkg/main.py", "from pkg import helper\n"),
+            ("pkg/helper.py", "def h():\n    pass\n"),
+            ("pkg/__init__.py", ""),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        let touching = "SELECT COUNT(*) FROM deps WHERE to_file = \
+             (SELECT id FROM files WHERE path='pkg/helper.py') \
+             OR from_file = (SELECT id FROM files WHERE path='pkg/helper.py')";
+        assert!(count(&db, touching) > 0, "precondition: edge to helper.py");
+        commit_files(tmp.path(), &[], &["pkg/helper.py"]);
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_deleted, 1);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM deps WHERE to_file NOT IN (SELECT id FROM files) \
+                 OR from_file NOT IN (SELECT id FROM files)"
+            ),
+            0
+        );
+    }
+
     /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
     /// not leave the transaction open.
     #[test]
