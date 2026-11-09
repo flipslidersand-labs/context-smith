@@ -532,10 +532,10 @@ fn resolve_go_package(pkg: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> V
 ///
 /// # Batch query strategy (#91)
 /// Instead of calling `query_neighbors` once per node (N×2 queries per depth level),
-/// each BFS depth level collects the entire frontier and issues exactly 2 SQL queries
-/// per level (one `IN` for outgoing edges, one `IN` for incoming edges). For
-/// `max_depth=2` this means at most 4 SQL round-trips regardless of frontier size,
-/// avoiding the O(frontier) N+1 problem of the original per-node approach.
+/// each BFS depth level collects the entire frontier and issues 2 SQL queries
+/// per chunk of `NEIGHBOR_BATCH_CHUNK` ids (one `IN` for outgoing edges, one `IN` for
+/// incoming edges), i.e. 2 × ceil(frontier / chunk) per level. This keeps round-trips
+/// proportional to frontier/chunk rather than O(frontier), avoiding the N+1 problem of the original per-node approach.
 pub fn bfs_expand(
     conn: &Connection,
     seeds: &[(i64, f32)],
@@ -563,7 +563,7 @@ pub fn bfs_expand(
         let ids: Vec<i64> = frontier.iter().map(|&(id, _)| id).collect();
         let frontier_scores: HashMap<i64, f32> = frontier.iter().copied().collect();
 
-        // Batch-fetch every (parent, neighbour) edge of the frontier in 2 queries.
+        // Batch-fetch every (parent, neighbour) edge of the frontier in 2 queries per chunk.
         let edges = query_neighbors_batch(conn, &ids)?;
 
         // Each neighbour gets the decayed score of its own best parent. (It used to get the
@@ -593,8 +593,11 @@ pub fn bfs_expand(
     Ok(scores)
 }
 
-/// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries (one
-/// outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
+/// Max ids per IN clause in `query_neighbors_batch`.
+const NEIGHBOR_BATCH_CHUNK: usize = 500;
+
+/// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries per
+/// chunk of `NEIGHBOR_BATCH_CHUNK` ids (one outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
 /// node from `ids` and `neighbour` is the node on the other end, never itself in `ids`.
 ///
 /// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
@@ -605,32 +608,35 @@ fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64
         return Ok(vec![]);
     }
 
-    // Build the IN-clause placeholder string: "?1,?2,...,?N"
-    let placeholders: String = (1..=ids.len())
-        .map(|i| format!("?{}", i))
-        .collect::<Vec<_>>()
-        .join(",");
-
     let mut edges: HashSet<(i64, i64)> = HashSet::new();
-    // Outgoing: parent → X, then incoming: X → parent.
-    for sql in [
-        format!(
-            "SELECT from_file, to_file FROM deps WHERE from_file IN ({})",
-            placeholders
-        ),
-        format!(
-            "SELECT to_file, from_file FROM deps WHERE to_file IN ({})",
-            placeholders
-        ),
-    ] {
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            edges.insert(row?);
+    // Chunk the ids so each statement stays far below SQLite's bound-variable limit
+    // (32766); the HashSet merges and de-duplicates results across chunks. (#273)
+    for chunk in ids.chunks(NEIGHBOR_BATCH_CHUNK) {
+        // Build the IN-clause placeholder string: "?1,?2,...,?N"
+        let placeholders: String = (1..=chunk.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(",");
+        // Outgoing: parent → X, then incoming: X → parent.
+        for sql in [
+            format!(
+                "SELECT from_file, to_file FROM deps WHERE from_file IN ({})",
+                placeholders
+            ),
+            format!(
+                "SELECT to_file, from_file FROM deps WHERE to_file IN ({})",
+                placeholders
+            ),
+        ] {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params_refs.as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                edges.insert(row?);
+            }
         }
     }
 
@@ -1292,6 +1298,31 @@ mod tests {
         e.sort();
         // (1,4) is internal to the input set and dropped.
         assert_eq!(e, vec![(1, 2), (1, 3), (1, 5)]);
+    }
+
+    #[test]
+    fn query_neighbors_batch_handles_ids_over_sqlite_variable_limit() {
+        let conn = mem_db();
+        let n: i64 = 40_000; // > SQLite's 32766 bound-variable limit
+        let tx = conn.unchecked_transaction().unwrap();
+        {
+            let mut stmt = conn
+                .prepare("INSERT INTO deps (from_file, to_file) VALUES (?1, ?2)")
+                .unwrap();
+            for i in 1..=n {
+                if i % 2 == 0 {
+                    stmt.execute([i, 100_000 + i]).unwrap();
+                } else {
+                    stmt.execute([100_000 + i, i]).unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+        let ids: Vec<i64> = (1..=n).collect();
+        let e = query_neighbors_batch(&conn, &ids).unwrap();
+        assert_eq!(e.len(), n as usize);
+        assert!(e.contains(&(n, 100_000 + n)));
+        assert!(e.contains(&(1, 100_001)));
     }
 
     #[test]
