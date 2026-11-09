@@ -600,37 +600,43 @@ pub fn bfs_expand(
 /// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
 /// that issued 2N queries for a frontier of N nodes. (#91) Keeping the parent lets the caller
 /// decay each neighbour from its own parent's score. (#135)
+/// Max ids per IN clause in `query_neighbors_batch`.
+const NEIGHBOR_BATCH_CHUNK: usize = 500;
+
 fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64)>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
 
-    // Build the IN-clause placeholder string: "?1,?2,...,?N"
-    let placeholders: String = (1..=ids.len())
-        .map(|i| format!("?{}", i))
-        .collect::<Vec<_>>()
-        .join(",");
-
     let mut edges: HashSet<(i64, i64)> = HashSet::new();
-    // Outgoing: parent → X, then incoming: X → parent.
-    for sql in [
-        format!(
-            "SELECT from_file, to_file FROM deps WHERE from_file IN ({})",
-            placeholders
-        ),
-        format!(
-            "SELECT to_file, from_file FROM deps WHERE to_file IN ({})",
-            placeholders
-        ),
-    ] {
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            edges.insert(row?);
+    // Chunk the ids so each statement stays far below SQLite's bound-variable limit
+    // (32766); the HashSet merges and de-duplicates results across chunks. (#273)
+    for chunk in ids.chunks(NEIGHBOR_BATCH_CHUNK) {
+        // Build the IN-clause placeholder string: "?1,?2,...,?N"
+        let placeholders: String = (1..=chunk.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(",");
+        // Outgoing: parent → X, then incoming: X → parent.
+        for sql in [
+            format!(
+                "SELECT from_file, to_file FROM deps WHERE from_file IN ({})",
+                placeholders
+            ),
+            format!(
+                "SELECT to_file, from_file FROM deps WHERE to_file IN ({})",
+                placeholders
+            ),
+        ] {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params_refs.as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                edges.insert(row?);
+            }
         }
     }
 
@@ -1292,6 +1298,31 @@ mod tests {
         e.sort();
         // (1,4) is internal to the input set and dropped.
         assert_eq!(e, vec![(1, 2), (1, 3), (1, 5)]);
+    }
+
+    #[test]
+    fn query_neighbors_batch_handles_ids_over_sqlite_variable_limit() {
+        let conn = mem_db();
+        let n: i64 = 40_000; // > SQLite's 32766 bound-variable limit
+        let tx = conn.unchecked_transaction().unwrap();
+        {
+            let mut stmt = conn
+                .prepare("INSERT INTO deps (from_file, to_file) VALUES (?1, ?2)")
+                .unwrap();
+            for i in 1..=n {
+                if i % 2 == 0 {
+                    stmt.execute([i, 100_000 + i]).unwrap();
+                } else {
+                    stmt.execute([100_000 + i, i]).unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+        let ids: Vec<i64> = (1..=n).collect();
+        let e = query_neighbors_batch(&conn, &ids).unwrap();
+        assert_eq!(e.len(), n as usize);
+        assert!(e.contains(&(n, 100_000 + n)));
+        assert!(e.contains(&(1, 100_001)));
     }
 
     #[test]
