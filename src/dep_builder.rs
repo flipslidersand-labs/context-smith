@@ -532,10 +532,10 @@ fn resolve_go_package(pkg: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> V
 ///
 /// # Batch query strategy (#91)
 /// Instead of calling `query_neighbors` once per node (N×2 queries per depth level),
-/// each BFS depth level collects the entire frontier and issues exactly 2 SQL queries
-/// per level (one `IN` for outgoing edges, one `IN` for incoming edges). For
-/// `max_depth=2` this means at most 4 SQL round-trips regardless of frontier size,
-/// avoiding the O(frontier) N+1 problem of the original per-node approach.
+/// each BFS depth level collects the entire frontier and issues 2 SQL queries
+/// per chunk of `NEIGHBOR_BATCH_CHUNK` ids (one `IN` for outgoing edges, one `IN` for
+/// incoming edges), i.e. 2 × ceil(frontier / chunk) per level. This keeps round-trips
+/// proportional to frontier/chunk rather than O(frontier), avoiding the N+1 problem of the original per-node approach.
 pub fn bfs_expand(
     conn: &Connection,
     seeds: &[(i64, f32)],
@@ -563,7 +563,7 @@ pub fn bfs_expand(
         let ids: Vec<i64> = frontier.iter().map(|&(id, _)| id).collect();
         let frontier_scores: HashMap<i64, f32> = frontier.iter().copied().collect();
 
-        // Batch-fetch every (parent, neighbour) edge of the frontier in 2 queries.
+        // Batch-fetch every (parent, neighbour) edge of the frontier in 2 queries per chunk.
         let edges = query_neighbors_batch(conn, &ids)?;
 
         // Each neighbour gets the decayed score of its own best parent. (It used to get the
@@ -593,16 +593,16 @@ pub fn bfs_expand(
     Ok(scores)
 }
 
-/// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries (one
-/// outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
+/// Max ids per IN clause in `query_neighbors_batch`.
+const NEIGHBOR_BATCH_CHUNK: usize = 500;
+
+/// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries per
+/// chunk of `NEIGHBOR_BATCH_CHUNK` ids (one outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
 /// node from `ids` and `neighbour` is the node on the other end, never itself in `ids`.
 ///
 /// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
 /// that issued 2N queries for a frontier of N nodes. (#91) Keeping the parent lets the caller
 /// decay each neighbour from its own parent's score. (#135)
-/// Max ids per IN clause in `query_neighbors_batch`.
-const NEIGHBOR_BATCH_CHUNK: usize = 500;
-
 fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64)>> {
     if ids.is_empty() {
         return Ok(vec![]);
