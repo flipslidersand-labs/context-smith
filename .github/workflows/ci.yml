@@ -52,6 +52,29 @@ jobs:
       - name: Build (no-default-features)
         run: cargo build --no-default-features
 
+  # reusable は feature 切替を渡せないため、remote-embed feature のテスト (RemoteEmbedder 等) はここで走らせる (#221)
+  test-remote-embed:
+    name: test (remote-embed feature)
+    permissions:
+      contents: read
+    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Test (remote-embed)
+        run: cargo test --features remote-embed
+
   adapter:
     name: adapter (Claude Code skill)
     runs-on: ubuntu-latest
