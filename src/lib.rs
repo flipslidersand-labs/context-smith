@@ -922,6 +922,38 @@ mod tests {
         assert!(diff.len() <= 512 * 1024 + "\n[diff truncated]\n".len());
     }
 
+    #[test]
+    fn recent_diff_silently_drops_non_utf8_lines() {
+        let tmp = TempDir::new().unwrap();
+        let repo_git = git2::Repository::init(tmp.path()).unwrap();
+        // No NUL byte, so git treats the file as text; line 2 is invalid UTF-8.
+        std::fs::write(tmp.path().join("m.txt"), b"good1\nbad\xff\xfe\ngood2\n").unwrap();
+        let mut index = repo_git.index().unwrap();
+        index.add_path(Path::new("m.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo_git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        repo_git
+            .commit(Some("HEAD"), &sig, &sig, "bin", &tree, &[])
+            .unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        // Pins current behaviour: the invalid line is dropped without a marker,
+        // surrounding lines are kept and the result stays valid UTF-8.
+        assert!(diff.contains("\n+good1\n"), "{diff}");
+        assert!(diff.contains("\n+good2\n"), "{diff}");
+        assert!(!diff.contains("bad"), "{diff}");
+        assert!(!diff.contains("[diff truncated]"), "{diff}");
+    }
+
+    #[test]
+    fn recent_diff_under_cap_has_no_truncation_marker() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "small\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert!(!repo.recent_diff(1).unwrap().contains("[diff truncated]"));
+    }
+
     // ---- SymbolExtractor ----
 
     #[test]
