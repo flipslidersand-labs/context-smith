@@ -543,16 +543,16 @@ pub fn bfs_expand(
 ) -> Result<HashMap<i64, f32>> {
     let mut scores: HashMap<i64, f32> = HashMap::new();
 
-    // frontier entries: (file_id, score) — all at the same BFS depth.
-    let mut frontier: Vec<(i64, f32)> = Vec::new();
-
     for &(file_id, score) in seeds {
         let prev = scores.entry(file_id).or_insert(0.0);
         if score > *prev {
             *prev = score;
         }
-        frontier.push((file_id, score));
     }
+
+    // Build the frontier from the deduplicated max scores so duplicate seeds cannot
+    // overwrite each other (last-wins) when collected into a map below. (#274)
+    let mut frontier: Vec<(i64, f32)> = scores.iter().map(|(&id, &s)| (id, s)).collect();
 
     for _depth in 0..max_depth {
         if frontier.is_empty() {
@@ -1250,6 +1250,17 @@ mod tests {
         assert_eq!(r[&9], 0.5);
         let r = bfs_expand(&conn, &[(2, 0.4), (1, 1.0)], 1).unwrap();
         assert_eq!(r[&9], 0.5);
+    }
+
+    #[test]
+    fn bfs_expand_duplicate_seeds_use_max_score_for_neighbours() {
+        let conn = mem_db();
+        insert_edges(&conn, &[(1, 2)]);
+        for seeds in [[(1, 0.9), (1, 0.3)], [(1, 0.3), (1, 0.9)]] {
+            let r = bfs_expand(&conn, &seeds, 1).unwrap();
+            assert_eq!(r[&1], 0.9);
+            assert_eq!(r[&2], 0.45);
+        }
     }
 
     #[test]
