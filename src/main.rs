@@ -465,4 +465,27 @@ mod tests {
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
+
+    #[test]
+    fn select_candidates_excludes_unknown_lang_files() {
+        let (_t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
+        let n = db
+            .connection()
+            .execute("UPDATE files SET lang = 'unknown' WHERE path = 'b.rs'", [])
+            .unwrap();
+        assert_eq!(n, 1);
+        let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn select_candidates_skips_unreadable_file_and_keeps_others() {
+        let (t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
+        // Vanishes after indexing: the read fails and only b.rs is skipped.
+        std::fs::remove_file(t.path().join("b.rs")).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].path, PathBuf::from("a.rs"));
+    }
 }
