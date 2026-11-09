@@ -1108,6 +1108,67 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ts_js_appended_extension_priority_follows_exts_order() {
+        let from = Path::new("src/x.ts");
+        let exts = ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"];
+        for (i, ext) in exts.iter().enumerate() {
+            // each of the 8 extensions resolves on its own
+            let only = ids(&[(&format!("src/a.{ext}"), 10)]);
+            assert_eq!(resolve_ts_js("import a from './a'", from, &only), vec![10]);
+            // and it loses to every earlier one in EXTS
+            for earlier in &exts[..i] {
+                let both = ids(&[
+                    (&format!("src/a.{ext}"), 10),
+                    (&format!("src/a.{earlier}"), 20),
+                ]);
+                assert_eq!(
+                    resolve_ts_js("import a from './a'", from, &both),
+                    vec![20],
+                    "{earlier} should beat {ext}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_ts_js_file_beats_directory_index_and_index_follows_exts_order() {
+        let from = Path::new("src/x.ts");
+        // `./a` -> a.ts before a/index.ts (even a.cjs beats a/index.ts)
+        let map = ids(&[("src/a/index.ts", 2), ("src/a.ts", 1)]);
+        assert_eq!(resolve_ts_js("import a from './a'", from, &map), vec![1]);
+        let map = ids(&[("src/a/index.ts", 2), ("src/a.cjs", 3)]);
+        assert_eq!(resolve_ts_js("import a from './a'", from, &map), vec![3]);
+        // index.* priority follows EXTS order
+        let exts = ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"];
+        for (i, ext) in exts.iter().enumerate() {
+            let only = ids(&[(&format!("src/d/index.{ext}"), 10)]);
+            assert_eq!(resolve_ts_js("import d from './d'", from, &only), vec![10]);
+            for earlier in &exts[..i] {
+                let both = ids(&[
+                    (&format!("src/d/index.{ext}"), 10),
+                    (&format!("src/d/index.{earlier}"), 20),
+                ]);
+                assert_eq!(
+                    resolve_ts_js("import d from './d'", from, &both),
+                    vec![20],
+                    "index.{earlier} should beat index.{ext}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_path_edge_cases() {
+        assert_eq!(normalize_path(Path::new("./")), PathBuf::new());
+        assert_eq!(normalize_path(Path::new(".")), PathBuf::new());
+        assert_eq!(normalize_path(Path::new("")), PathBuf::new());
+        assert_eq!(normalize_path(Path::new("./a")), PathBuf::from("a"));
+        // excess `..` is swallowed at the root, not kept
+        assert_eq!(normalize_path(Path::new("a/../../b")), PathBuf::from("b"));
+        assert_eq!(normalize_path(Path::new("a/..")), PathBuf::new());
+    }
+
+    #[test]
     fn resolve_import_dispatches_by_extension() {
         let map = ids(&[("src/a.rs", 1)]);
         let go = HashMap::new();

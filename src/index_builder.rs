@@ -11,7 +11,18 @@ pub struct IndexDb {
 }
 
 impl IndexDb {
+    /// Open for read-only use (query/build). Skips the integrity check, which
+    /// can misreport corruption while another process holds a write
+    /// transaction. Use [`IndexDb::open`] before writing.
+    pub fn open_for_read(path: &Path) -> Result<Self> {
+        Self::open_inner(path, false)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_inner(path, true)
+    }
+
+    fn open_inner(path: &Path, check: bool) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
         conn.execute_batch(
@@ -22,13 +33,24 @@ impl IndexDb {
         )
         .with_context(|| "Failed to apply SQLite PRAGMAs")?;
 
+        if !check {
+            return Ok(IndexDb { conn });
+        }
+
         // Verify the DB is not corrupt after an abnormal WAL termination.
         let integrity: String = conn
             .query_row("PRAGMA quick_check", [], |row| row.get(0))
             .with_context(|| "Failed to run PRAGMA quick_check")?;
         if integrity != "ok" {
+            if integrity.contains("database is locked") || integrity.contains("busy") {
+                anyhow::bail!(
+                    "Index DB {} is locked by another process (an 'index' may be running). \
+                     Wait for it to finish and retry. ({integrity})",
+                    path.display()
+                );
+            }
             anyhow::bail!(
-                "Index DB is corrupt. Delete {} and re-run 'contextsmith index'.",
+                "Index DB is corrupt ({integrity}). Delete {} and re-run 'contextsmith index'.",
                 path.display()
             );
         }
@@ -480,6 +502,55 @@ mod tests {
     }
 
     // ---- IndexDb::open ----
+
+    /// Hold an uncommitted write transaction on a second connection.
+    fn hold_write_txn(path: &std::path::Path) -> Connection {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO files(path, lang, blob_sha, size) VALUES ('held.rs', 'rust', 'x', 1);",
+        )
+        .unwrap();
+        c
+    }
+
+    fn seeded_db(path: &std::path::Path) {
+        let db = IndexDb::open(path).unwrap();
+        db.init_schema().unwrap();
+    }
+
+    #[test]
+    fn open_for_read_succeeds_while_another_connection_writes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("idx.db");
+        seeded_db(&path);
+        let _writer = hold_write_txn(&path);
+        let db = IndexDb::open_for_read(&path);
+        assert!(db.is_ok(), "{:?}", db.err());
+    }
+
+    #[test]
+    fn open_does_not_report_corruption_while_another_connection_writes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("idx.db");
+        seeded_db(&path);
+        let _writer = hold_write_txn(&path);
+        // WAL + system SQLite では読み側が書き込み Tx に塞がれず open が成功する環境がある。
+        // 失敗する場合だけ、破損ではなくロックとして報告されることを確認する。
+        if let Err(e) = IndexDb::open(&path) {
+            let msg = e.to_string();
+            assert!(!msg.contains("corrupt"), "{msg}");
+            assert!(msg.contains("locked by another process"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn open_for_read_rejects_non_sqlite_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("garbage.db");
+        std::fs::write(&path, "not sqlite".repeat(1000)).unwrap();
+        assert!(IndexDb::open_for_read(&path).is_err());
+    }
 
     #[test]
     fn open_creates_file_db_in_wal_mode() {
