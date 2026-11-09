@@ -424,11 +424,46 @@ fn lookup_py_module(
 /// `*_test.go`, `*.pb.go`, and `mock_*.go` files are excluded from the returned
 /// IDs so they do not inflate the BFS frontier and consume token budget.
 fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Vec<i64> {
-    let pkg = import_str
-        .trim()
-        .trim_start_matches("import")
-        .trim()
-        .trim_matches('"');
+    // Single, grouped, aliased, dot and blank imports all reduce to quoted literals.
+    let mut out: Vec<i64> = Vec::new();
+    for pkg in go_import_paths(import_str) {
+        for id in resolve_go_package(pkg, go_dir_index) {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// Extract every quoted import path from a Go `import` declaration, skipping `//` comments.
+fn go_import_paths(src: &str) -> Vec<&str> {
+    let mut paths = Vec::new();
+    for line in src.lines() {
+        let mut rest = line;
+        while let Some(pos) = rest.find(['"', '`', '/']) {
+            let c = rest.as_bytes()[pos];
+            if c == b'/' {
+                if rest[pos..].starts_with("//") {
+                    break;
+                }
+                rest = &rest[pos + 1..];
+                continue;
+            }
+            let after = &rest[pos + 1..];
+            match after.find(c as char) {
+                Some(end) => {
+                    paths.push(&after[..end]);
+                    rest = &after[end + 1..];
+                }
+                None => break,
+            }
+        }
+    }
+    paths
+}
+
+fn resolve_go_package(pkg: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Vec<i64> {
     if pkg.is_empty() {
         return vec![];
     }
@@ -690,6 +725,25 @@ mod tests {
         assert!(resolve_go("\"example.com/none\"", &idx).is_empty());
         assert!(resolve_go("\"\"", &idx).is_empty());
         assert!(resolve_go("\"/\"", &idx).is_empty());
+    }
+
+    #[test]
+    fn resolve_go_handles_group_alias_and_dot_imports() {
+        let idx: HashMap<PathBuf, Vec<i64>> = [
+            (PathBuf::from("internal/auth"), vec![1]),
+            (PathBuf::from("pkg/util"), vec![2, 3]),
+            (PathBuf::from("db"), vec![4]),
+        ]
+        .into();
+        let group = "import (\n\t\"fmt\"\n\t\"example.com/app/internal/auth\"\n\tu \"example.com/app/pkg/util\"\n)";
+        assert_eq!(resolve_go(group, &idx), vec![1, 2, 3]);
+        assert_eq!(resolve_go("import foo \"x/internal/auth\"", &idx), vec![1]);
+        assert_eq!(resolve_go("import . \"x/db\"", &idx), vec![4]);
+        assert_eq!(resolve_go("import _ \"x/db\"", &idx), vec![4]);
+        // duplicates and comments are ignored
+        let dup = "import (\n\t\"a/db\" // \"x/internal/auth\"\n\td \"b/db\"\n)";
+        assert_eq!(resolve_go(dup, &idx), vec![4]);
+        assert!(resolve_go("import (\n)", &idx).is_empty());
     }
 
     #[test]
