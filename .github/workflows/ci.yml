@@ -52,7 +52,9 @@ jobs:
       - name: Build (no-default-features)
         run: cargo build --no-default-features
 
-  # reusable は feature 切替を渡せないため、remote-embed feature のテスト (RemoteEmbedder 等) はここで走らせる (#221)
+  # remote-embed feature のテスト (RemoteEmbedder 等) を走らせる (#221)。
+  # reusable は test-args で feature を渡せるが、既存 rust ジョブの required check 名と
+  # 実行内容を変えずに feature 付きの確認を足すため、別ジョブにしている。
   test-remote-embed:
     name: test (remote-embed feature)
     permissions:
