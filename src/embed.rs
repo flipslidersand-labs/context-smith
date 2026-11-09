@@ -338,7 +338,8 @@ pub fn fuse_seeds_with_status(
 /// Requests use a 5-second connect timeout and a configurable read timeout
 /// (default 30 s). Transient errors (connection reset, 5xx, 408/425/429) are
 /// retried; each chunk is attempted at most 3 times (2 retries, waiting 1 s then
-/// 2 s). Other 4xx responses (e.g. 401/403/404) are not retried.
+/// 2 s). Other 4xx responses (e.g. 401/403/404) and 200 responses with an
+/// undecodable body are not retried.
 #[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     url: String,
@@ -452,8 +453,9 @@ impl Embedder for RemoteEmbedder {
                 match req.send_json(body.clone()) {
                     Ok(r) => match r.into_json::<EmbedResponse>() {
                         Ok(parsed) => break parsed,
+                        // A malformed 200 body is not transient: fail fast.
                         Err(e) => {
-                            last_err = anyhow::anyhow!("embedding response decode failed: {e}");
+                            return Err(anyhow::anyhow!("embedding response decode failed: {e}"));
                         }
                     },
                     Err(e) => {
@@ -947,15 +949,14 @@ mod tests {
 
     #[cfg(feature = "remote-embed")]
     #[test]
-    fn remote_embedder_errors_after_retries_on_invalid_json() {
+    fn remote_embedder_does_not_retry_invalid_json() {
         let (url, count) = body_server("not json at all");
+        let start = std::time::Instant::now();
         let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
         let msg = format!("{:#}", r.unwrap_err());
         assert!(msg.contains("decode failed"), "got: {msg}");
-        assert_eq!(
-            count.load(std::sync::atomic::Ordering::SeqCst),
-            MAX_ATTEMPTS as usize
-        );
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(start.elapsed() < std::time::Duration::from_millis(900));
     }
 
     #[cfg(feature = "remote-embed")]
