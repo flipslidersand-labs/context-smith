@@ -456,18 +456,36 @@ fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Ve
     out
 }
 
-/// Extract every quoted import path from a Go `import` declaration, skipping `//` comments.
+/// Extract every quoted import path from a Go `import` declaration, skipping `//` and `/* */` comments.
 fn go_import_paths(src: &str) -> Vec<&str> {
     let mut paths = Vec::new();
+    let mut in_block = false; // inside a `/* ... */` that spans lines
     for line in src.lines() {
         let mut rest = line;
-        while let Some(pos) = rest.find(['"', '`', '/']) {
+        loop {
+            if in_block {
+                match rest.find("*/") {
+                    Some(end) => {
+                        rest = &rest[end + 2..];
+                        in_block = false;
+                    }
+                    None => break,
+                }
+            }
+            let Some(pos) = rest.find(['"', '`', '/']) else {
+                break;
+            };
             let c = rest.as_bytes()[pos];
             if c == b'/' {
                 if rest[pos..].starts_with("//") {
                     break;
                 }
-                rest = &rest[pos + 1..];
+                if rest[pos..].starts_with("/*") {
+                    in_block = true;
+                    rest = &rest[pos + 2..];
+                } else {
+                    rest = &rest[pos + 1..];
+                }
                 continue;
             }
             let after = &rest[pos + 1..];
@@ -764,6 +782,31 @@ mod tests {
         let dup = "import (\n\t\"a/db\" // \"x/internal/auth\"\n\td \"b/db\"\n)";
         assert_eq!(resolve_go(dup, &idx), vec![4]);
         assert!(resolve_go("import (\n)", &idx).is_empty());
+    }
+
+    #[test]
+    fn resolve_go_skips_block_comments() {
+        let idx: HashMap<PathBuf, Vec<i64>> = [
+            (PathBuf::from("internal/auth"), vec![1]),
+            (PathBuf::from("db"), vec![4]),
+        ]
+        .into();
+        // single-line block comment
+        let single = "import (\n\t/* \"x/internal/auth\" */ \"a/db\"\n)";
+        assert_eq!(resolve_go(single, &idx), vec![4]);
+        // multi-line block comment
+        let multi = "import (\n\t/* old:\n\t\"x/internal/auth\"\n\t*/\n\t\"a/db\"\n)";
+        assert_eq!(resolve_go(multi, &idx), vec![4]);
+        // import after the closing marker on the same line
+        let after = "import (\n\t/* c\n\t*/ \"x/internal/auth\"\n)";
+        assert_eq!(resolve_go(after, &idx), vec![1]);
+        // `/*` inside string literals is not a comment
+        let in_str = "import (\n\t\"a/*b\"\n\t`c/*d`\n\t\"x/internal/auth\"\n)";
+        assert_eq!(resolve_go(in_str, &idx), vec![1]);
+        // `//` inside a block comment does not end it; unterminated does not panic
+        let nested = "import (\n\t/* // \"x/internal/auth\" */ \"a/db\"\n)";
+        assert_eq!(resolve_go(nested, &idx), vec![4]);
+        assert!(resolve_go("import (\n\t/* \"x/internal/auth\"\n", &idx).is_empty());
     }
 
     #[test]
