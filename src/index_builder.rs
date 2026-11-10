@@ -483,7 +483,8 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     dep_builder::build_deps(db.connection(), &file_paths)?;
     stats.deps_total = db
         .connection()
-        .query_row("SELECT COUNT(*) FROM deps", [], |row| row.get(0))?;
+        .query_row("SELECT COUNT(*) FROM deps", [], |row| row.get::<_, i64>(0))?
+        as usize;
 
     // --- Meta ---
     let repo_root = repo.root().to_string_lossy().to_string();
