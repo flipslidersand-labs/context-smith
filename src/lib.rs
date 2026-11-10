@@ -5,7 +5,10 @@ pub mod embed;
 pub mod index_builder;
 pub mod path_kind;
 pub mod search_index;
+pub mod select;
 pub mod tokenizer;
+
+pub use select::{select_candidates, SelectOptions};
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
