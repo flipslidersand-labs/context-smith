@@ -1,9 +1,6 @@
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-
-use crate::tokenizer::{tokenize_code, tokenize_path};
+use std::collections::HashSet;
 
 // BM25 signal weights (higher = stronger signal).
 // path: file-name/directory match is the strongest localization cue.
@@ -105,12 +102,15 @@ pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Resu
 
 /// Populate fts_path, fts_symbols and fts_body inside a single transaction.
 /// Clears all three tables atomically before rebuilding; rolls back on any error.
+#[cfg(test)]
 pub fn populate_fts_with_paths(
     conn: &Connection,
-    repo_root: &Path,
-    rel_file_paths: &HashMap<i64, PathBuf>,
-    abs_file_paths: &HashMap<i64, PathBuf>,
+    repo_root: &std::path::Path,
+    rel_file_paths: &std::collections::HashMap<i64, std::path::PathBuf>,
+    abs_file_paths: &std::collections::HashMap<i64, std::path::PathBuf>,
 ) -> Result<()> {
+    use crate::tokenizer::{tokenize_code, tokenize_path};
+
     let canonical_root = repo_root.canonicalize()?;
     conn.execute_batch("BEGIN")?;
     let result = (|| -> Result<()> {
@@ -250,6 +250,8 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
 mod tests {
     use super::*;
     use crate::index_builder::IndexDb;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
