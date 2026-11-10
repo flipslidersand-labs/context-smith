@@ -184,6 +184,7 @@ fn select_candidates(
     // Filter in the SQL query so we never fetch rows for unscored files,
     // avoiding the O(all-files) read_to_string that wastes RAM (#80).
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     {
         let conn = db.connection();
         // Collect only the file IDs that have a positive score; the DB query
@@ -218,6 +219,7 @@ fn select_candidates(
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs);
+                    unreadable.push(rel_path);
                     continue;
                 }
             };
@@ -230,6 +232,15 @@ fn select_candidates(
                 original_tokens: 0,
             });
         }
+    }
+
+    // Matches existed but none could be read: report it instead of returning
+    // an empty success that looks like "no match" (#286).
+    if candidates.is_empty() && !unreadable.is_empty() {
+        anyhow::bail!(
+            "matching files could not be read ({}); re-run `contextsmith index` to refresh the index",
+            unreadable.join(", ")
+        );
     }
 
     // Step 4: Greedy budget allocation
@@ -477,6 +488,16 @@ mod tests {
         let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn select_candidates_errors_when_all_matches_unreadable() {
+        let (t, repo, _d, db) = indexed_repo(&["a.rs"]);
+        std::fs::remove_file(t.path().join("a.rs")).unwrap();
+        let err = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("could not be read"), "msg: {msg}");
+        assert!(msg.contains("a.rs"), "msg: {msg}");
     }
 
     #[test]
