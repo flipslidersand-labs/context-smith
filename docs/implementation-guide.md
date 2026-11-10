@@ -46,7 +46,7 @@ contextsmith index --repo ./project
 ### 実装内容
 
 - `src/dep_builder.rs` — `use` / `import` 文を解析し `deps` テーブルに保存
-- `petgraph::DiGraph<FileId, ()>` で依存グラフを構築
+- 依存グラフは `deps` テーブルに保持し、SQL ベースの BFS (`bfs_expand`) で辿る
 - タスク関連ファイルを起点に BFS で依存先を展開
 
 ### 完成条件
