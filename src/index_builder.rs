@@ -972,8 +972,6 @@ mod tests {
         );
     }
 
-    /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
-    /// not leave the transaction open.
     #[test]
     fn build_index_reports_lock_when_another_index_holds_write_txn() {
         let (_tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
@@ -1007,6 +1005,8 @@ mod tests {
         assert!(err.contains("locked by another process"), "{err}");
     }
 
+    /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
+    /// not leave the transaction open.
     #[test]
     fn build_index_rolls_back_when_commit_fails() {
         let (_tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
@@ -1020,7 +1020,8 @@ mod tests {
                  BEGIN INSERT INTO fk_child VALUES (999); END;",
             )
             .unwrap();
-        assert!(build_index(&repo, &db, false).is_err());
+        let err = build_index(&repo, &db, false).unwrap_err().to_string();
+        assert!(!err.contains("locked by another process"), "{err}");
         assert!(db.connection().is_autocommit());
     }
 
