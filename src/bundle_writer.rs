@@ -556,7 +556,8 @@ mod tests {
         std::os::unix::fs::symlink(&missing, &out).unwrap();
 
         let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false);
-        assert!(r.is_err());
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("is a symlink"), "unexpected error: {msg}");
         assert!(!missing.exists());
     }
 
