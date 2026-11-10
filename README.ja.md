@@ -43,6 +43,7 @@ contextsmith index --repo ./my-project
 |---|---|---|
 | `--repo <PATH>` | 必須 | 対象リポジトリのパス |
 | `--out <PATH>` | `.contextsmith/index.db` | 出力先の上書き |
+| `--force` | off | 内容が変わっていないファイルも含めて全件再インデックス |
 
 ### 2. コンテキストバンドル生成
 
@@ -61,8 +62,10 @@ contextsmith build \
 | `--task <TEXT>` | 必須 | タスクの説明 |
 | `--budget <N>` | `30000` | トークン上限 |
 | `--out <PATH>` | `context.bundle` | 出力ディレクトリ |
+| `--index <PATH>` | `{repo}/.contextsmith/index.db` | インデックスパス上書き(`--out` で作った場合に指定) |
 | `--explain` | off | task.md に BM25 スコアを表示 |
 | `--diff-commits <N>` | `3` | 差分に含める直近コミット数 |
+| `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする(`remote-embed` feature 付きビルドでのみ有効) |
 
 ### バンドルの構造
 
@@ -94,8 +97,9 @@ contextsmith query --repo . --task "認証エラー" --format md --explain
 | `--format <json\|md>` | `json` | 出力フォーマット |
 | `--explain` | off | BM25 スコア表示（md のみ） |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | インデックスパス上書き |
+| `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする(`remote-embed` feature 付きビルドでのみ有効) |
 
-JSON 出力は `{ task, budget, used_tokens, files: [{ path, score, tokens }] }` 形式。
+JSON 出力は `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }` 形式。`truncated` は残り予算に収めるためファイルを切り詰めた場合に `true`。
 
 ## アーキテクチャ
 
@@ -104,7 +108,7 @@ contextsmith index          contextsmith build
       │                           │
       ▼                           ▼
  [GitRepo.scan()]         [search_bm25()]       ← FTS5 UNION ALL
- [SymbolExtractor]        [bfs_expand()]        ← petgraph BFS
+ [SymbolExtractor]        [bfs_expand()]        ← SQL ベース BFS
  [build_deps()]           [allocate()]          ← greedy budget
  [populate_fts()]         [write_bundle()]      ← Markdown + JSON
       │
@@ -135,6 +139,7 @@ contextsmith index          contextsmith build
 | Go | ✅ 関数/型/import | ✅ パッケージパス解決 |
 | TypeScript | ✅ 関数/クラス/interface/type/enum/arrow/import | ✅ ES import 相対パス解決(拡張子・index.ts 補完) |
 | JavaScript | ✅ 関数/クラス/arrow/import/require | ✅ ES import + CommonJS `require()` 相対パス解決 |
+| Ruby | ✅ class/module/method/require (`.rb`) | ❌ 未対応 |
 
 TypeScript は `.ts` / `.tsx` / `.mts` / `.cts`、JavaScript は `.js` / `.jsx` / `.mjs` / `.cjs` を対象とする。
 bare import(`react` など node_modules パッケージ)は依存グラフには含めない。
@@ -158,8 +163,8 @@ Rust の 5 リポでは、context-smith は素朴な単語一致を、4k(0.07〜
 | Phase | 内容 | 状態 |
 |---|---|---|
 | 1 | Git 走査・ファイル一覧取得 | ✅ |
-| 2 | Tree-sitter シンボル抽出 (Rust/Python/Go) | ✅ |
-| 3 | 依存グラフ構築 (petgraph BFS) | ✅ |
+| 2 | Tree-sitter シンボル抽出 (Rust/Python/Go/TS/JS) | ✅ |
+| 3 | 依存グラフ構築 (SQL ベース BFS) | ✅ |
 | 4 | BM25 全文検索 (SQLite FTS5) | ✅ |
 | 5 | 予算配分 + バンドル出力 | ✅ |
 | 6 | ローカル埋め込みモデル + RRF 統合 | 🔲 計画中 |
