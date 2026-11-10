@@ -1244,6 +1244,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_index_removes_deps_of_file_that_becomes_non_utf8() {
+        let (tmp, repo) = repo_with(&[
+            ("pkg/main.py", "from pkg import helper\n"),
+            ("pkg/helper.py", "def h():\n    pass\n"),
+            ("pkg/__init__.py", ""),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        let touching = "SELECT COUNT(*) FROM deps WHERE to_file = \
+             (SELECT id FROM files WHERE path='pkg/helper.py') \
+             OR from_file = (SELECT id FROM files WHERE path='pkg/helper.py')";
+        assert!(count(&db, touching) > 0, "precondition: edge to helper.py");
+        std::fs::write(tmp.path().join("pkg/helper.py"), [0xff, 0xfe, b'\n']).unwrap();
+        commit_existing(tmp.path(), &["pkg/helper.py"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, touching), 0);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM deps WHERE to_file NOT IN (SELECT id FROM files) \
+                 OR from_file NOT IN (SELECT id FROM files)"
+            ),
+            0
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn read_tracked_refuses_nested_dot_git() {
