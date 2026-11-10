@@ -1,6 +1,5 @@
-use anyhow::Context;
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Clap value_parser: reject empty strings early with a clear error message.
 fn non_empty_string(s: &str) -> Result<String, String> {
@@ -23,14 +22,11 @@ fn positive_usize(s: &str) -> Result<usize, String> {
     }
 }
 
-use context_smith::budget::{allocate, Candidate};
 use context_smith::bundle_writer::{render_task_md, write_bundle};
-use context_smith::dep_builder::bfs_expand;
 use context_smith::index_builder::{build_index, IndexDb};
-use context_smith::path_kind::path_score_factor;
-use context_smith::search_index::search_bm25;
+use context_smith::select_candidates;
 use context_smith::GitRepo;
-use rusqlite::OptionalExtension;
+use context_smith::SelectOptions;
 
 #[derive(Parser)]
 #[command(
@@ -115,139 +111,10 @@ enum QueryFormat {
     Md,
 }
 
-/// Compute seed files for a task. With the `remote-embed` feature and a
-/// configured embedder, RRF-fuse BM25 with semantic (vector) seeds; otherwise
-/// return the BM25 seeds unchanged (backward compatible).
-fn build_seeds(
-    conn: &rusqlite::Connection,
-    task: &str,
-    bm25: Vec<(i64, f32)>,
-    no_embed: bool,
-) -> anyhow::Result<Vec<(i64, f32)>> {
-    #[cfg(feature = "remote-embed")]
-    {
-        if !no_embed {
-            if let Some(embedder) = context_smith::embed::RemoteEmbedder::from_env() {
-                match context_smith::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, 20)
-                {
-                    Ok((seeds, fused)) => {
-                        if fused {
-                            eprintln!("semantic: RRF-fused BM25 with embedding seeds");
-                        } else {
-                            eprintln!("semantic: no usable embeddings; using BM25 seeds only");
-                        }
-                        return Ok(seeds);
-                    }
-                    Err(e) => {
-                        eprintln!("semantic: embedding failed ({e}); falling back to BM25")
-                    }
-                }
-            }
-        }
-    }
-    #[cfg(not(feature = "remote-embed"))]
-    let _ = (conn, task, no_embed);
-    Ok(bm25)
-}
-
-/// Run the selection pipeline for a task: BM25 (optionally RRF-fused with
-/// semantic seeds) → dependency BFS → load content → greedy budget allocation.
-/// Returns the selected candidates in score order, or an error when no files
-/// match (so the caller decides how to exit, preserving RAII drop order).
-fn select_candidates(
-    repo: &GitRepo,
-    db: &IndexDb,
-    task: &str,
-    budget: usize,
-    no_embed: bool,
-) -> anyhow::Result<Vec<Candidate>> {
-    // Step 1: BM25 search → top-20 seeds, optionally RRF-fused with semantic
-    // vectors. Fusion can surface files with zero lexical overlap, so the empty
-    // check happens after fusion (semantic may rescue an empty BM25).
-    let bm25 = search_bm25(db.connection(), task, 20)?;
-    let seeds = build_seeds(db.connection(), task, bm25, no_embed)?;
-    if seeds.is_empty() {
-        anyhow::bail!("No matching files found for task: {}", task);
-    }
-
-    // Step 2: BFS expand from seeds (depth=2)
-    let mut scored = bfs_expand(db.connection(), &seeds, 2)?;
-    for (fid, s) in &seeds {
-        scored
-            .entry(*fid)
-            .and_modify(|v| {
-                if *s > *v {
-                    *v = *s;
-                }
-            })
-            .or_insert(*s);
-    }
-
-    // Step 3: Load paths for scored files only, then read content.
-    // Filter in the SQL query so we never fetch rows for unscored files,
-    // avoiding the O(all-files) read_to_string that wastes RAM (#80).
-    let mut candidates: Vec<Candidate> = Vec::new();
-    let mut unreadable: Vec<String> = Vec::new();
-    {
-        let conn = db.connection();
-        // Collect only the file IDs that have a positive score; the DB query
-        // is restricted to this set so we read at most len(scored) rows.
-        let scored_ids: Vec<i64> = scored
-            .iter()
-            .filter_map(|(&id, &s)| if s > 0.0 { Some(id) } else { None })
-            .collect();
-
-        for file_id in scored_ids {
-            let rel_path: String = {
-                let mut stmt = conn
-                    .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
-                // Only "no row" (unscored/unknown-lang file) is expected; any
-                // other DB error must propagate rather than drop candidates.
-                match stmt
-                    .query_row([file_id], |row| row.get(0))
-                    .optional()
-                    .with_context(|| {
-                        format!(
-                            "failed to read files row id={file_id} from index \
-                             (rebuild with `contextsmith index --force`)"
-                        )
-                    })? {
-                    Some(p) => p,
-                    None => continue,
-                }
-            };
-            let score = scored[&file_id] * path_score_factor(&rel_path);
-            let abs = repo.root().join(&rel_path);
-            let content = match repo.read_tracked(Path::new(&rel_path)) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("warn: skip {:?}: {e}", abs);
-                    unreadable.push(rel_path);
-                    continue;
-                }
-            };
-            candidates.push(Candidate {
-                file_id,
-                path: PathBuf::from(rel_path),
-                score,
-                content,
-                truncated: false,
-                original_tokens: 0,
-            });
-        }
-    }
-
-    // Matches existed but none could be read: report it instead of returning
-    // an empty success that looks like "no match" (#286).
-    if candidates.is_empty() && !unreadable.is_empty() {
-        anyhow::bail!(
-            "matching files could not be read ({}); re-run `contextsmith index` to refresh the index",
-            unreadable.join(", ")
-        );
-    }
-
-    // Step 4: Greedy budget allocation
-    Ok(allocate(candidates, budget))
+fn opts(budget: usize, no_embed: bool) -> SelectOptions {
+    let mut o = SelectOptions::new(budget);
+    o.no_embed = no_embed;
+    o
 }
 
 /// Resolve the index db path for a repo, erroring if it does not exist.
@@ -333,7 +200,7 @@ fn main() -> anyhow::Result<()> {
             let db_path = resolve_index_path(&repo, index)?;
             let db = IndexDb::open_for_read(&db_path)?;
 
-            let selected = select_candidates(&repo, &db, &task, budget, no_embed)?;
+            let selected = select_candidates(&repo, &db, &task, &opts(budget, no_embed))?;
 
             // Recent diff, then write the bundle to disk.
             let diff_summary = match repo.recent_diff(diff_commits) {
@@ -369,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             let db_path = resolve_index_path(&repo, index)?;
             let db = IndexDb::open_for_read(&db_path)?;
 
-            let selected = select_candidates(&repo, &db, &task, budget, no_embed)?;
+            let selected = select_candidates(&repo, &db, &task, &opts(budget, no_embed))?;
             let used: usize = selected.iter().map(|c| c.tokens()).sum();
 
             match format {
@@ -407,6 +274,7 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use context_smith::index_builder::build_index;
+    use std::path::Path;
 
     #[test]
     fn select_candidates_ignores_file_swapped_for_external_symlink_after_index() {
@@ -434,7 +302,7 @@ mod tests {
         std::fs::remove_file(tmp.path().join("a.rs")).unwrap();
         std::os::unix::fs::symlink(&ext, tmp.path().join("a.rs")).unwrap();
 
-        if let Ok(sel) = select_candidates(&repo, &db, "alpha_widget", 10_000, true) {
+        if let Ok(sel) = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)) {
             assert!(sel.iter().all(|c| !c.content.contains("EXTSECRET")));
         }
     }
@@ -465,7 +333,7 @@ mod tests {
         db.connection()
             .execute_batch("UPDATE files SET path = CAST(path AS BLOB)")
             .unwrap();
-        let res = select_candidates(&repo, &db, "alpha_widget", 10_000, true);
+        let res = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true));
         assert!(res.is_err(), "non-NoRows DB error must not be swallowed");
     }
 
@@ -475,7 +343,7 @@ mod tests {
         db.connection()
             .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM files WHERE path = 'b.rs'")
             .unwrap();
-        let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
@@ -488,7 +356,7 @@ mod tests {
             .execute("UPDATE files SET lang = 'unknown' WHERE path = 'b.rs'", [])
             .unwrap();
         assert_eq!(n, 1);
-        let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
@@ -497,7 +365,7 @@ mod tests {
     fn select_candidates_errors_when_all_matches_unreadable() {
         let (t, repo, _d, db) = indexed_repo(&["a.rs"]);
         std::fs::remove_file(t.path().join("a.rs")).unwrap();
-        let err = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap_err();
+        let err = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("could not be read"), "msg: {msg}");
         assert!(msg.contains("a.rs"), "msg: {msg}");
@@ -508,7 +376,7 @@ mod tests {
         let (t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
         // Vanishes after indexing: the read fails and only b.rs is skipped.
         std::fs::remove_file(t.path().join("b.rs")).unwrap();
-        let sel = select_candidates(&repo, &db, "alpha_widget", 10_000, true).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
