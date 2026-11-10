@@ -71,7 +71,7 @@ Writes the bundle to the `context.bundle/` directory.
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override (use when the index was built with `--out`) |
 | `--explain` | off | Show BM25 scores in `task.md` |
 | `--diff-commits <N>` | `3` | Number of recent commits to include in the diff |
-| `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only |
+| `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 
 ### Bundle layout
 
@@ -103,7 +103,7 @@ contextsmith query --repo . --task "auth error" --format md --explain
 | `--format <json\|md>` | `json` | Output format |
 | `--explain` | off | Show BM25 scores (md format only) |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override |
-| `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only |
+| `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 
 The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }`. `truncated` is `true` when the file was cut to fit the remaining budget.
 
@@ -145,7 +145,7 @@ contextsmith index          contextsmith build
 | Go | ✅ functions/types/import | ✅ package path resolution |
 | TypeScript | ✅ functions/classes/interface/type/enum/arrow/import | ✅ ES import relative-path resolution (extension & `index.ts` inference) |
 | JavaScript | ✅ functions/classes/arrow/import/require | ✅ ES import + CommonJS `require()` relative-path resolution |
-| Ruby | ✅ class/module/method/constant (`.rb`) | ❌ not supported |
+| Ruby | ✅ class/module/method/require (`.rb`) | ❌ not supported |
 
 TypeScript targets `.ts` / `.tsx` / `.mts` / `.cts`; JavaScript targets `.js` / `.jsx` / `.mjs` / `.cjs`.
 Bare imports (node_modules packages such as `react`) are excluded from the dependency graph.

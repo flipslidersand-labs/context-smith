@@ -13,7 +13,6 @@
 | `tree-sitter-rust`     | 0.21       | Rust 文法                      | tree-sitter の言語グラマー                      |
 | `tree-sitter-python`   | 0.21       | Python 文法                    | 同上                                            |
 | `tantivy`              | 0.21       | BM25 全文検索インデックス      | Rust ネイティブ・Lucene 相当の機能              |
-| `petgraph`             | 0.6        | 依存グラフ + BFS/DFS           | R2 DeltaForge と共通パターン                    |
 | `rusqlite`             | 0.31       | シンボル・インデックスの永続化 | ファイル1つで完結                               |
 | `serde` / `serde_json` | 1          | citations.json・グラフ出力     | derive で簡潔                                   |
 | `clap`                 | 4          | CLI                            | derive マクロ                                   |
@@ -25,12 +24,12 @@
 contextsmith index
   ├── GitWalker (git2)       全ファイルの blob を取得
   ├── SymbolExtractor (tree-sitter)  関数・型・import を抽出
-  ├── DependencyBuilder (petgraph)   import 関係を有向グラフ化
+  ├── DependencyBuilder (rusqlite)   import 関係を deps テーブルに保存
   └── Indexer (tantivy + rusqlite)   BM25 インデックス + シンボル DB 構築
 
 contextsmith build --task "..." --budget N
   ├── Retriever (tantivy)    BM25 でタスク関連ファイルをランキング
-  ├── GraphExpander (petgraph) 上位ファイルの依存を BFS 展開
+  ├── GraphExpander (SQL)    上位ファイルの依存を BFS 展開
   ├── BudgetAllocator        トークン数を計算しグリーディー選択
   └── BundleWriter           Markdown + citations.json 出力
 ```

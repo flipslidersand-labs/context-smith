@@ -65,7 +65,7 @@ contextsmith build \
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | インデックスパス上書き(`--out` で作った場合に指定) |
 | `--explain` | off | task.md に BM25 スコアを表示 |
 | `--diff-commits <N>` | `3` | 差分に含める直近コミット数 |
-| `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする |
+| `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする(`remote-embed` feature 付きビルドでのみ有効) |
 
 ### バンドルの構造
 
@@ -97,7 +97,7 @@ contextsmith query --repo . --task "認証エラー" --format md --explain
 | `--format <json\|md>` | `json` | 出力フォーマット |
 | `--explain` | off | BM25 スコア表示（md のみ） |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | インデックスパス上書き |
-| `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする |
+| `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする(`remote-embed` feature 付きビルドでのみ有効) |
 
 JSON 出力は `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }` 形式。`truncated` は残り予算に収めるためファイルを切り詰めた場合に `true`。
 
@@ -139,7 +139,7 @@ contextsmith index          contextsmith build
 | Go | ✅ 関数/型/import | ✅ パッケージパス解決 |
 | TypeScript | ✅ 関数/クラス/interface/type/enum/arrow/import | ✅ ES import 相対パス解決(拡張子・index.ts 補完) |
 | JavaScript | ✅ 関数/クラス/arrow/import/require | ✅ ES import + CommonJS `require()` 相対パス解決 |
-| Ruby | ✅ class/module/method/定数 (`.rb`) | ❌ 未対応 |
+| Ruby | ✅ class/module/method/require (`.rb`) | ❌ 未対応 |
 
 TypeScript は `.ts` / `.tsx` / `.mts` / `.cts`、JavaScript は `.js` / `.jsx` / `.mjs` / `.cjs` を対象とする。
 bare import(`react` など node_modules パッケージ)は依存グラフには含めない。
