@@ -73,7 +73,7 @@ context.bundle/
 | ------- | --------------------------------------------------------------- |
 | Phase 1 | `git2` でリポジトリを走査しファイル一覧と HEAD 差分を取得       |
 | Phase 2 | Tree-sitter で Rust / Python のシンボルを抽出し SQLite に保存   |
-| Phase 3 | 依存グラフ (petgraph) を構築しタスク起点で BFS 展開             |
+| Phase 3 | 依存グラフ (SQLite の deps テーブル) を構築しタスク起点で BFS 展開  |
 | Phase 4 | BM25 スコアリングでファイルをランキング                         |
 | Phase 5 | `--budget N` 内に収めるグリーディー選択 + Markdown バンドル出力 |
 | Phase 6 | ローカル埋め込みモデルでベクトル検索を追加し BM25 と RRF で統合 |
