@@ -162,6 +162,21 @@ pub(crate) fn safe_fence(content: &str) -> String {
     "`".repeat(len)
 }
 
+/// Write `contents` to `path`, refusing if `path` is a symlink (dangling or not).
+///
+/// Limitation: the check (`symlink_metadata`) and the write are separate steps, so a
+/// concurrent attacker could swap in a symlink in between (TOCTOU). Closing that needs
+/// `O_NOFOLLOW`, which requires a `libc` dependency.
+fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("{} is a symlink; refusing to write bundle", path.display());
+        }
+    }
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
 /// Write a context bundle to `out_dir`.
 ///
 /// Layout:
@@ -202,7 +217,7 @@ pub fn write_bundle(
     std::fs::create_dir_all(&rc_dir)?;
 
     let task_md = render_task_md(task, budget, selected, diff_summary, explain);
-    std::fs::write(out_dir.join("task.md"), &task_md)?;
+    write_file_no_symlink(&out_dir.join("task.md"), &task_md)?;
 
     // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
@@ -231,10 +246,7 @@ pub fn write_bundle(
         if let Some(note) = truncation_note(c) {
             file_md.push_str(&format!("\n{note}\n"));
         }
-        std::fs::write(
-            out_dir.join("relevant-code").join(format!("{slug}.md")),
-            file_md,
-        )?;
+        write_file_no_symlink(&rc_dir.join(format!("{slug}.md")), &file_md)?;
     }
 
     // citations.json
@@ -249,7 +261,7 @@ pub fn write_bundle(
         })
         .collect();
     let json = serde_json::to_string_pretty(&citations)?;
-    std::fs::write(out_dir.join("citations.json"), json)?;
+    write_file_no_symlink(&out_dir.join("citations.json"), &json)?;
 
     Ok(())
 }
@@ -450,6 +462,61 @@ mod tests {
             victim.join("a.md").exists(),
             "symlink target must be untouched"
         );
+    }
+
+    #[cfg(unix)]
+    fn assert_symlinked_output_rejected(name: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let external = tmp.path().join("external.txt");
+        std::fs::write(&external, "precious").unwrap();
+        let out = tmp.path().join("bundle");
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&external, out.join(name)).unwrap();
+
+        let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false);
+        let err = r.expect_err("symlinked output file must be rejected");
+        assert!(err.to_string().contains("is a symlink"), "{err}");
+        assert_eq!(std::fs::read_to_string(&external).unwrap(), "precious");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_rejects_symlinked_task_md() {
+        assert_symlinked_output_rejected("task.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_rejects_symlinked_citations_json() {
+        assert_symlinked_output_rejected("citations.json");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_rejects_dangling_symlinked_task_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing.txt");
+        let out = tmp.path().join("bundle");
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&missing, out.join("task.md")).unwrap();
+
+        let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false);
+        assert!(r.is_err());
+        assert!(!missing.exists(), "dangling target must not be created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_symlinked_out_dir_is_followed_today() {
+        // Documents current behavior (not a spec): --out itself being a symlink is followed.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let out = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &out).unwrap();
+
+        write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false).unwrap();
+        assert!(real.join("task.md").exists());
     }
 
     #[test]
