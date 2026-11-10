@@ -357,6 +357,11 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
+                    // Drop stale rows (symbols/FTS/deps/embeddings/files) so
+                    // search never returns content we can no longer read; the
+                    // file is re-attempted on the next run (#286).
+                    db.delete_file_records(file_id)?;
+                    file_paths.remove(&file_id);
                     stats.files_skipped += 1;
                     continue;
                 }
@@ -1193,6 +1198,77 @@ mod tests {
         let files = repo.scan().unwrap();
         assert!(files.iter().any(|(rel, ..)| rel == Path::new("ok.rs")));
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn build_index_drops_stale_rows_when_file_becomes_non_utf8() {
+        let (tmp, repo) = repo_with(&[
+            ("a.rs", "pub fn stale_marker() {}\n"),
+            ("ok.rs", "fn ok() {}\n"),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name='stale_marker'"
+            ),
+            1
+        );
+        db.connection()
+            .execute(
+                "INSERT INTO embeddings (file_id, vector, content_sha) \
+                 SELECT id, x'00000000', 'x' FROM files WHERE path='a.rs'",
+                [],
+            )
+            .unwrap();
+        std::fs::write(tmp.path().join("a.rs"), [0xff, 0xfe, 0xfd, b'\n']).unwrap();
+        commit_existing(tmp.path(), &["a.rs"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "stale_marker");
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_path WHERE file_id NOT IN (SELECT id FROM files)"
+            ),
+            0
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM embeddings"), 0);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='a.rs'"),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='ok.rs'"),
+            1
+        );
+    }
+
+    #[test]
+    fn build_index_removes_deps_of_file_that_becomes_non_utf8() {
+        let (tmp, repo) = repo_with(&[
+            ("pkg/main.py", "from pkg import helper\n"),
+            ("pkg/helper.py", "def h():\n    pass\n"),
+            ("pkg/__init__.py", ""),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        let touching = "SELECT COUNT(*) FROM deps WHERE to_file = \
+             (SELECT id FROM files WHERE path='pkg/helper.py') \
+             OR from_file = (SELECT id FROM files WHERE path='pkg/helper.py')";
+        assert!(count(&db, touching) > 0, "precondition: edge to helper.py");
+        std::fs::write(tmp.path().join("pkg/helper.py"), [0xff, 0xfe, b'\n']).unwrap();
+        commit_existing(tmp.path(), &["pkg/helper.py"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, touching), 0);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM deps WHERE to_file NOT IN (SELECT id FROM files) \
+                 OR from_file NOT IN (SELECT id FROM files)"
+            ),
+            0
+        );
     }
 
     #[cfg(unix)]
