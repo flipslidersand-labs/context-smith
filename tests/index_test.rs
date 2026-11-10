@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use context_smith::index_builder::{build_index, IndexDb};
 use context_smith::GitRepo;
+use context_smith::{build_index, IndexDb};
 
 /// Build a full index over a temp git repo and return (tempdir, IndexDb, db path).
 /// The tempdir must be kept alive for the DB paths to remain valid.
@@ -242,7 +242,7 @@ fn index_command_creates_db() {
     let repo = GitRepo::new(&repo_dir).unwrap();
     let db_path = tmp.path().join("index.db");
 
-    use context_smith::index_builder::{build_index, IndexDb};
+    use context_smith::{build_index, IndexDb};
     let db = IndexDb::open(&db_path).unwrap();
     let stats = build_index(&repo, &db, false).unwrap();
 
