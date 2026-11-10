@@ -49,6 +49,7 @@ to share it with your team.
 |---|---|---|
 | `--repo <PATH>` | required | Path to the target repository |
 | `--out <PATH>` | `.contextsmith/index.db` | Override the output location |
+| `--force` | off | Force a full re-index even for files whose content has not changed |
 
 ### 2. Generate a context bundle
 
@@ -67,8 +68,10 @@ Writes the bundle to the `context.bundle/` directory.
 | `--task <TEXT>` | required | Task description |
 | `--budget <N>` | `30000` | Token limit |
 | `--out <PATH>` | `context.bundle` | Output directory |
+| `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override (use when the index was built with `--out`) |
 | `--explain` | off | Show BM25 scores in `task.md` |
 | `--diff-commits <N>` | `3` | Number of recent commits to include in the diff |
+| `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only |
 
 ### Bundle layout
 
@@ -100,8 +103,9 @@ contextsmith query --repo . --task "auth error" --format md --explain
 | `--format <json\|md>` | `json` | Output format |
 | `--explain` | off | Show BM25 scores (md format only) |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override |
+| `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only |
 
-The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens }] }`.
+The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }`. `truncated` is `true` when the file was cut to fit the remaining budget.
 
 ## Architecture
 
@@ -110,7 +114,7 @@ contextsmith index          contextsmith build
       │                           │
       ▼                           ▼
  [GitRepo.scan()]         [search_bm25()]       ← FTS5 UNION ALL
- [SymbolExtractor]        [bfs_expand()]        ← petgraph BFS
+ [SymbolExtractor]        [bfs_expand()]        ← SQL-based BFS
  [build_deps()]           [allocate()]          ← greedy budget
  [populate_fts()]         [write_bundle()]      ← Markdown + JSON
       │
@@ -141,6 +145,7 @@ contextsmith index          contextsmith build
 | Go | ✅ functions/types/import | ✅ package path resolution |
 | TypeScript | ✅ functions/classes/interface/type/enum/arrow/import | ✅ ES import relative-path resolution (extension & `index.ts` inference) |
 | JavaScript | ✅ functions/classes/arrow/import/require | ✅ ES import + CommonJS `require()` relative-path resolution |
+| Ruby | ✅ class/module/method/constant (`.rb`) | ❌ not supported |
 
 TypeScript targets `.ts` / `.tsx` / `.mts` / `.cts`; JavaScript targets `.js` / `.jsx` / `.mjs` / `.cjs`.
 Bare imports (node_modules packages such as `react`) are excluded from the dependency graph.
@@ -165,7 +170,7 @@ On the five Rust repositories context-smith is ahead of naive keyword matching a
 |---|---|---|
 | 1 | Git scan / file listing | ✅ |
 | 2 | Tree-sitter symbol extraction (Rust/Python/Go/TS/JS) | ✅ |
-| 3 | Dependency graph construction (petgraph BFS) | ✅ |
+| 3 | Dependency graph construction (SQL-based BFS) | ✅ |
 | 4 | BM25 full-text search (SQLite FTS5) | ✅ |
 | 5 | Budget allocation + bundle output | ✅ |
 | 6 | Local embedding model + RRF fusion | 🔲 planned |
