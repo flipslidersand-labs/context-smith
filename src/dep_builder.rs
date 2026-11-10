@@ -119,18 +119,11 @@ fn resolve_ts_js(
     let base_dir = from_path.parent().unwrap_or(Path::new(""));
     let joined = normalize_path(&base_dir.join(&spec));
 
-    // #87: Guard against `..` traversal escaping the repo root.
-    // The repo root is the first non-RootDir/Prefix component's ancestor, which
-    // for relative paths stored in the index is simply "". Paths that still
-    // start with ".." after normalisation have escaped the root.
-    if joined
-        .components()
-        .next()
-        .map(|c| c.as_os_str() == "..")
-        .unwrap_or(false)
-    {
-        return vec![];
-    }
+    // #87/#297: `normalize_path` returns None when `..` climbs above the repo root.
+    let joined = match joined {
+        Some(p) => p,
+        None => return vec![],
+    };
 
     // Try the specifier as-is (it may already carry an extension), then common
     // TS/JS source extensions and directory index files.
@@ -232,20 +225,23 @@ fn extract_module_specifier(s: &str) -> Option<String> {
 }
 
 /// Collapse `.` and `..` segments in a path lexically (no filesystem access),
-/// so `a/./b/../c` becomes `a/c`.
-fn normalize_path(path: &Path) -> PathBuf {
+/// so `a/./b/../c` becomes `a/c`. Returns `None` if a `..` climbs above the
+/// start of a relative path (i.e. escapes the repo root).
+fn normalize_path(path: &Path) -> Option<PathBuf> {
     use std::path::Component;
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
             Component::CurDir => {}
             Component::ParentDir => {
-                out.pop();
+                if !out.pop() {
+                    return None;
+                }
             }
             other => out.push(other.as_os_str()),
         }
     }
-    out
+    Some(out)
 }
 
 /// Expand grouped Rust use paths: "crate::{a, b}" → ["crate::a", "crate::b"]
@@ -874,9 +870,10 @@ mod tests {
     fn normalize_path_collapses_dots() {
         assert_eq!(
             normalize_path(Path::new("a/./b/../c")),
-            PathBuf::from("a/c")
+            Some(PathBuf::from("a/c"))
         );
-        assert_eq!(normalize_path(Path::new("../x")), PathBuf::from("x"));
+        assert_eq!(normalize_path(Path::new("../x")), None);
+        assert_eq!(normalize_path(Path::new("a/../../b")), None);
     }
 
     #[test]
@@ -1066,6 +1063,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ts_js_root_escape_does_not_hit_repo_file() {
+        // #297: escaping above the repo root must not resolve to an in-repo `etc/x.ts`.
+        let map = ids(&[("etc/x.ts", 1), ("b.ts", 2), ("src/x.ts", 3), ("a.ts", 4)]);
+        let from = Path::new("src/x.ts");
+        assert!(resolve_ts_js("import x from '../../../etc/x'", from, &map).is_empty());
+        assert!(resolve_ts_js("import b from '../../b'", from, &map).is_empty());
+        // From a root-level file, any `..` escapes.
+        assert!(resolve_ts_js("import x from '../etc/x'", Path::new("a.ts"), &map).is_empty());
+        // Staying exactly at the root still resolves.
+        assert_eq!(resolve_ts_js("import b from '../b'", from, &map), vec![2]);
+    }
+
+    #[test]
     fn resolve_ts_js_esm_js_extension_maps_to_ts_sources() {
         let map = ids(&[
             ("src/a.ts", 1),
@@ -1159,13 +1169,13 @@ mod tests {
 
     #[test]
     fn normalize_path_edge_cases() {
-        assert_eq!(normalize_path(Path::new("./")), PathBuf::new());
-        assert_eq!(normalize_path(Path::new(".")), PathBuf::new());
-        assert_eq!(normalize_path(Path::new("")), PathBuf::new());
-        assert_eq!(normalize_path(Path::new("./a")), PathBuf::from("a"));
+        assert_eq!(normalize_path(Path::new("./")), Some(PathBuf::new()));
+        assert_eq!(normalize_path(Path::new(".")), Some(PathBuf::new()));
+        assert_eq!(normalize_path(Path::new("")), Some(PathBuf::new()));
+        assert_eq!(normalize_path(Path::new("./a")), Some(PathBuf::from("a")));
         // excess `..` is swallowed at the root, not kept
-        assert_eq!(normalize_path(Path::new("a/../../b")), PathBuf::from("b"));
-        assert_eq!(normalize_path(Path::new("a/..")), PathBuf::new());
+        assert_eq!(normalize_path(Path::new("a/../../b")), None);
+        assert_eq!(normalize_path(Path::new("a/..")), Some(PathBuf::new()));
     }
 
     #[test]
