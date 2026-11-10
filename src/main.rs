@@ -47,6 +47,7 @@ struct Cli {
 enum Command {
     /// Build index for a repository (saved to {repo}/.contextsmith/index.db)
     Index {
+        /// Path to the target Git repository
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
         /// Override the default output path (.contextsmith/index.db inside the repo)
@@ -58,6 +59,7 @@ enum Command {
     },
     /// Build a context bundle for a task
     Build {
+        /// Path to the target Git repository
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
         /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
@@ -84,6 +86,7 @@ enum Command {
     /// Designed for scripts and pipelines: `--format json` for machine-readable
     /// output, `--format md` for the task.md-style summary.
     Query {
+        /// Path to the target Git repository
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
         /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
