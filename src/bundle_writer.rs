@@ -164,16 +164,27 @@ pub(crate) fn safe_fence(content: &str) -> String {
 
 /// Write `contents` to `path`, refusing if `path` is a symlink (dangling or not).
 ///
-/// Limitation: the check (`symlink_metadata`) and the write are separate steps, so a
-/// concurrent attacker could swap in a symlink in between (TOCTOU). Closing that needs
-/// `O_NOFOLLOW`, which requires a `libc` dependency.
+/// An existing regular file is removed first and the new one is opened with `create_new`
+/// (`O_EXCL`), which fails instead of following a link swapped in after the check.
+/// Remaining limitations: a concurrent attacker can still win a race on the parent
+/// directory, and hard links are not detected (both need a local writer).
 fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
             anyhow::bail!("{} is a symlink; refusing to write bundle", path.display());
         }
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
     }
-    std::fs::write(path, contents)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(contents.as_bytes())?;
     Ok(())
 }
 
@@ -192,6 +203,17 @@ pub fn write_bundle(
     out_dir: &Path,
     explain: bool,
 ) -> Result<()> {
+    // Refuse a symlinked --out (final component only; parents may legitimately be links,
+    // e.g. /tmp on macOS). `components()` drops a trailing slash so `link/` is checked too.
+    let out_checked: std::path::PathBuf = out_dir.components().collect();
+    if let Ok(meta) = std::fs::symlink_metadata(&out_checked) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink; refusing to write bundle (pass the real path to --out instead)",
+                out_dir.display()
+            );
+        }
+    }
     std::fs::create_dir_all(out_dir)?;
     let rc_dir = out_dir.join("relevant-code");
     // Refuse to follow a symlinked relevant-code/ (never delete outside out_dir).
@@ -507,16 +529,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn write_bundle_symlinked_out_dir_is_followed_today() {
-        // Documents current behavior (not a spec): --out itself being a symlink is followed.
+    fn write_bundle_rejects_symlinked_out_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().join("real");
         std::fs::create_dir_all(&real).unwrap();
         let out = tmp.path().join("link");
         std::os::unix::fs::symlink(&real, &out).unwrap();
 
-        write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false).unwrap();
-        assert!(real.join("task.md").exists());
+        for target in [out.clone(), tmp.path().join("link/")] {
+            let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &target, false);
+            let err = r.expect_err("symlinked --out must be rejected");
+            assert!(err.to_string().contains("is a symlink"), "{err}");
+            assert!(err.to_string().contains("real path"), "{err}");
+        }
+        assert!(!real.join("task.md").exists());
+        assert!(!real.join("relevant-code").exists());
+        assert!(!real.join("citations.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_bundle_rejects_dangling_symlinked_out_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let out = tmp.path().join("link");
+        std::os::unix::fs::symlink(&missing, &out).unwrap();
+
+        let r = write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false);
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("is a symlink"), "unexpected error: {msg}");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn write_file_no_symlink_replaces_existing_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("f.txt");
+        std::fs::write(&p, "old old old").unwrap();
+        write_file_no_symlink(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
     }
 
     #[test]
