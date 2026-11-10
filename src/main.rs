@@ -22,11 +22,9 @@ fn positive_usize(s: &str) -> Result<usize, String> {
     }
 }
 
-use context_smith::bundle_writer::{render_task_md, write_bundle};
-use context_smith::index_builder::{build_index, IndexDb};
-use context_smith::select_candidates;
-use context_smith::GitRepo;
-use context_smith::SelectOptions;
+use context_smith::{
+    build_index, render_task_md, select_candidates, write_bundle, GitRepo, IndexDb, SelectOptions,
+};
 
 #[derive(Parser)]
 #[command(
@@ -168,18 +166,9 @@ fn main() -> anyhow::Result<()> {
             // Optional: generate semantic embeddings via the remote embedding
             // service. Non-fatal — a failure here leaves the BM25 index usable.
             #[cfg(feature = "remote-embed")]
-            match context_smith::embed::RemoteEmbedder::from_env() {
-                Some(embedder) => {
-                    match context_smith::embed::populate_embeddings(
-                        db.connection(),
-                        repo.root(),
-                        &embedder,
-                        &db,
-                    ) {
-                        Ok(n) => println!("embeddings: {n} files (remote-embed)"),
-                        Err(e) => eprintln!("warning: embedding generation failed: {e}"),
-                    }
-                }
+            match context_smith::embed_index(&repo, &db) {
+                Some(Ok(n)) => println!("embeddings: {n} files (remote-embed)"),
+                Some(Err(e)) => eprintln!("warning: embedding generation failed: {e}"),
                 None => eprintln!(
                     "note: remote-embed built but EMBEDDING_SVC_URL unset; skipping embeddings"
                 ),
@@ -273,7 +262,6 @@ fn main() -> anyhow::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use context_smith::index_builder::build_index;
     use std::path::Path;
 
     #[test]
@@ -327,10 +315,14 @@ mod tests {
         (tmp, repo, dbdir, db)
     }
 
+    fn conn_of(dbdir: &tempfile::TempDir) -> rusqlite::Connection {
+        rusqlite::Connection::open(dbdir.path().join("i.db")).unwrap()
+    }
+
     #[test]
     fn select_candidates_propagates_files_query_error() {
-        let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
-        db.connection()
+        let (_t, repo, d, db) = indexed_repo(&["a.rs"]);
+        conn_of(&d)
             .execute_batch("UPDATE files SET path = CAST(path AS BLOB)")
             .unwrap();
         let res = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true));
@@ -339,8 +331,8 @@ mod tests {
 
     #[test]
     fn select_candidates_skips_candidate_with_no_files_row() {
-        let (_t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
-        db.connection()
+        let (_t, repo, d, db) = indexed_repo(&["a.rs", "b.rs"]);
+        conn_of(&d)
             .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM files WHERE path = 'b.rs'")
             .unwrap();
         let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
@@ -350,9 +342,8 @@ mod tests {
 
     #[test]
     fn select_candidates_excludes_unknown_lang_files() {
-        let (_t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
-        let n = db
-            .connection()
+        let (_t, repo, d, db) = indexed_repo(&["a.rs", "b.rs"]);
+        let n = conn_of(&d)
             .execute("UPDATE files SET lang = 'unknown' WHERE path = 'b.rs'", [])
             .unwrap();
         assert_eq!(n, 1);

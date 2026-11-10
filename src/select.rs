@@ -160,3 +160,15 @@ pub fn select_candidates(
     // Step 4: Greedy budget allocation
     Ok(allocate(candidates, opts.budget))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SelectOptions;
+
+    #[test]
+    fn select_options_new_enables_embedding_by_default() {
+        let o = SelectOptions::new(1234);
+        assert_eq!(o.budget, 1234);
+        assert!(!o.no_embed);
+    }
+}

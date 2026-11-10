@@ -264,11 +264,30 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
 /// reason while still giving RRF plenty of candidates to fuse.
 const SEARCH_VECTORS_MAX: usize = 3_000;
 
+/// Generate embeddings for the indexed files via the remote embedding service.
+///
+/// Returns `None` when `EMBEDDING_SVC_URL` is not configured (nothing was
+/// attempted), otherwise the number of files embedded or the failure.
+#[cfg(feature = "remote-embed")]
+pub fn embed_index(
+    repo: &crate::GitRepo,
+    db: &crate::index_builder::IndexDb,
+) -> Option<Result<usize>> {
+    let embedder = RemoteEmbedder::from_env()?;
+    Some(populate_embeddings(
+        db.connection(),
+        repo.root(),
+        &embedder,
+        db,
+    ))
+}
+
 /// Fuse BM25 seeds with vector-search seeds via RRF.
 ///
 /// Embeds the task (prefixed `query: ` for e5), ranks stored vectors, and RRF-
 /// fuses that ranking with `bm25`. If no embeddings are stored, returns the
 /// BM25 seeds unchanged so the caller stays backward compatible.
+#[cfg(test)]
 pub fn fuse_seeds(
     conn: &Connection,
     embedder: &dyn Embedder,

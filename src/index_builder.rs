@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::dep_builder;
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
+#[non_exhaustive]
 pub struct IndexDb {
     conn: Connection,
 }
@@ -60,7 +61,7 @@ impl IndexDb {
 
     /// Open an in-memory database; intended for tests only.
     #[cfg(test)]
-    pub fn open_in_memory() -> Result<Self> {
+    pub(crate) fn open_in_memory() -> Result<Self> {
         let conn =
             Connection::open_in_memory().with_context(|| "Failed to open in-memory SQLite")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")
@@ -68,11 +69,11 @@ impl IndexDb {
         Ok(IndexDb { conn })
     }
 
-    pub fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &Connection {
         &self.conn
     }
 
-    pub fn init_schema(&self) -> Result<()> {
+    pub(crate) fn init_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS files (
                 id          INTEGER PRIMARY KEY,
@@ -147,7 +148,7 @@ impl IndexDb {
 
     /// Return `(file_id, path, blob_sha)` for files that need (re-)embedding:
     /// those where no embedding exists yet, or where `content_sha != blob_sha`.
-    pub fn files_needing_embed(&self) -> Result<Vec<(i64, String, String)>> {
+    pub(crate) fn files_needing_embed(&self) -> Result<Vec<(i64, String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT f.id, f.path, f.blob_sha
              FROM files f
@@ -170,7 +171,7 @@ impl IndexDb {
     /// Upsert a file record and return `(file_id, sha_changed)`.
     /// `sha_changed` is true when `indexed_sha IS NULL OR indexed_sha != blob_sha`,
     /// meaning the file needs to be re-indexed.
-    pub fn upsert_file(
+    pub(crate) fn upsert_file(
         &self,
         path: &Path,
         lang: Language,
@@ -200,7 +201,7 @@ impl IndexDb {
     }
 
     /// Mark a file as fully indexed by setting indexed_sha = blob_sha.
-    pub fn mark_indexed(&self, file_id: i64) -> Result<()> {
+    pub(crate) fn mark_indexed(&self, file_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE files SET indexed_sha = blob_sha WHERE id = ?1",
             params![file_id],
@@ -208,13 +209,13 @@ impl IndexDb {
         Ok(())
     }
 
-    pub fn delete_symbols_for(&self, file_id: i64) -> Result<()> {
+    pub(crate) fn delete_symbols_for(&self, file_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])?;
         Ok(())
     }
 
-    pub fn insert_symbol(&self, sym: &Symbol) -> Result<()> {
+    pub(crate) fn insert_symbol(&self, sym: &Symbol) -> Result<()> {
         self.conn.execute(
             "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -228,13 +229,14 @@ impl IndexDb {
         Ok(())
     }
 
-    pub fn delete_deps_from(&self, file_id: i64) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn delete_deps_from(&self, file_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM deps WHERE from_file = ?1", params![file_id])?;
         Ok(())
     }
 
-    pub fn upsert_meta(&self, key: &str, value: &str) -> Result<()> {
+    pub(crate) fn upsert_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -468,6 +470,7 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
     Ok(stats)
 }
 
+#[non_exhaustive]
 #[derive(Debug, Default)]
 pub struct IndexStats {
     pub files_total: usize,

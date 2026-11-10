@@ -1,14 +1,19 @@
-pub mod budget;
-pub mod bundle_writer;
-pub mod dep_builder;
-pub mod embed;
-pub mod index_builder;
-pub mod path_kind;
-pub mod search_index;
-pub mod select;
-pub mod tokenizer;
+mod budget;
+mod bundle_writer;
+mod dep_builder;
+#[cfg_attr(not(feature = "remote-embed"), allow(dead_code))]
+mod embed;
+mod index_builder;
+mod path_kind;
+mod search_index;
+mod select;
+mod tokenizer;
 
-pub use index_builder::{build_index, IndexDb};
+pub use budget::Candidate;
+pub use bundle_writer::{render_task_md, write_bundle};
+#[cfg(feature = "remote-embed")]
+pub use embed::embed_index;
+pub use index_builder::{build_index, IndexDb, IndexStats};
 pub use select::{select_candidates, SelectOptions};
 
 #[cfg(test)]
@@ -19,7 +24,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
+pub(crate) enum Language {
     Rust,
     Python,
     Go,
@@ -30,7 +35,7 @@ pub enum Language {
 }
 
 impl Language {
-    pub fn from_path(path: &Path) -> Self {
+    pub(crate) fn from_path(path: &Path) -> Self {
         match path.extension().and_then(|e| e.to_str()) {
             Some("rs") => Language::Rust,
             Some("py") => Language::Python,
@@ -42,7 +47,7 @@ impl Language {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Language::Rust => "rust",
             Language::Python => "python",
@@ -56,7 +61,7 @@ impl Language {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SymbolKind {
+pub(crate) enum SymbolKind {
     Function,
     Struct,
     Class,
@@ -65,7 +70,7 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             SymbolKind::Function => "function",
             SymbolKind::Struct => "struct",
@@ -77,7 +82,7 @@ impl SymbolKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct Symbol {
+pub(crate) struct Symbol {
     pub file_id: i64,
     pub name: String,
     pub kind: SymbolKind,
@@ -85,6 +90,7 @@ pub struct Symbol {
     pub snippet: String,
 }
 
+#[non_exhaustive]
 pub struct GitRepo {
     root: PathBuf,
     /// Canonicalized `root`, computed once; used to validate file reads.
@@ -94,7 +100,7 @@ pub struct GitRepo {
 /// Marker payload of the `io::Error` returned when a read is refused because
 /// the resolved target is outside the repo or inside a `.git` directory.
 #[derive(Debug)]
-pub struct PathEscape;
+pub(crate) struct PathEscape;
 
 impl std::fmt::Display for PathEscape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -106,7 +112,7 @@ impl std::error::Error for PathEscape {}
 
 /// True if `e` is a [`PathEscape`] refusal (as opposed to a genuine I/O error
 /// such as EACCES).
-pub fn is_path_escape(e: &std::io::Error) -> bool {
+pub(crate) fn is_path_escape(e: &std::io::Error) -> bool {
     e.get_ref().is_some_and(|inner| inner.is::<PathEscape>())
 }
 
@@ -114,13 +120,16 @@ pub fn is_path_escape(e: &std::io::Error) -> bool {
 /// `canonical_root` and has no `.git` path component at any depth (#202).
 /// Refusals carry a [`PathEscape`] payload. Symlinks, `..` and symlinked
 /// directories are all resolved by canonicalize immediately before the read.
-pub fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<String> {
+pub(crate) fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<String> {
     let bytes = read_bytes_within_root(canonical_root, path)?;
     String::from_utf8(bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_bytes_within_root(
+    canonical_root: &Path,
+    path: &Path,
+) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
         Err(_) => true,
@@ -166,7 +175,7 @@ impl GitRepo {
 
     /// Validated read of a tracked file (relative to the repo root). Refuses
     /// targets outside the repo or under `.git`, regardless of file mode.
-    pub fn read_tracked(&self, rel: &Path) -> std::io::Result<String> {
+    pub(crate) fn read_tracked(&self, rel: &Path) -> std::io::Result<String> {
         read_within_root(&self.canonical_root, &self.root.join(rel))
     }
 
@@ -252,7 +261,7 @@ impl GitRepo {
     /// uncommitted edits are noticed and the sha equals HEAD's for an unchanged
     /// file. Unknown-language files and files missing from the working tree
     /// keep HEAD's values.
-    pub fn scan(&self) -> Result<Vec<(PathBuf, Language, String, i64)>> {
+    pub(crate) fn scan(&self) -> Result<Vec<(PathBuf, Language, String, i64)>> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head = repo.head()?.peel_to_tree()?;
@@ -296,10 +305,10 @@ impl GitRepo {
     }
 }
 
-pub struct SymbolExtractor;
+pub(crate) struct SymbolExtractor;
 
 impl SymbolExtractor {
-    pub fn extract(
+    pub(crate) fn extract(
         path: &Path,
         source: &str,
         lang: Language,
