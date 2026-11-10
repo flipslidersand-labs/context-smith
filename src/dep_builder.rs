@@ -103,9 +103,9 @@ fn resolve_import(
 ///
 /// # Security (#87)
 /// `normalize_path` performs only lexical `..` collapsing without filesystem access.
-/// To prevent path-traversal attacks (e.g. `require('../../../etc/shadow')`), the
-/// resolved path is checked to remain within `repo_root`. Resolution is aborted and
-/// an empty result returned if the normalized path escapes the repo root.
+/// To prevent path-traversal attacks (e.g. `require('../../../etc/shadow')`),
+/// `normalize_path` returns `None` when a `..` climbs above the repo root (paths in
+/// the index are relative to it), and resolution then returns an empty result.
 fn resolve_ts_js(
     import_str: &str,
     from_path: &Path,
@@ -1173,7 +1173,7 @@ mod tests {
         assert_eq!(normalize_path(Path::new(".")), Some(PathBuf::new()));
         assert_eq!(normalize_path(Path::new("")), Some(PathBuf::new()));
         assert_eq!(normalize_path(Path::new("./a")), Some(PathBuf::from("a")));
-        // excess `..` is swallowed at the root, not kept
+        // excess `..` above the root is reported as an escape (None), not swallowed
         assert_eq!(normalize_path(Path::new("a/../../b")), None);
         assert_eq!(normalize_path(Path::new("a/..")), Some(PathBuf::new()));
     }
