@@ -6,6 +6,29 @@ use std::path::Path;
 use crate::dep_builder;
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
+/// Message shown when the index DB is locked by another process.
+fn locked_message(path: &Path, detail: &str) -> String {
+    format!(
+        "Index DB {} is locked by another process (an 'index' may be running). \
+         Wait for it to finish and retry. ({detail})",
+        path.display()
+    )
+}
+
+/// True if any error in the chain is SQLITE_BUSY / SQLITE_LOCKED (by code).
+fn is_lock_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        matches!(
+            e.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _))
+                if matches!(
+                    f.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}
+
 pub struct IndexDb {
     conn: Connection,
 }
@@ -43,11 +66,7 @@ impl IndexDb {
             .with_context(|| "Failed to run PRAGMA quick_check")?;
         if integrity != "ok" {
             if integrity.contains("database is locked") || integrity.contains("busy") {
-                anyhow::bail!(
-                    "Index DB {} is locked by another process (an 'index' may be running). \
-                     Wait for it to finish and retry. ({integrity})",
-                    path.display()
-                );
+                anyhow::bail!(locked_message(path, &integrity));
             }
             anyhow::bail!(
                 "Index DB is corrupt ({integrity}). Delete {} and re-run 'contextsmith index'.",
@@ -294,6 +313,17 @@ impl IndexDb {
 }
 
 pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
+    build_index_inner(repo, db, force).map_err(|e| {
+        if is_lock_error(&e) {
+            let path = db.connection().path().unwrap_or("").to_string();
+            anyhow::anyhow!(locked_message(Path::new(&path), &format!("{e:#}")))
+        } else {
+            e
+        }
+    })
+}
+
+fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
     db.init_schema()?;
 
     if force {
@@ -944,6 +974,39 @@ mod tests {
 
     /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
     /// not leave the transaction open.
+    #[test]
+    fn build_index_reports_lock_when_another_index_holds_write_txn() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
+        let dbdir = TempDir::new().unwrap();
+        let path = dbdir.path().join("idx.db");
+        seeded_db(&path);
+        let _writer = hold_write_txn(&path);
+        let db = IndexDb::open_for_read(&path).unwrap();
+        db.connection()
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let err = build_index(&repo, &db, false).unwrap_err().to_string();
+        assert!(err.contains("locked by another process"), "{err}");
+        assert!(!err.contains("corrupt"), "{err}");
+        // Not left inside a transaction.
+        assert!(db.connection().is_autocommit());
+    }
+
+    #[test]
+    fn build_index_reports_lock_with_force() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
+        let dbdir = TempDir::new().unwrap();
+        let path = dbdir.path().join("idx.db");
+        seeded_db(&path);
+        let _writer = hold_write_txn(&path);
+        let db = IndexDb::open_for_read(&path).unwrap();
+        db.connection()
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let err = build_index(&repo, &db, true).unwrap_err().to_string();
+        assert!(err.contains("locked by another process"), "{err}");
+    }
+
     #[test]
     fn build_index_rolls_back_when_commit_fails() {
         let (_tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n")]);
