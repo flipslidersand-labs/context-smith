@@ -8,7 +8,12 @@ pub mod search_index;
 pub mod select;
 pub mod tokenizer;
 
+pub use index_builder::{build_index, IndexDb};
 pub use select::{select_candidates, SelectOptions};
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod moved;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
