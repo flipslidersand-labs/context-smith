@@ -248,48 +248,86 @@ impl GitRepo {
     /// file. Unknown-language files and files missing from the working tree
     /// keep HEAD's values.
     pub fn scan(&self) -> Result<Vec<(PathBuf, Language, String, i64)>> {
+        Ok(self.scan_with_skipped()?.0)
+    }
+
+    /// Like [`scan`](Self::scan), but also returns how many tracked files were
+    /// skipped because their path is not valid UTF-8 (each one is warned
+    /// about individually; the scan continues, #308).
+    pub fn scan_with_skipped(&self) -> Result<(Vec<(PathBuf, Language, String, i64)>, usize)> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head = repo.head()?.peel_to_tree()?;
         let mut results = Vec::new();
-        head.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-            if entry.kind() == Some(git2::ObjectType::Blob) {
-                let name = entry.name().unwrap_or("");
-                let rel = if root.is_empty() {
-                    PathBuf::from(name)
-                } else {
-                    PathBuf::from(root).join(name)
-                };
-                let lang = Language::from_path(&rel);
-                let mut sha = entry.id().to_string();
-                let mut size = entry
-                    .to_object(&repo)
-                    .and_then(|o| o.peel_to_blob())
-                    .map(|b| b.size() as i64)
-                    .unwrap_or(0);
-                if lang != Language::Unknown {
-                    match read_bytes_within_root(&self.canonical_root, &self.root.join(&rel)) {
-                        Ok(bytes) => {
-                            if let Ok(oid) = git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
-                            {
-                                sha = oid.to_string();
-                                size = bytes.len() as i64;
-                            }
-                        }
-                        Err(e) if is_path_escape(&e) => {
-                            eprintln!("warn: skip {:?}: {e}", rel);
-                            return git2::TreeWalkResult::Ok;
-                        }
-                        Err(_) => {}
-                    }
+        let mut skipped = 0usize;
+        self.scan_tree(&repo, &head, Vec::new(), &mut results, &mut skipped)?;
+        Ok((results, skipped))
+    }
+
+    /// Pre-order walk keeping the path as raw bytes so a non-UTF-8 name only
+    /// affects its own entries instead of aborting the whole walk.
+    fn scan_tree(
+        &self,
+        repo: &git2::Repository,
+        tree: &git2::Tree<'_>,
+        prefix: Vec<u8>,
+        results: &mut Vec<(PathBuf, Language, String, i64)>,
+        skipped: &mut usize,
+    ) -> Result<()> {
+        for entry in tree.iter() {
+            let mut full = prefix.clone();
+            full.extend_from_slice(entry.name_bytes());
+            match entry.kind() {
+                Some(git2::ObjectType::Tree) => {
+                    full.push(b'/');
+                    let sub = entry.to_object(repo)?.peel_to_tree()?;
+                    self.scan_tree(repo, &sub, full, results, skipped)?;
                 }
-                results.push((rel, lang, sha, size));
+                Some(git2::ObjectType::Blob) => {
+                    let Ok(name) = String::from_utf8(full) else {
+                        eprintln!(
+                            "warn: skip non-UTF-8 path in {:?}",
+                            String::from_utf8_lossy(&prefix)
+                        );
+                        *skipped += 1;
+                        continue;
+                    };
+                    let rel = PathBuf::from(name);
+                    let lang = Language::from_path(&rel);
+                    let mut sha = entry.id().to_string();
+                    let mut size = entry
+                        .to_object(repo)
+                        .and_then(|o| o.peel_to_blob())
+                        .map(|b| b.size() as i64)
+                        .unwrap_or(0);
+                    if lang != Language::Unknown {
+                        match read_bytes_within_root(&self.canonical_root, &self.root.join(&rel)) {
+                            Ok(bytes) => {
+                                if let Ok(oid) =
+                                    git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
+                                {
+                                    sha = oid.to_string();
+                                    size = bytes.len() as i64;
+                                }
+                            }
+                            Err(e) if is_path_escape(&e) => {
+                                eprintln!("warn: skip {:?}: {e}", rel);
+                                continue;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    results.push((rel, lang, sha, size));
+                }
+                _ => {}
             }
-            git2::TreeWalkResult::Ok
-        })?;
-        Ok(results)
+        }
+        Ok(())
     }
 }
+
+/// (relative_path, language, blob_sha, size) as returned by [`GitRepo::scan`].
+pub type ScanEntry = (PathBuf, Language, String, i64);
 
 pub struct SymbolExtractor;
 
