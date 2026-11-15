@@ -132,6 +132,25 @@ fn resolve_index_path(repo: &GitRepo, index: Option<String>) -> anyhow::Result<P
     Ok(db_path)
 }
 
+/// Refuse if the db file or its `-wal`/`-shm` sidecars is a symlink, since
+/// SQLite would write through it to wherever it points.
+fn refuse_symlinked_index_files(db_path: &std::path::Path) -> anyhow::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        let p = PathBuf::from(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&p) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                    p.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -141,6 +160,7 @@ fn main() -> anyhow::Result<()> {
                 Some(p) => {
                     // Keep an index outside the repository (e.g. in a cache dir) with one command.
                     let p = PathBuf::from(p);
+                    refuse_symlinked_index_files(&p)?;
                     if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -157,8 +177,10 @@ fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
+                    let db_path = dir.join("index.db");
+                    refuse_symlinked_index_files(&db_path)?;
                     std::fs::create_dir_all(&dir)?;
-                    dir.join("index.db")
+                    db_path
                 }
             };
             let db = IndexDb::open(&db_path)?;

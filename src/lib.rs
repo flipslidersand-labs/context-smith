@@ -136,6 +136,25 @@ fn is_tracked_in_index(canonical_root: &Path, real: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True if `path` or any ancestor below the repo root is a symlink. Walks up
+/// until reaching the repo root; fails closed (true) if the root is never hit.
+fn path_has_symlink_component(canonical_root: &Path, path: &Path) -> bool {
+    for anc in path.ancestors() {
+        match std::fs::symlink_metadata(anc) {
+            Ok(m) if m.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+        let Some(parent) = anc.parent() else {
+            return true;
+        };
+        if parent.canonicalize().is_ok_and(|p| p == canonical_root) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
@@ -147,9 +166,9 @@ pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Re
     }
     // A symlink may only lead to a *tracked* file; otherwise a committed link
     // (e.g. x.py -> .env) would expose untracked / gitignored files (#328).
-    let is_link = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
+    // Any path component (not just the last) may be a symlink, e.g. a tracked
+    // `docs -> ignored_dir` directory link.
+    let is_link = path_has_symlink_component(canonical_root, path);
     if is_link && !is_tracked_in_index(canonical_root, &real) {
         return Err(std::io::Error::other(PathEscape));
     }
@@ -1084,6 +1103,25 @@ mod tests {
         assert!(!names.contains(&"a.py".to_string()), "{names:?}");
         assert!(names.contains(&"b.py".to_string()), "{names:?}");
         assert!(names.contains(&"real.py".to_string()), "{names:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_file_via_symlinked_directory_to_untracked() {
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        std::fs::create_dir(tmp.path().join("ignored_dir")).unwrap();
+        std::fs::write(tmp.path().join("ignored_dir/secret.py"), "S=1\n").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "ignored_dir/\n").unwrap();
+        std::os::unix::fs::symlink("ignored_dir", tmp.path().join("docs")).unwrap();
+        let mut index = git.index().unwrap();
+        for f in [".gitignore", "docs"] {
+            index.add_path(Path::new(f)).unwrap();
+        }
+        index.write().unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("docs/secret.py")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
     }
 
     // ---- SymbolExtractor ----
