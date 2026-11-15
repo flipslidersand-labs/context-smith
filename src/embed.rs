@@ -358,6 +358,23 @@ const DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
 /// Maximum number of attempts per chunk (1 initial + 2 retries).
 #[cfg(feature = "remote-embed")]
 const MAX_ATTEMPTS: u32 = 3;
+/// Upper bound on an embedding response body (same as ureq's `into_string`).
+#[cfg(feature = "remote-embed")]
+const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Read the response body with a hard size cap, then parse it as JSON.
+#[cfg(feature = "remote-embed")]
+fn read_json_limited<T: serde::de::DeserializeOwned>(resp: ureq::Response) -> Result<T> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_RESPONSE_BYTES {
+        anyhow::bail!("response body too large (limit {MAX_RESPONSE_BYTES} bytes)");
+    }
+    Ok(serde_json::from_slice(&buf)?)
+}
 
 /// True when `url` is plain `http://` to a host that is not loopback, i.e. the
 /// `X-API-Key` and the embedded source text would cross the network unencrypted.
@@ -422,6 +439,9 @@ impl RemoteEmbedder {
         ureq::AgentBuilder::new()
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(self.timeout)
+            // Never follow redirects: a 3xx would replay the request (and X-API-Key)
+            // to an arbitrary host, possibly over plain http.
+            .redirects(0)
             .build()
     }
 }
@@ -451,7 +471,7 @@ impl Embedder for RemoteEmbedder {
                     req = req.set("X-API-Key", key.as_str());
                 }
                 match req.send_json(body.clone()) {
-                    Ok(r) => match r.into_json::<EmbedResponse>() {
+                    Ok(r) => match read_json_limited::<EmbedResponse>(r) {
                         Ok(parsed) => break parsed,
                         // A malformed 200 body is not transient: fail fast.
                         Err(e) => {
@@ -965,6 +985,73 @@ mod tests {
         let (url, count) = body_server(r#"{"vectors": []}"#);
         let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
         assert!(r.is_err(), "count mismatch must be an error");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Server that records the raw (lowercased) text of every request it receives.
+    #[cfg(feature = "remote-embed")]
+    fn recording_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let c = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                c.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{{\"vectors\":[]}}"
+                );
+            }
+        });
+        (url, seen)
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_does_not_follow_redirects_or_leak_api_key() {
+        use std::io::{Read, Write};
+        let (target_url, seen) = recording_server();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 302 Found\r\nLocation: {target_url}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        });
+        let mut e = remote_for(url);
+        e.api_key = Some(zeroize::Zeroizing::new("sekret-test-key".to_string()));
+        let r = e.embed(&["x".to_string()], EmbedMode::Index);
+        assert!(r.is_err(), "a redirect response must be an error");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "redirect target must receive no request: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_rejects_oversized_response_body() {
+        let pad = "a".repeat(MAX_RESPONSE_BYTES as usize + 1024);
+        let body: &'static str =
+            Box::leak(format!(r#"{{"vectors": [[1.0]], "pad": "{pad}"}}"#).into_boxed_str());
+        let (url, count) = body_server(body);
+        let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
+        let msg = format!("{:#}", r.expect_err("oversized body must be rejected"));
+        assert!(msg.contains("too large"), "got: {msg}");
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
