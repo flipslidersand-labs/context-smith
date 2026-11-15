@@ -386,13 +386,17 @@ fn is_insecure_remote(url: &str) -> bool {
 
 #[cfg(feature = "remote-embed")]
 impl RemoteEmbedder {
-    /// Construct from env; returns `None` if `EMBEDDING_SVC_URL` is unset.
+    /// Construct from env; returns `None` if `EMBEDDING_SVC_URL` is unset, empty, or whitespace-only.
     ///
     /// Plain `http://` to a non-loopback host prints a warning to stderr, since the
     /// API key and file contents would travel unencrypted. Prefer `https://`; set
     /// `EMBEDDING_ALLOW_INSECURE=1` to silence the warning for a trusted network.
     pub fn from_env() -> Option<Self> {
         let url = std::env::var("EMBEDDING_SVC_URL").ok()?;
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return None;
+        }
         if is_insecure_remote(&url)
             && std::env::var("EMBEDDING_ALLOW_INSECURE").as_deref() != Ok("1")
         {
@@ -989,6 +993,34 @@ mod tests {
             std::env::remove_var(k);
         }
         assert!(RemoteEmbedder::from_env().is_none());
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_returns_none_when_url_empty_or_blank() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        for v in ["", "   ", "\t\n"] {
+            std::env::set_var("EMBEDDING_SVC_URL", v);
+            let got = RemoteEmbedder::from_env();
+            std::env::remove_var("EMBEDDING_SVC_URL");
+            assert!(got.is_none(), "{v:?} must be treated as unset");
+        }
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_trims_surrounding_whitespace_in_url() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("EMBEDDING_SVC_URL", "  http://127.0.0.1:9092/ ");
+        let e = RemoteEmbedder::from_env().expect("url set");
+        std::env::remove_var("EMBEDDING_SVC_URL");
+        assert_eq!(e.url, "http://127.0.0.1:9092");
     }
 
     #[cfg(feature = "remote-embed")]
