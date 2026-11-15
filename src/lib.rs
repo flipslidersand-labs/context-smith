@@ -136,19 +136,18 @@ fn is_tracked_in_index(canonical_root: &Path, real: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// True if `path` or any ancestor below the repo root is a symlink. Walks up
-/// until reaching the repo root; fails closed (true) if the root is never hit.
+/// True if `path` or any ancestor below the repo root is a symlink. Walks up,
+/// checking each component itself *before* deciding whether it is the root, so a
+/// link that resolves to the root (`docs -> .`) is still caught. Fails closed
+/// (true) if the root is never reached.
 fn path_has_symlink_component(canonical_root: &Path, path: &Path) -> bool {
-    for anc in path.ancestors() {
+    for (i, anc) in path.ancestors().enumerate() {
         match std::fs::symlink_metadata(anc) {
             Ok(m) if m.file_type().is_symlink() => return true,
             Ok(_) => {}
             Err(_) => return true,
         }
-        let Some(parent) = anc.parent() else {
-            return true;
-        };
-        if parent.canonicalize().is_ok_and(|p| p == canonical_root) {
+        if i > 0 && anc.canonicalize().is_ok_and(|p| p == canonical_root) {
             return false;
         }
     }
@@ -1121,6 +1120,42 @@ mod tests {
         index.write().unwrap();
         let repo = GitRepo::new(tmp.path()).unwrap();
         let err = repo.read_tracked(Path::new("docs/secret.py")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
+    }
+
+    #[cfg(unix)]
+    fn commit_dir_link(link: &str, target: &str, extra_dir: Option<&str>) -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), ".env\n").unwrap();
+        if let Some(d) = extra_dir {
+            std::fs::create_dir_all(tmp.path().join(d)).unwrap();
+        }
+        std::os::unix::fs::symlink(target, tmp.path().join(link)).unwrap();
+        let mut index = git.index().unwrap();
+        for f in [".gitignore", link] {
+            index.add_path(Path::new(f)).unwrap();
+        }
+        index.write().unwrap();
+        tmp
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_via_dir_symlink_to_root() {
+        let tmp = commit_dir_link("docs", ".", None);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("docs/.env")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_via_nested_dir_symlink_to_parent() {
+        let tmp = commit_dir_link("a/b", "..", Some("a"));
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("a/b/.env")).unwrap_err();
         assert!(is_path_escape(&err), "{err}");
     }
 
