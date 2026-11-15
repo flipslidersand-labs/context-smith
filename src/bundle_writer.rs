@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::budget::{estimate_tokens, truncate_to_tokens, Candidate};
+use crate::budget::{allocate, estimate_tokens, truncate_to_tokens, Candidate};
 
 #[derive(Serialize)]
 pub struct Citation {
@@ -128,16 +128,14 @@ pub fn render_task_md(
     render_task_md_parts(task, budget, selected, diff_summary, explain).0
 }
 
-fn render_task_md_parts(
+/// Header + selected-file list of `task.md` (everything except the diff section).
+fn render_head(
     task: &str,
     budget: usize,
+    used: usize,
     selected: &[Candidate],
-    diff_summary: &str,
     explain: bool,
-) -> (String, DiffPart) {
-    let files_used: usize = selected.iter().map(|c| c.tokens()).sum();
-    let diff = fit_diff(diff_summary, budget.saturating_sub(files_used));
-    let used = files_used + diff.tokens;
+) -> String {
     // Collapse newlines/whitespace runs so the task cannot inject block-level
     // Markdown structure (inline HTML in the task is out of scope). Paths are
     // escaped separately by `inline_code`.
@@ -162,9 +160,132 @@ fn render_task_md_parts(
             note,
         ));
     }
+    task_md
+}
 
+fn render_task_md_parts(
+    task: &str,
+    budget: usize,
+    selected: &[Candidate],
+    diff_summary: &str,
+    explain: bool,
+) -> (String, DiffPart) {
+    let files_used: usize = selected.iter().map(|c| c.tokens()).sum();
+    let diff = fit_diff(diff_summary, budget.saturating_sub(files_used));
+    let used = files_used + diff.tokens;
+    let mut task_md = render_head(task, budget, used, selected, explain);
     task_md.push_str(&diff.text);
     (task_md, diff)
+}
+
+/// Markdown of one `relevant-code/*.md` file.
+fn render_file_md(c: &Candidate) -> String {
+    let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+    let fence = safe_fence(&c.content);
+    let mut file_md = format!(
+        "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
+        comment_path(&c.path.to_string_lossy()),
+        c.content,
+    );
+    if let Some(note) = truncation_note(c) {
+        file_md.push_str(&format!("\n{note}\n"));
+    }
+    file_md
+}
+
+/// Shrink `selected` so its file bodies total at most `eff` tokens, keeping the
+/// original (pre-cut) token counts of already-truncated files.
+fn shrink_selection(selected: &[Candidate], eff: usize) -> Vec<Candidate> {
+    if eff == 0 {
+        return Vec::new();
+    }
+    if selected.iter().map(|c| c.tokens()).sum::<usize>() <= eff {
+        return selected.to_vec();
+    }
+    allocate(selected.to_vec(), eff)
+        .into_iter()
+        .map(|mut c| {
+            if let Some(prev) = selected
+                .iter()
+                .find(|p| p.file_id == c.file_id && p.path == c.path)
+            {
+                if prev.truncated {
+                    c.original_tokens = prev.original_tokens;
+                }
+            }
+            c
+        })
+        .collect()
+}
+
+/// A fully rendered bundle whose `task.md` plus `relevant-code/*.md` fit `budget`
+/// (unless the fixed overhead alone exceeds it; then bodies and diff are empty and
+/// `used` reports the real overshoot).
+struct Rendered {
+    task_md: String,
+    selected: Vec<Candidate>,
+    file_mds: Vec<String>,
+    diff: DiffPart,
+    used: usize,
+}
+
+fn render_bundle(
+    task: &str,
+    budget: usize,
+    selected: &[Candidate],
+    diff_summary: &str,
+    explain: bool,
+) -> Rendered {
+    let file_tokens = |sel: &[Candidate]| -> usize {
+        sel.iter()
+            .map(|c| estimate_tokens(&render_file_md(c)))
+            .sum()
+    };
+    // Fixed overhead (header, list, per-file wrappers) is charged before the file
+    // bodies: lower the body budget until head + files fit.
+    let mut eff = selected
+        .iter()
+        .map(|c| c.tokens())
+        .sum::<usize>()
+        .min(budget);
+    let (sel, fixed) = loop {
+        let sel = shrink_selection(selected, eff);
+        let fixed =
+            estimate_tokens(&render_head(task, budget, budget, &sel, explain)) + file_tokens(&sel);
+        if fixed <= budget || eff == 0 {
+            break (sel, fixed);
+        }
+        eff = eff.saturating_sub((fixed - budget).max(1));
+    };
+    let file_mds: Vec<String> = sel.iter().map(render_file_md).collect();
+
+    // Fit the diff into what is left; re-check the whole because token estimates
+    // are not exactly additive across strings.
+    let mut remaining = budget.saturating_sub(fixed);
+    loop {
+        let diff = fit_diff(diff_summary, remaining);
+        let mut used = budget;
+        let mut task_md = String::new();
+        for _ in 0..8 {
+            task_md = render_head(task, budget, used, &sel, explain);
+            task_md.push_str(&diff.text);
+            let actual = estimate_tokens(&task_md) + file_tokens(&sel);
+            if actual == used {
+                break;
+            }
+            used = actual;
+        }
+        if used <= budget || remaining == 0 {
+            return Rendered {
+                task_md,
+                selected: sel,
+                file_mds,
+                diff,
+                used,
+            };
+        }
+        remaining = remaining.saturating_sub((used - budget).max(1));
+    }
 }
 
 /// Replace line breaks with visible escapes so a path stays on one line.
@@ -284,7 +405,18 @@ fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write a context bundle to `out_dir`. Returns the tokens used (files + diff).
+/// Written bundle summary.
+#[derive(Debug, Clone, Copy)]
+pub struct BundleStats {
+    /// Estimated tokens of `task.md` plus all `relevant-code/*.md` (= the `Used` shown).
+    pub used: usize,
+    /// Number of files written to `relevant-code/`.
+    pub files: usize,
+}
+
+/// Write a context bundle to `out_dir`. Everything written (`task.md` and
+/// `relevant-code/`) is counted against `budget`; the selection is shrunk, and the
+/// diff cut, to fit.
 ///
 /// Layout:
 ///   out_dir/
@@ -298,7 +430,7 @@ pub fn write_bundle(
     diff_summary: &str,
     out_dir: &Path,
     explain: bool,
-) -> Result<usize> {
+) -> Result<BundleStats> {
     // Refuse a symlinked --out (final component only; parents may legitimately be links,
     // e.g. /tmp on macOS). `components()` drops a trailing slash so `link/` is checked too.
     let out_checked: std::path::PathBuf = out_dir.components().collect();
@@ -334,14 +466,20 @@ pub fn write_bundle(
     }
     std::fs::create_dir_all(&rc_dir)?;
 
-    let (task_md, diff) = render_task_md_parts(task, budget, selected, diff_summary, explain);
-    let used = selected.iter().map(|c| c.tokens()).sum::<usize>() + diff.tokens;
+    let Rendered {
+        task_md,
+        selected,
+        file_mds,
+        diff,
+        used,
+    } = render_bundle(task, budget, selected, diff_summary, explain);
+    let selected = &selected[..];
     write_file_no_symlink(&out_dir.join("task.md"), &task_md)?;
 
     // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for c in selected {
+    for (c, file_md) in selected.iter().zip(&file_mds) {
         let base_slug = base_slug(&c.path.to_string_lossy());
         // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
         // so generated `_N` slugs never collide with another base slug and
@@ -355,17 +493,7 @@ pub fn write_bundle(
             }
         };
 
-        let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
-        let fence = safe_fence(&c.content);
-        let mut file_md = format!(
-            "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
-            comment_path(&c.path.to_string_lossy()),
-            c.content,
-        );
-        if let Some(note) = truncation_note(c) {
-            file_md.push_str(&format!("\n{note}\n"));
-        }
-        write_file_no_symlink(&rc_dir.join(format!("{slug}.md")), &file_md)?;
+        write_file_no_symlink(&rc_dir.join(format!("{slug}.md")), file_md)?;
     }
 
     // citations.json
@@ -391,7 +519,10 @@ pub fn write_bundle(
     let json = serde_json::to_string_pretty(&citations)?;
     write_file_no_symlink(&out_dir.join("citations.json"), &json)?;
 
-    Ok(used)
+    Ok(BundleStats {
+        used,
+        files: selected.len(),
+    })
 }
 
 #[cfg(test)]
@@ -988,20 +1119,65 @@ mod tests {
             .collect()
     }
 
+    /// Tokens of everything written: task.md + every relevant-code/*.md.
+    fn written_tokens(out: &Path) -> usize {
+        let mut n = estimate_tokens(&std::fs::read_to_string(out.join("task.md")).unwrap());
+        for e in std::fs::read_dir(out.join("relevant-code")).unwrap() {
+            n += estimate_tokens(&std::fs::read_to_string(e.unwrap().path()).unwrap());
+        }
+        n
+    }
+
+    fn many_files() -> Vec<Candidate> {
+        (0..6)
+            .map(|i| {
+                cand(
+                    &format!("src/module_{i}.rs"),
+                    1.0 - i as f32 * 0.1,
+                    &"fn f() { /* body */ }\n".repeat(40),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn build_diff_counts_toward_budget() {
+    fn build_output_total_fits_budget() {
+        for budget in [1000usize, 300] {
+            let tmp = tempfile::tempdir().unwrap();
+            let out = tmp.path().join("b");
+            let sel = crate::budget::allocate(many_files(), budget);
+            write_bundle("t", budget, &sel, &big_diff(), &out, false).unwrap();
+            let total = written_tokens(&out);
+            assert!(total <= budget, "budget={budget} total={total}");
+            let md = std::fs::read_to_string(out.join("task.md")).unwrap();
+            assert!(
+                md.contains(&format!("**Used:** {total} tokens")),
+                "Used must equal the real total {total}; got:\n{md}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_overhead_above_budget_reports_real_overshoot() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("b");
-        let sel = vec![cand("src/a.rs", 0.9, &"x".repeat(80))]; // 20 tokens
-        let diff = big_diff();
-        let used = write_bundle("t", 100, &sel, &diff, &out, false).unwrap();
+        let sel = crate::budget::allocate(many_files(), 10);
+        write_bundle("t", 10, &sel, &big_diff(), &out, false).unwrap();
         let md = std::fs::read_to_string(out.join("task.md")).unwrap();
-        let rc = std::fs::read_to_string(out.join("relevant-code/src_a_rs.md")).unwrap();
-        assert!(used <= 100, "used={used}");
-        assert!(md.contains(&format!("**Used:** {used} tokens")), "{md}");
-        let section = &md[md.find("\n## Recent Diff").unwrap()..];
-        assert_eq!(used, 20 + estimate_tokens(section));
-        assert!(estimate_tokens(&md) + estimate_tokens(&rc) < 500, "{md}");
+        let total = written_tokens(&out);
+        assert!(total > 10);
+        assert!(md.contains(&format!("**Used:** {total} tokens")), "{md}");
+        assert!(!md.contains("```"), "no diff body expected:\n{md}");
+        assert!(!out.join("relevant-code/src_module_0_rs.md").exists());
+    }
+
+    #[test]
+    fn build_diff_is_cut_with_note_and_balanced_fence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("b");
+        let sel = vec![cand("src/a.rs", 0.9, "fn a() {}")];
+        write_bundle("t", 400, &sel, &big_diff(), &out, false).unwrap();
+        let md = std::fs::read_to_string(out.join("task.md")).unwrap();
         assert!(md.contains("[diff truncated: first"), "{md}");
         assert_eq!(md.matches("```").count(), 2, "fence must stay balanced");
         let json = std::fs::read_to_string(out.join("citations.json")).unwrap();
@@ -1009,6 +1185,7 @@ mod tests {
         let last = v.as_array().unwrap().last().unwrap();
         assert_eq!(last["path"], DIFF_CITATION_PATH);
         assert_eq!(last["truncated"], true);
+        assert!(written_tokens(&out) <= 400);
     }
 
     #[test]
