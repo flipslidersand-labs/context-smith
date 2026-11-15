@@ -148,6 +148,15 @@ fn main() -> anyhow::Result<()> {
                 }
                 None => {
                     let dir = repo.root().join(".contextsmith");
+                    // A committed symlink here would put index.db/-wal/-shm outside the repo.
+                    if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+                        if meta.file_type().is_symlink() {
+                            anyhow::bail!(
+                                "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                                dir.display()
+                            );
+                        }
+                    }
                     std::fs::create_dir_all(&dir)?;
                     dir.join("index.db")
                 }
