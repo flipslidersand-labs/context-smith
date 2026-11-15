@@ -68,7 +68,7 @@ enum Command {
         /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
         #[arg(long)]
         index: Option<String>,
-        /// Include BM25 score annotations in task.md
+        /// Include relevance score annotations in task.md
         #[arg(long)]
         explain: bool,
         /// Number of recent commits to include as diff context
@@ -96,7 +96,7 @@ enum Command {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryFormat::Json)]
         format: QueryFormat,
-        /// Include BM25 score annotations (md format only)
+        /// Include relevance score annotations (md format only)
         #[arg(long)]
         explain: bool,
         /// Disable semantic (embedding) seeds even when the index has them; BM25 only

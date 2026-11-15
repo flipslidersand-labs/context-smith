@@ -227,7 +227,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
              FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
          )
          GROUP BY file_id
-         ORDER BY total DESC, file_id
+         ORDER BY total DESC, (SELECT path FROM files WHERE files.id = file_id), file_id
          LIMIT ?6",
     )?;
     let rows: Vec<(i64, f32)> = stmt
@@ -319,6 +319,7 @@ mod tests {
             "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
              CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
              CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+             CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
              INSERT INTO fts_body (file_id, content) VALUES (1, 'login 1 v0 4 0 auth');",
         )
         .unwrap();
@@ -355,6 +356,7 @@ mod tests {
                 "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
                  CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
                  CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+                 CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
                  INSERT INTO fts_body (file_id, content) VALUES (1, 'login auth v0 4 0');",
             )
             .unwrap();
@@ -369,10 +371,16 @@ mod tests {
         conn.execute_batch(
             "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
              CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
-             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);",
+             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+             CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);",
         )
         .unwrap();
         for (id, text) in docs {
+            conn.execute(
+                "INSERT INTO files (id, path) VALUES (?1, ?2)",
+                rusqlite::params![id, format!("f{id:02}.rs")],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
                 rusqlite::params![id, text],
@@ -391,6 +399,21 @@ mod tests {
         let hits = super::search_bm25(&conn, "sameword", 2).unwrap();
         let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
         assert_eq!(ids, vec![1, 2], "{hits:?}");
+    }
+
+    /// Ties must be ordered by path, not by `file_id` (which changes on re-index).
+    #[test]
+    fn ties_are_ordered_by_path_not_file_id() {
+        let conn = fts_conn(&[(1, "sameword"), (2, "sameword"), (3, "sameword")]);
+        conn.execute_batch(
+            "UPDATE files SET path = 'c.rs' WHERE id = 1;
+             UPDATE files SET path = 'b.rs' WHERE id = 2;
+             UPDATE files SET path = 'a.rs' WHERE id = 3;",
+        )
+        .unwrap();
+        let hits = super::search_bm25(&conn, "sameword", 3).unwrap();
+        let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
+        assert_eq!(ids, vec![3, 2, 1], "{hits:?}");
     }
 
     /// #135: a long task is dominated by common words under a plain OR-join. Only the
