@@ -8,7 +8,12 @@ pub fn tokenize_path(path: &str) -> String {
         if component.is_empty() {
             continue;
         }
-        for word in split_identifier(component) {
+        let words = split_identifier(component);
+        // Keep the joined form too, so a task naming the whole identifier matches.
+        if words.len() > 1 {
+            tokens.push(component.to_lowercase());
+        }
+        for word in words {
             tokens.push(word.to_lowercase());
         }
     }
@@ -117,6 +122,12 @@ mod tests {
         assert!(t.contains("parse"), "got: {}", t);
         assert!(t.contains("request"), "got: {}", t);
         assert!(t.contains("go"), "got: {}", t);
+    }
+
+    #[test]
+    fn path_keeps_joined_form() {
+        let t = tokenize_path("src/parseHTTPRequest.go");
+        assert!(t.split(' ').any(|w| w == "parsehttprequest"), "got: {}", t);
     }
 
     // --- edge-case unit tests (fixed inputs) ---
