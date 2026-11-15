@@ -254,7 +254,7 @@ impl GitRepo {
     /// Like [`scan`](Self::scan), but also returns how many tracked files were
     /// skipped because their path is not valid UTF-8 (each one is warned
     /// about individually; the scan continues, #308).
-    pub fn scan_with_skipped(&self) -> Result<(Vec<(PathBuf, Language, String, i64)>, usize)> {
+    pub fn scan_with_skipped(&self) -> Result<(Vec<ScanEntry>, usize)> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head = repo.head()?.peel_to_tree()?;
