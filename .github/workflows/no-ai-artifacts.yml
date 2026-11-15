@@ -16,4 +16,4 @@ jobs:
   no-ai-artifacts:
     permissions:
       contents: read
-    uses: flipslidersand-labs/qa-workflows/.github/workflows/no-ai-artifacts.yml@d33890a74113f8ba8d8841a55b290007f72852ef
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/no-ai-artifacts.yml@aa5cecf1f77e1fd48a2ac13443b07574e9c63578
