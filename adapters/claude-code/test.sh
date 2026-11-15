@@ -42,6 +42,9 @@ check "network.py ranks first" "$(printf '%s\n' "$out2" | sed -n '2p' | awk '{pr
 "$sel" "$repo" zzzqqqxxx >/dev/null 2>&1; check "no match -> exit 4" "$?" 4
 "$sel" "$tmp" something else >/dev/null 2>&1; check "not a git repo -> exit 2" "$?" 2
 "$sel" "$repo" >/dev/null 2>&1; check "missing task -> exit 2" "$?" 2
+"$sel" --top abc "$repo" invoice >/dev/null 2>&1; check "non-numeric --top -> exit 2" "$?" 2
+"$sel" --top -1 "$repo" invoice >/dev/null 2>&1; check "negative --top -> exit 2" "$?" 2
+"$sel" --budget 1x "$repo" invoice >/dev/null 2>&1; check "non-numeric --budget -> exit 2" "$?" 2
 
 printf '#!/bin/sh\necho "contextsmith 0.4.0"\n' > "$tmp/old"; chmod +x "$tmp/old"
 CONTEXTSMITH_BIN=$tmp/old "$sel" "$repo" invoice >/dev/null 2>&1; check "old version -> exit 3" "$?" 3
