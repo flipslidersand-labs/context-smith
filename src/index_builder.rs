@@ -7,7 +7,7 @@ use crate::dep_builder;
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
 /// Message shown when the index DB is locked by another process.
-fn locked_message(path: &Path, detail: &str) -> String {
+pub(crate) fn locked_message(path: &Path, detail: &str) -> String {
     format!(
         "Index DB {} is locked by another process (an 'index' may be running). \
          Wait for it to finish and retry. ({detail})",
@@ -16,7 +16,7 @@ fn locked_message(path: &Path, detail: &str) -> String {
 }
 
 /// True if any error in the chain is SQLITE_BUSY / SQLITE_LOCKED (by code).
-fn is_lock_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
         matches!(
             e.downcast_ref::<rusqlite::Error>(),

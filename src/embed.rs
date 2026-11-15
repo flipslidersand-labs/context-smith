@@ -116,6 +116,27 @@ pub fn populate_embeddings(
     embedder: &dyn Embedder,
     db: &crate::index_builder::IndexDb,
 ) -> Result<usize> {
+    // BEGIN / INSERT / COMMIT can all hit SQLITE_BUSY when another process
+    // holds the write lock; present the same friendly message as `build_index`.
+    populate_embeddings_inner(conn, repo_root, embedder, db).map_err(|e| {
+        if crate::index_builder::is_lock_error(&e) {
+            let path = conn.path().unwrap_or("").to_string();
+            anyhow::anyhow!(crate::index_builder::locked_message(
+                std::path::Path::new(&path),
+                &format!("{e:#}")
+            ))
+        } else {
+            e
+        }
+    })
+}
+
+fn populate_embeddings_inner(
+    conn: &Connection,
+    repo_root: &std::path::Path,
+    embedder: &dyn Embedder,
+    db: &crate::index_builder::IndexDb,
+) -> Result<usize> {
     // Query only the files that actually need (re-)embedding — avoids the
     // full-table DELETE and re-insert of the previous implementation.
     let stale_files = db.files_needing_embed()?;
@@ -736,6 +757,38 @@ mod tests {
         let r = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db);
         assert!(r.is_err(), "COMMIT failure must surface as an error");
         assert!(db.connection().is_autocommit());
+    }
+
+    /// #303: a lock held by another connection must produce the friendly
+    /// "locked by another process" message, not the raw SQLite text.
+    #[test]
+    fn populate_embeddings_reports_lock_when_another_connection_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let path = dbdir.path().join("idx.db");
+        {
+            let db = crate::index_builder::IndexDb::open(&path).unwrap();
+            db.init_schema().unwrap();
+            db.connection()
+                .execute(
+                    "INSERT INTO files (path, lang, blob_sha, size) VALUES ('a.rs', 'rust', 'sha-a', 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let db = crate::index_builder::IndexDb::open_for_read(&path).unwrap();
+        db.connection()
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let err = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("locked by another process"), "{err}");
+        assert!(db.connection().is_autocommit());
+        drop(writer);
     }
 
     /// Build an in-memory [`crate::index_builder::IndexDb`] and populate it
