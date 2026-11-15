@@ -57,6 +57,13 @@ fn diff_section(body: &str, note: Option<&str>) -> String {
     s
 }
 
+fn omitted_note(diff: &str) -> String {
+    format!(
+        "[diff omitted: 0 of {} tokens fit in the budget]",
+        estimate_tokens(diff)
+    )
+}
+
 /// Fit the recent diff into `remaining` tokens (the whole section, including
 /// heading, fences and note, is counted). A cut diff is trimmed to whole lines and
 /// followed by a note outside the fence, so the fence stays intact.
@@ -84,7 +91,7 @@ pub fn fit_diff(diff: &str, remaining: usize) -> DiffPart {
             None => body.clear(),
         }
         let note = if body.is_empty() {
-            format!("[diff omitted: 0 of {original_tokens} tokens fit in the budget]")
+            omitted_note(diff)
         } else {
             format!(
                 "[diff truncated: first {} of {original_tokens} tokens]",
@@ -102,10 +109,11 @@ pub fn fit_diff(diff: &str, remaining: usize) -> DiffPart {
             };
         }
         if cap == 0 {
-            // Not even the note fits: drop the section (citations still flag it).
+            // Even the bare note does not fit: still show it (never cut silently);
+            // the overshoot is visible in `Used`.
             return DiffPart {
-                text: String::new(),
-                tokens: 0,
+                tokens,
+                text,
                 original_tokens,
                 truncated: true,
             };
@@ -248,14 +256,23 @@ fn render_bundle(
         .map(|c| c.tokens())
         .sum::<usize>()
         .min(budget);
+    // Reserve room for the "diff omitted" note so a dropped diff is never silent.
+    let reserve_text = if diff_summary.is_empty() {
+        String::new()
+    } else {
+        diff_section("", Some(&omitted_note(diff_summary)))
+    };
     let (sel, fixed) = loop {
         let sel = shrink_selection(selected, eff);
-        let fixed =
-            estimate_tokens(&render_head(task, budget, budget, &sel, explain)) + file_tokens(&sel);
-        if fixed <= budget || eff == 0 {
+        let head = render_head(task, budget, budget, &sel, explain);
+        let files = file_tokens(&sel);
+        let fixed = estimate_tokens(&head) + files;
+        // Measured on the concatenated text: estimates are not additive across strings.
+        let with_reserve = estimate_tokens(&format!("{head}{reserve_text}")) + files;
+        if with_reserve <= budget || eff == 0 {
             break (sel, fixed);
         }
-        eff = eff.saturating_sub((fixed - budget).max(1));
+        eff = eff.saturating_sub((with_reserve - budget).max(1));
     };
     let file_mds: Vec<String> = sel.iter().map(render_file_md).collect();
 
@@ -1158,6 +1175,27 @@ mod tests {
     }
 
     #[test]
+    fn build_dropped_diff_is_noted_in_task_md() {
+        // Files use up nearly the whole budget, so no diff body fits: task.md must
+        // still say the diff was omitted (never a silent cut).
+        for budget in (100usize..2100).step_by(53).chain([300, 1000, 2000]) {
+            let tmp = tempfile::tempdir().unwrap();
+            let out = tmp.path().join("b");
+            let sel = crate::budget::allocate(many_files(), budget);
+            write_bundle("t", budget, &sel, &big_diff(), &out, false).unwrap();
+            let md = std::fs::read_to_string(out.join("task.md")).unwrap();
+            assert!(md.contains("## Recent Diff"), "budget={budget}:\n{md}");
+            assert!(
+                md.contains("[diff omitted:") || md.contains("[diff truncated:"),
+                "budget={budget}:\n{md}"
+            );
+            assert!(written_tokens(&out) <= budget, "budget={budget}");
+            let json = std::fs::read_to_string(out.join("citations.json")).unwrap();
+            assert!(json.contains(DIFF_CITATION_PATH));
+        }
+    }
+
+    #[test]
     fn build_overhead_above_budget_reports_real_overshoot() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("b");
@@ -1197,12 +1235,16 @@ mod tests {
     }
 
     #[test]
-    fn fit_diff_never_exceeds_remaining() {
+    fn fit_diff_fits_remaining_and_never_drops_silently() {
         let diff = big_diff();
+        let note_cost = estimate_tokens(&diff_section("", Some(&omitted_note(&diff))));
         for rem in [0usize, 1, 5, 10, 30, 100, 1000] {
             let p = fit_diff(&diff, rem);
-            assert!(p.tokens <= rem, "rem={rem} tokens={}", p.tokens);
             assert!(p.truncated);
+            assert!(p.text.contains("[diff "), "rem={rem}: note missing");
+            if rem >= note_cost {
+                assert!(p.tokens <= rem, "rem={rem} tokens={}", p.tokens);
+            }
         }
     }
 }
