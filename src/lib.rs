@@ -169,6 +169,11 @@ impl GitRepo {
         &self.root
     }
 
+    /// The canonicalized repository root (symlinks resolved).
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
     /// Unified diff of the last n_commits commits (empty string if repo has no history).
     ///
     /// The accumulated patch is capped at `DIFF_MAX_BYTES` (512 KiB). Any content

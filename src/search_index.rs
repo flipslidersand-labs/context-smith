@@ -218,16 +218,16 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
-             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank LIMIT ?5)
+             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank, file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
-             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
          )
          GROUP BY file_id
-         ORDER BY total DESC
+         ORDER BY total DESC, file_id
          LIMIT ?6",
     )?;
     let rows: Vec<(i64, f32)> = stmt
@@ -380,6 +380,17 @@ mod tests {
             .unwrap();
         }
         conn
+    }
+
+    /// #311: files that tie on score must be cut by `file_id`, not by SQLite's internal order
+    /// (here: insertion order, which is reversed relative to file_id).
+    #[test]
+    fn ties_are_cut_by_file_id_at_the_limit() {
+        let docs: Vec<(i64, &str)> = (1..=20).rev().map(|i| (i, "tiebreak sameword")).collect();
+        let conn = fts_conn(&docs);
+        let hits = super::search_bm25(&conn, "sameword", 2).unwrap();
+        let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
+        assert_eq!(ids, vec![1, 2], "{hits:?}");
     }
 
     /// #135: a long task is dominated by common words under a plain OR-join. Only the
