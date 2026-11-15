@@ -262,6 +262,21 @@ impl IndexDb {
         Ok(())
     }
 
+    /// Delete everything derived from a file's content (symbols, symbol/body
+    /// FTS, deps, embeddings) but keep its files row and path FTS row.
+    fn delete_content_records(&self, file_id: i64) -> Result<()> {
+        for sql in [
+            "DELETE FROM fts_symbols WHERE file_id = ?1",
+            "DELETE FROM fts_body    WHERE file_id = ?1",
+            "DELETE FROM symbols     WHERE file_id = ?1",
+            "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
+            "DELETE FROM embeddings WHERE file_id = ?1",
+        ] {
+            self.conn.execute(sql, params![file_id])?;
+        }
+        Ok(())
+    }
+
     /// Delete all index records for a file (FTS, symbols, deps, files row).
     fn delete_file_records(&self, file_id: i64) -> Result<()> {
         self.conn.execute(
@@ -330,8 +345,11 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         db.reset_indexed_sha()?;
     }
 
-    let files = repo.scan()?;
+    let (files, path_skipped) = repo.scan_with_skipped()?;
     let mut stats = IndexStats::default();
+    // Non-UTF-8 paths cannot be stored; they count as seen-but-skipped (#308).
+    stats.files_total += path_skipped;
+    stats.files_skipped += path_skipped;
 
     // Build a set of paths currently tracked in git.
     let git_paths: HashSet<String> = files
@@ -385,6 +403,26 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             let abs_path = repo.root().join(rel_path);
             let source = match repo.read_tracked(rel_path) {
                 Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    // Content is not UTF-8: drop stale symbol/body/dep/embedding
+                    // rows (#286) but keep the files row and a path FTS row so
+                    // the file stays findable by name (#308). indexed_sha stays
+                    // unset so it is retried next run.
+                    eprintln!("warn: unreadable content {:?}: {e}", abs_path);
+                    db.delete_content_records(file_id)?;
+                    db.connection()
+                        .execute("DELETE FROM fts_path WHERE file_id = ?1", params![file_id])?;
+                    db.connection().execute(
+                        "INSERT INTO fts_path (file_id, path) VALUES (?1, ?2)",
+                        params![
+                            file_id,
+                            crate::tokenizer::tokenize_path(&rel_path.to_string_lossy())
+                        ],
+                    )?;
+                    file_paths.remove(&file_id);
+                    stats.files_skipped += 1;
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
                     // Drop stale rows (symbols/FTS/deps/embeddings/files) so
@@ -1299,9 +1337,11 @@ mod tests {
             0
         );
         assert_eq!(count(&db, "SELECT COUNT(*) FROM embeddings"), 0);
+        // The files row (and its path FTS row) is kept so the file stays
+        // findable by name (#308); only content-derived rows are dropped.
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM files WHERE path='a.rs'"),
-            0
+            1
         );
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM files WHERE path='ok.rs'"),
@@ -1474,6 +1514,113 @@ mod tests {
                 s.deps_total
             ),
             (0, 0, 0, 0, 0, 0)
+        );
+    }
+
+    // ---- non-UTF-8 paths / contents (#308) ----
+
+    /// Commit files whose path / content are raw bytes (unix only).
+    #[cfg(unix)]
+    fn repo_with_raw(files: &[(&[u8], &[u8])]) -> (TempDir, GitRepo) {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        for (rel, content) in files {
+            let rel = Path::new(std::ffi::OsStr::from_bytes(rel));
+            let abs = tmp.path().join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, content).unwrap();
+            index.add_path(rel).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "raw", &tree, &[])
+            .unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        (tmp, repo)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_survives_non_utf8_directory_name() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"bad\xffdir/inner.rs", b"fn inner() {}\n"),
+        ]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_total, 2);
+        assert_eq!(stats.files_skipped, 1);
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_does_not_collapse_non_utf8_file_names() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"src/a\xff.rs", b"fn one() {}\n"),
+            (b"src/b\xfe.rs", b"fn two() {}\n"),
+        ]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_total, 3);
+        assert_eq!(stats.files_skipped, 2);
+        let rows = count(&db, "SELECT COUNT(*) FROM files");
+        assert_eq!(rows, 1);
+        assert_eq!(rows as usize, stats.files_total - stats.files_skipped);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files WHERE path='src'"), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_registers_path_fts_for_non_utf8_content() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"zzquuxnotes.rs", b"fn gone() {}\n"),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        // Shift_JIS-ish bytes make the content unreadable as UTF-8.
+        std::fs::write(
+            repo.root().join("zzquuxnotes.rs"),
+            [0x83, 0x65, 0x83, 0x58, 0x83, 0x67, b'\n'],
+        )
+        .unwrap();
+        commit_existing(repo.root(), &["zzquuxnotes.rs"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "gone");
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_path WHERE fts_path MATCH 'zzquuxnotes'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path='zzquuxnotes.rs')"),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_registers_path_fts_for_new_non_utf8_content_file() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"zzfreshnotes.rs", &[0x83, 0x65, 0x83, 0x58, b'\n']),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_path WHERE fts_path MATCH 'zzfreshnotes'"
+            ),
+            1
         );
     }
 }
