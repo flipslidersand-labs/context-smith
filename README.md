@@ -69,7 +69,7 @@ Writes the bundle to the `context.bundle/` directory.
 | `--budget <N>` | `30000` | Token limit |
 | `--out <PATH>` | `context.bundle` | Output directory |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override (use when the index was built with `--out`) |
-| `--explain` | off | Show BM25 scores in `task.md` |
+| `--explain` | off | Show relevance scores in `task.md` |
 | `--diff-commits <N>` | `3` | Number of recent commits to include in the diff |
 | `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 
@@ -101,7 +101,7 @@ contextsmith query --repo . --task "auth error" --format md --explain
 | `--task <TEXT>` | required | Task description |
 | `--budget <N>` | `30000` | Token limit |
 | `--format <json\|md>` | `json` | Output format |
-| `--explain` | off | Show BM25 scores (md format only) |
+| `--explain` | off | Show relevance scores (md format only) |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override |
 | `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 

@@ -356,7 +356,7 @@ mod tests {
                 "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
                  CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
                  CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
-             CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
+                 CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
                  INSERT INTO fts_body (file_id, content) VALUES (1, 'login auth v0 4 0');",
             )
             .unwrap();
