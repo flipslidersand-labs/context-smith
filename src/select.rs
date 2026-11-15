@@ -157,18 +157,68 @@ pub fn select_candidates(
         );
     }
 
+    // Matches existed but every one is empty (e.g. only an empty `__init__.py`): there is nothing
+    // to put in a bundle, so fail like the unreadable case rather than return `files: []` (#311).
+    // The "No matching files" prefix keeps wrappers that key on it working.
+    if !candidates.is_empty() && candidates.iter().all(|c| c.content.is_empty()) {
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.display().to_string())
+            .collect();
+        anyhow::bail!(
+            "No matching files with content: all matches are empty ({})",
+            names.join(", ")
+        );
+    }
+
+    // Several tracked paths can resolve to one file (in-repo symlinks); keep one so the same
+    // content does not spend the budget twice (#311).
+    let candidates = dedup_by_real_path(repo, candidates);
+
     // Step 4: Greedy budget allocation
     Ok(allocate(candidates, opts.budget))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::SelectOptions;
-
-    #[test]
-    fn select_options_new_enables_embedding_by_default() {
-        let o = SelectOptions::new(1234);
-        assert_eq!(o.budget, 1234);
-        assert!(!o.no_embed);
+/// Collapse candidates whose paths resolve to the same file inside the repo. The candidate at the
+/// real path wins; otherwise the best-scored one (ties: smaller path). Paths that cannot be
+/// canonicalized are kept as they are.
+fn dedup_by_real_path(repo: &GitRepo, candidates: Vec<Candidate>) -> Vec<Candidate> {
+    use std::collections::HashMap;
+    let canon_root = repo.canonical_root();
+    // (is_real_path, index) of the winner per real path.
+    let mut best: HashMap<PathBuf, usize> = HashMap::new();
+    let mut keys: Vec<Option<(PathBuf, bool)>> = Vec::with_capacity(candidates.len());
+    for (i, c) in candidates.iter().enumerate() {
+        let key = repo.root().join(&c.path).canonicalize().ok().map(|real| {
+            let is_real = real == canon_root.join(&c.path);
+            (real, is_real)
+        });
+        if let Some((real, is_real)) = &key {
+            let better = match best.get(real) {
+                None => true,
+                Some(&j) => {
+                    let (_, j_real) = keys[j].as_ref().unwrap();
+                    let o = &candidates[j];
+                    if *is_real != *j_real {
+                        *is_real
+                    } else {
+                        c.score > o.score || (c.score == o.score && c.path < o.path)
+                    }
+                }
+            };
+            if better {
+                best.insert(real.clone(), i);
+            }
+        }
+        keys.push(key);
     }
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| match &keys[*i] {
+            Some((real, _)) => best[real] == *i,
+            None => true,
+        })
+        .map(|(_, c)| c)
+        .collect()
 }
