@@ -77,9 +77,9 @@ Writes the bundle to the `context.bundle/` directory.
 
 ```
 context.bundle/
-├── task.md           # Task description + selected file list + recent Git diff
+├── task.md           # Task description + selected file list + recent Git diff (counted in --budget; cut to fit, with a note)
 ├── relevant-code/    # Contents of the selected files (Markdown code blocks)
-└── citations.json    # Per-file scores and token counts (machine-readable)
+└── citations.json    # Per-file scores and token counts (machine-readable); the recent diff is a final entry `(recent diff)`
 ```
 
 ### 3. Query (stdout, for scripts and pipelines)
