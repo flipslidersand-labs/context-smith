@@ -7,7 +7,7 @@ use crate::dep_builder;
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
 /// Message shown when the index DB is locked by another process.
-fn locked_message(path: &Path, detail: &str) -> String {
+pub(crate) fn locked_message(path: &Path, detail: &str) -> String {
     format!(
         "Index DB {} is locked by another process (an 'index' may be running). \
          Wait for it to finish and retry. ({detail})",
@@ -16,7 +16,7 @@ fn locked_message(path: &Path, detail: &str) -> String {
 }
 
 /// True if any error in the chain is SQLITE_BUSY / SQLITE_LOCKED (by code).
-fn is_lock_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
         matches!(
             e.downcast_ref::<rusqlite::Error>(),
@@ -327,6 +327,14 @@ impl IndexDb {
     }
 }
 
+/// Version of the extraction logic and index format. Bump by hand whenever a
+/// change alters what is stored: symbols/deps/FTS extraction or the index
+/// format. An index built with a different value (or none) is rebuilt in full.
+/// Deliberately not the crate version, so unrelated releases keep the index.
+pub const EXTRACT_VERSION: u32 = 1;
+
+const EXTRACT_VERSION_KEY: &str = "extract_version";
+
 pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
     build_index_inner(repo, db, force).map_err(|e| {
         if is_lock_error(&e) {
@@ -340,6 +348,27 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
 
 fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
     db.init_schema()?;
+
+    // An index built by a different extractor version (or a pre-versioning
+    // one with no record) is rebuilt through the same path as `--force`.
+    let mut force = force;
+    if !force {
+        let stored: Option<String> = db
+            .connection()
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![EXTRACT_VERSION_KEY],
+                |r| r.get(0),
+            )
+            .ok();
+        let has_files: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+        if has_files > 0 && stored.as_deref() != Some(EXTRACT_VERSION.to_string().as_str()) {
+            eprintln!("note: index built by an older extractor; rebuilding");
+            force = true;
+        }
+    }
 
     if force {
         db.reset_indexed_sha()?;
@@ -533,6 +562,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         .as_secs()
         .to_string();
     db.upsert_meta("indexed_at", &indexed_at)?;
+    db.upsert_meta(EXTRACT_VERSION_KEY, &EXTRACT_VERSION.to_string())?;
 
     Ok(stats)
 }
@@ -947,6 +977,52 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 2);
+    }
+
+    fn stale_extractor_index_is_rebuilt(set_old: Option<&str>) {
+        let (_tmp, repo) = repo_with(&[
+            ("pkg/main.py", "from pkg import helper\n"),
+            ("pkg/helper.py", "def h():\n    pass\n"),
+            ("pkg/__init__.py", ""),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert!(count(&db, "SELECT COUNT(*) FROM deps") > 0);
+        // Simulate an index made by an older extractor that missed the deps.
+        db.connection().execute("DELETE FROM deps", []).unwrap();
+        match set_old {
+            Some(v) => db.upsert_meta("extract_version", v).unwrap(),
+            None => {
+                db.connection()
+                    .execute("DELETE FROM meta WHERE key='extract_version'", [])
+                    .unwrap();
+            }
+        }
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_skipped, 0);
+        assert!(count(&db, "SELECT COUNT(*) FROM deps") > 0);
+        let v: String = db
+            .connection()
+            .query_row(
+                "SELECT value FROM meta WHERE key='extract_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, EXTRACT_VERSION.to_string());
+        // Same version again: incremental, nothing re-indexed.
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_indexed, 0);
+    }
+
+    #[test]
+    fn build_index_rebuilds_when_extract_version_is_older() {
+        stale_extractor_index_is_rebuilt(Some("0"));
+    }
+
+    #[test]
+    fn build_index_rebuilds_when_extract_version_is_missing() {
+        stale_extractor_index_is_rebuilt(None);
     }
 
     #[test]

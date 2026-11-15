@@ -92,13 +92,14 @@ pub struct GitRepo {
 }
 
 /// Marker payload of the `io::Error` returned when a read is refused because
-/// the resolved target is outside the repo or inside a `.git` directory.
+/// the resolved target is outside the repo, inside a `.git` directory, or (for a
+/// symlink) an untracked file.
 #[derive(Debug)]
 pub struct PathEscape;
 
 impl std::fmt::Display for PathEscape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("path resolves outside the repository (or into .git)")
+        f.write_str("path resolves outside the repository, into .git, or via a symlink to an untracked file")
     }
 }
 
@@ -120,6 +121,21 @@ pub fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<S
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
+/// True if `real` (canonical, inside `canonical_root`) is a stage-0 entry in the
+/// repo's index. Fails closed on any error.
+fn is_tracked_in_index(canonical_root: &Path, real: &Path) -> bool {
+    let Ok(rel) = real.strip_prefix(canonical_root) else {
+        return false;
+    };
+    let Some(rel) = rel.to_str() else {
+        return false;
+    };
+    git2::Repository::open(canonical_root)
+        .and_then(|r| r.index())
+        .map(|idx| idx.get_path(Path::new(rel), 0).is_some())
+        .unwrap_or(false)
+}
+
 pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
@@ -127,6 +143,14 @@ pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Re
         Ok(rest) => rest.components().any(|c| c.as_os_str() == ".git"),
     };
     if denied {
+        return Err(std::io::Error::other(PathEscape));
+    }
+    // A symlink may only lead to a *tracked* file; otherwise a committed link
+    // (e.g. x.py -> .env) would expose untracked / gitignored files (#328).
+    let is_link = std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_link && !is_tracked_in_index(canonical_root, &real) {
         return Err(std::io::Error::other(PathEscape));
     }
     std::fs::read(real)
@@ -172,6 +196,11 @@ impl GitRepo {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The canonicalized repository root (symlinks resolved).
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
     }
 
     /// Unified diff of the last n_commits commits (empty string if repo has no history).
@@ -998,6 +1027,63 @@ mod tests {
         commit_files(tmp.path(), &[("a.txt", "small\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert!(!repo.recent_diff(1).unwrap().contains("[diff truncated]"));
+    }
+
+    #[cfg(unix)]
+    fn symlink_repo() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("real.py"), "def real(): pass\n").unwrap();
+        std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap(); // never added
+        std::os::unix::fs::symlink(".env", tmp.path().join("a.py")).unwrap();
+        std::os::unix::fs::symlink("real.py", tmp.path().join("b.py")).unwrap();
+        let mut index = git.index().unwrap();
+        for f in ["real.py", "a.py", "b.py"] {
+            index.add_path(Path::new(f)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        tmp
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_symlink_to_untracked_file() {
+        let tmp = symlink_repo();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("a.py")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
+        assert!(err.to_string().contains("untracked"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_allows_symlink_to_tracked_file() {
+        let tmp = symlink_repo();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert_eq!(
+            repo.read_tracked(Path::new("b.py")).unwrap(),
+            "def real(): pass\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_symlink_to_untracked_file() {
+        let tmp = symlink_repo();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let names: Vec<String> = repo
+            .scan()
+            .unwrap()
+            .into_iter()
+            .map(|(p, ..)| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(!names.contains(&"a.py".to_string()), "{names:?}");
+        assert!(names.contains(&"b.py".to_string()), "{names:?}");
+        assert!(names.contains(&"real.py".to_string()), "{names:?}");
     }
 
     // ---- SymbolExtractor ----
