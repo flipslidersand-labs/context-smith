@@ -32,7 +32,8 @@ jobs:
   # reusable は feature 切替を渡せないため、system SQLite 構成だけローカルに残す
   test-no-default:
     name: test (no-default-features / system SQLite)
-    runs-on: ${{ vars.GATE_RUNNER || 'ubuntu-latest' }}
+    # 公開リポ: repo-compass ADR-010 の標準形 (既定値なし)。変数は ubuntu-latest (GitHub-hosted) で固定
+    runs-on: ${{ vars.GATE_RUNNER }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -55,7 +56,8 @@ jobs:
 
   adapter:
     name: adapter (Claude Code skill)
-    runs-on: ubuntu-latest
+    # 公開リポ: repo-compass ADR-010 の標準形。変数は ubuntu-latest (GitHub-hosted) で固定
+    runs-on: ${{ vars.GATE_RUNNER }}
     needs: rust
     steps:
       - uses: actions/checkout@v7
