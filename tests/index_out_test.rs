@@ -77,3 +77,18 @@ fn out_does_not_touch_the_repository() {
         String::from_utf8_lossy(&status.stdout)
     );
 }
+
+#[test]
+fn empty_out_is_rejected() {
+    let repo = committed_repo();
+    let out = bin(&[
+        "index",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--out",
+        "",
+    ]);
+    assert!(!out.status.success(), "index --out \"\" must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("must not be empty"), "stderr: {err}");
+}
