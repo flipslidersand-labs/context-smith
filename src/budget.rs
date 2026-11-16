@@ -2,19 +2,22 @@ use std::path::PathBuf;
 
 /// A file candidate for bundle inclusion, scored and sized.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Candidate {
-    pub file_id: i64,
+    // Internal row id; not part of the public API (no reader inside the crate yet).
+    #[allow(dead_code)]
+    pub(crate) file_id: i64,
     pub path: PathBuf,
     pub score: f32,
     pub content: String,
-    /// True when `content` is a prefix cut by [`allocate`] to fit the budget.
+    /// True when `content` is a prefix cut by `allocate` to fit the budget.
     pub truncated: bool,
     /// Token count of the full file before truncation (meaningful only when `truncated`).
     pub original_tokens: usize,
 }
 
 impl Candidate {
-    /// Estimated token count of the file content (see [`estimate_tokens`]).
+    /// Estimated token count of the file content (see `estimate_tokens`).
     pub fn tokens(&self) -> usize {
         estimate_tokens(&self.content)
     }
@@ -53,7 +56,7 @@ pub fn estimate_tokens(content: &str) -> usize {
 /// Take the longest prefix of `content` whose estimated token count does not exceed
 /// `max_tokens`. Cuts on a UTF-8 char boundary and uses the same weighting as
 /// [`estimate_tokens`], so ASCII and multi-byte content are truncated consistently.
-fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
+pub fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
         return String::new();
     }
