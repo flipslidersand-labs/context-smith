@@ -517,7 +517,7 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             traverse_rust(child, src, out);
         }
@@ -552,7 +552,7 @@ fn collect_python_node(
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_python_node(child, src, out);
         }
@@ -626,7 +626,7 @@ fn collect_ecma_node(
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_ecma_node(child, src, out);
         }
@@ -648,7 +648,7 @@ fn collect_go_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, S
             }
         }
         "type_declaration" => {
-            for i in 0..node.child_count() {
+            for i in 0..node.child_count() as u32 {
                 if let Some(spec) = node.child(i) {
                     if spec.kind() == "type_spec" {
                         if let Some(name) = spec.child_by_field_name("name") {
@@ -663,7 +663,7 @@ fn collect_go_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, S
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_go_node(child, src, out);
         }
@@ -709,7 +709,7 @@ fn collect_ruby_node(
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_ruby_node(child, src, out);
         }

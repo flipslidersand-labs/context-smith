@@ -218,13 +218,13 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
-             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank, file_id LIMIT ?5)
+             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
-             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
          )
          GROUP BY file_id
          ORDER BY total DESC, (SELECT path FROM files WHERE files.id = file_id), file_id
@@ -390,15 +390,33 @@ mod tests {
         conn
     }
 
-    /// #311: files that tie on score must be cut by `file_id`, not by SQLite's internal order
-    /// (here: insertion order, which is reversed relative to file_id).
+    /// #311: files that tie on score must be cut at the limit by `path`, not by `file_id`
+    /// (which changes on re-index) or SQLite's internal order. The same files with their ids
+    /// assigned in the opposite order (a re-index) must yield the same candidate set.
     #[test]
-    fn ties_are_cut_by_file_id_at_the_limit() {
-        let docs: Vec<(i64, &str)> = (1..=20).rev().map(|i| (i, "tiebreak sameword")).collect();
-        let conn = fts_conn(&docs);
-        let hits = super::search_bm25(&conn, "sameword", 2).unwrap();
-        let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
-        assert_eq!(ids, vec![1, 2], "{hits:?}");
+    fn ties_are_cut_by_path_at_the_limit() {
+        let paths_for = |reverse: bool| -> Vec<String> {
+            let docs: Vec<(i64, &str)> = (1..=20).rev().map(|i| (i, "tiebreak sameword")).collect();
+            let conn = fts_conn(&docs);
+            for id in 1..=20i64 {
+                let n = if reverse { 21 - id } else { id };
+                conn.execute(
+                    "UPDATE files SET path = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("p{n:02}.rs"), id],
+                )
+                .unwrap();
+            }
+            let hits = super::search_bm25(&conn, "sameword", 2).unwrap();
+            hits.iter()
+                .map(|h| {
+                    conn.query_row("SELECT path FROM files WHERE id = ?1", [h.0], |r| r.get(0))
+                        .unwrap()
+                })
+                .collect()
+        };
+        let expected = vec!["p01.rs".to_string(), "p02.rs".to_string()];
+        assert_eq!(paths_for(false), expected);
+        assert_eq!(paths_for(true), expected);
     }
 
     /// Ties must be ordered by path, not by `file_id` (which changes on re-index).
