@@ -59,8 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The index now follows the working tree: file hashes are computed from the working-tree
   content, so uncommitted edits are indexed and reverting them is picked up. Unchanged files
   are not reprocessed (#184).
-- Library users: `rusqlite` is updated from 0.31 to 0.41, and `rusqlite::Connection` appears
-  in public signatures, so this is a breaking change for library users (#305).
+- Library users: `rusqlite` is updated from 0.31 to 0.41. This was a breaking change for
+  library users because `rusqlite::Connection` appeared in public signatures (#305); the
+  public API narrowing removes those types from public signatures (#307, #322), so later
+  `rusqlite` updates no longer break library users.
 - Library users: `populate_fts_with_paths` is no longer public (it is test-only), which is a
   breaking change (#315).
 - A lock conflict with another `index` run, or with a write in progress, now reports
