@@ -69,7 +69,7 @@ Writes the bundle to the `context.bundle/` directory.
 | `--budget <N>` | `30000` | Token limit for the whole bundle (`task.md` + `relevant-code/`, incl. headers and the diff; the diff is cut to fit, files are shrunk first). File bodies take priority; the diff gets only what is left, and when none of it fits `task.md` still shows `## Recent Diff` with an omitted note. `Used` in `task.md` is the real total. If the fixed headers alone exceed a tiny budget, file bodies and diff are dropped and `Used` shows the overshoot |
 | `--out <PATH>` | `context.bundle` | Output directory |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override (use when the index was built with `--out`) |
-| `--explain` | off | Show BM25 scores in `task.md` |
+| `--explain` | off | Show relevance scores in `task.md` |
 | `--diff-commits <N>` | `3` | Number of recent commits to include in the diff |
 | `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 
@@ -101,7 +101,7 @@ contextsmith query --repo . --task "auth error" --format md --explain
 | `--task <TEXT>` | required | Task description |
 | `--budget <N>` | `30000` | Token limit for the whole bundle (`task.md` + `relevant-code/`, incl. headers and the diff; the diff is cut to fit, files are shrunk first). File bodies take priority; the diff gets only what is left, and when none of it fits `task.md` still shows `## Recent Diff` with an omitted note. `Used` in `task.md` is the real total. If the fixed headers alone exceed a tiny budget, file bodies and diff are dropped and `Used` shows the overshoot |
 | `--format <json\|md>` | `json` | Output format |
-| `--explain` | off | Show BM25 scores (md format only) |
+| `--explain` | off | Show relevance scores (md format only) |
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override |
 | `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 

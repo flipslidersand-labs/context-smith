@@ -136,6 +136,24 @@ fn is_tracked_in_index(canonical_root: &Path, real: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True if `path` or any ancestor below the repo root is a symlink. Walks up,
+/// checking each component itself *before* deciding whether it is the root, so a
+/// link that resolves to the root (`docs -> .`) is still caught. Fails closed
+/// (true) if the root is never reached.
+fn path_has_symlink_component(canonical_root: &Path, path: &Path) -> bool {
+    for (i, anc) in path.ancestors().enumerate() {
+        match std::fs::symlink_metadata(anc) {
+            Ok(m) if m.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+        if i > 0 && anc.canonicalize().is_ok_and(|p| p == canonical_root) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
@@ -147,9 +165,9 @@ pub fn read_bytes_within_root(canonical_root: &Path, path: &Path) -> std::io::Re
     }
     // A symlink may only lead to a *tracked* file; otherwise a committed link
     // (e.g. x.py -> .env) would expose untracked / gitignored files (#328).
-    let is_link = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
+    // Any path component (not just the last) may be a symlink, e.g. a tracked
+    // `docs -> ignored_dir` directory link.
+    let is_link = path_has_symlink_component(canonical_root, path);
     if is_link && !is_tracked_in_index(canonical_root, &real) {
         return Err(std::io::Error::other(PathEscape));
     }
@@ -499,7 +517,7 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             traverse_rust(child, src, out);
         }
@@ -534,7 +552,7 @@ fn collect_python_node(
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_python_node(child, src, out);
         }
@@ -608,7 +626,7 @@ fn collect_ecma_node(
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_ecma_node(child, src, out);
         }
@@ -630,7 +648,7 @@ fn collect_go_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, S
             }
         }
         "type_declaration" => {
-            for i in 0..node.child_count() {
+            for i in 0..node.child_count() as u32 {
                 if let Some(spec) = node.child(i) {
                     if spec.kind() == "type_spec" {
                         if let Some(name) = spec.child_by_field_name("name") {
@@ -645,7 +663,7 @@ fn collect_go_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, S
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_go_node(child, src, out);
         }
@@ -691,7 +709,7 @@ fn collect_ruby_node(
         }
         _ => {}
     }
-    for i in 0..node.child_count() {
+    for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
             collect_ruby_node(child, src, out);
         }
@@ -1084,6 +1102,61 @@ mod tests {
         assert!(!names.contains(&"a.py".to_string()), "{names:?}");
         assert!(names.contains(&"b.py".to_string()), "{names:?}");
         assert!(names.contains(&"real.py".to_string()), "{names:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_file_via_symlinked_directory_to_untracked() {
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        std::fs::create_dir(tmp.path().join("ignored_dir")).unwrap();
+        std::fs::write(tmp.path().join("ignored_dir/secret.py"), "S=1\n").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "ignored_dir/\n").unwrap();
+        std::os::unix::fs::symlink("ignored_dir", tmp.path().join("docs")).unwrap();
+        let mut index = git.index().unwrap();
+        for f in [".gitignore", "docs"] {
+            index.add_path(Path::new(f)).unwrap();
+        }
+        index.write().unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("docs/secret.py")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
+    }
+
+    #[cfg(unix)]
+    fn commit_dir_link(link: &str, target: &str, extra_dir: Option<&str>) -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), ".env\n").unwrap();
+        if let Some(d) = extra_dir {
+            std::fs::create_dir_all(tmp.path().join(d)).unwrap();
+        }
+        std::os::unix::fs::symlink(target, tmp.path().join(link)).unwrap();
+        let mut index = git.index().unwrap();
+        for f in [".gitignore", link] {
+            index.add_path(Path::new(f)).unwrap();
+        }
+        index.write().unwrap();
+        tmp
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_via_dir_symlink_to_root() {
+        let tmp = commit_dir_link("docs", ".", None);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("docs/.env")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tracked_refuses_via_nested_dir_symlink_to_parent() {
+        let tmp = commit_dir_link("a/b", "..", Some("a"));
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let err = repo.read_tracked(Path::new("a/b/.env")).unwrap_err();
+        assert!(is_path_escape(&err), "{err}");
     }
 
     // ---- SymbolExtractor ----

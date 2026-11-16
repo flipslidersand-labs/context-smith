@@ -5,7 +5,7 @@ use std::collections::HashSet;
 // BM25 signal weights (higher = stronger signal).
 // path: file-name/directory match is the strongest localization cue.
 // symbols: function/type names match the task vocabulary directly. Kept low (0.5): symbol
-//   matches are plentiful and noisy; at the old 2.0 they pushed the right file down (#135).
+//   matches are plentiful and noisy; at the old 2.0 a file with many symbols outranked the best match (#151).
 // body: full-text fallback, broadest but noisiest.
 const W_PATH: f64 = 3.0;
 const W_SYMBOLS: f64 = 0.5;
@@ -180,7 +180,7 @@ pub fn populate_fts_with_paths(
 
 /// BM25 search across fts_path (×3), fts_symbols (×0.5, best match per file) and fts_body (×1).
 ///
-/// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MAX(rank)` so
+/// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MIN(rank)` (BM25 `rank` is negative, so MIN is the best match) so
 /// that the absolute magnitude difference between small path tables and large body tables
 /// does not drown out the configured weights.  Each sub-query is also limited to
 /// `top_n * 3` rows before the UNION ALL to prevent intermediate memory explosion.
@@ -210,7 +210,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     // preventing intermediate memory explosion.
     // fts_symbols has one row per symbol while fts_path / fts_body have one row per file, so its
     // rows are collapsed to the best match per file (`MIN(rank)`); summing them let a file with many
-    // symbols outrank the file that matches the task best (#135).
+    // symbols outrank the file that matches the task best (#151).
     // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
     // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
     let sub_limit = (top_n * 3) as i64;
@@ -218,16 +218,16 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
-             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_path    WHERE path    MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?2 AS score
-             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank, file_id LIMIT ?5)
+             FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
-             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, file_id LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
          )
          GROUP BY file_id
-         ORDER BY total DESC, file_id
+         ORDER BY total DESC, (SELECT path FROM files WHERE files.id = file_id), file_id
          LIMIT ?6",
     )?;
     let rows: Vec<(i64, f32)> = stmt
@@ -319,6 +319,7 @@ mod tests {
             "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
              CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
              CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+             CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
              INSERT INTO fts_body (file_id, content) VALUES (1, 'login 1 v0 4 0 auth');",
         )
         .unwrap();
@@ -355,6 +356,7 @@ mod tests {
                 "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
                  CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
                  CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+                 CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);
                  INSERT INTO fts_body (file_id, content) VALUES (1, 'login auth v0 4 0');",
             )
             .unwrap();
@@ -369,10 +371,16 @@ mod tests {
         conn.execute_batch(
             "CREATE VIRTUAL TABLE fts_path USING fts5(file_id UNINDEXED, path);
              CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
-             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);",
+             CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
+             CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT);",
         )
         .unwrap();
         for (id, text) in docs {
+            conn.execute(
+                "INSERT INTO files (id, path) VALUES (?1, ?2)",
+                rusqlite::params![id, format!("f{id:02}.rs")],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
                 rusqlite::params![id, text],
@@ -382,15 +390,48 @@ mod tests {
         conn
     }
 
-    /// #311: files that tie on score must be cut by `file_id`, not by SQLite's internal order
-    /// (here: insertion order, which is reversed relative to file_id).
+    /// #311: files that tie on score must be cut at the limit by `path`, not by `file_id`
+    /// (which changes on re-index) or SQLite's internal order. The same files with their ids
+    /// assigned in the opposite order (a re-index) must yield the same candidate set.
     #[test]
-    fn ties_are_cut_by_file_id_at_the_limit() {
-        let docs: Vec<(i64, &str)> = (1..=20).rev().map(|i| (i, "tiebreak sameword")).collect();
-        let conn = fts_conn(&docs);
-        let hits = super::search_bm25(&conn, "sameword", 2).unwrap();
+    fn ties_are_cut_by_path_at_the_limit() {
+        let paths_for = |reverse: bool| -> Vec<String> {
+            let docs: Vec<(i64, &str)> = (1..=20).rev().map(|i| (i, "tiebreak sameword")).collect();
+            let conn = fts_conn(&docs);
+            for id in 1..=20i64 {
+                let n = if reverse { 21 - id } else { id };
+                conn.execute(
+                    "UPDATE files SET path = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("p{n:02}.rs"), id],
+                )
+                .unwrap();
+            }
+            let hits = super::search_bm25(&conn, "sameword", 2).unwrap();
+            hits.iter()
+                .map(|h| {
+                    conn.query_row("SELECT path FROM files WHERE id = ?1", [h.0], |r| r.get(0))
+                        .unwrap()
+                })
+                .collect()
+        };
+        let expected = vec!["p01.rs".to_string(), "p02.rs".to_string()];
+        assert_eq!(paths_for(false), expected);
+        assert_eq!(paths_for(true), expected);
+    }
+
+    /// Ties must be ordered by path, not by `file_id` (which changes on re-index).
+    #[test]
+    fn ties_are_ordered_by_path_not_file_id() {
+        let conn = fts_conn(&[(1, "sameword"), (2, "sameword"), (3, "sameword")]);
+        conn.execute_batch(
+            "UPDATE files SET path = 'c.rs' WHERE id = 1;
+             UPDATE files SET path = 'b.rs' WHERE id = 2;
+             UPDATE files SET path = 'a.rs' WHERE id = 3;",
+        )
+        .unwrap();
+        let hits = super::search_bm25(&conn, "sameword", 3).unwrap();
         let ids: Vec<i64> = hits.iter().map(|h| h.0).collect();
-        assert_eq!(ids, vec![1, 2], "{hits:?}");
+        assert_eq!(ids, vec![3, 2, 1], "{hits:?}");
     }
 
     /// #135: a long task is dominated by common words under a plain OR-join. Only the
