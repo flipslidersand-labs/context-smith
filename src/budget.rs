@@ -53,7 +53,7 @@ pub fn estimate_tokens(content: &str) -> usize {
 /// Take the longest prefix of `content` whose estimated token count does not exceed
 /// `max_tokens`. Cuts on a UTF-8 char boundary and uses the same weighting as
 /// [`estimate_tokens`], so ASCII and multi-byte content are truncated consistently.
-fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
+pub fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
         return String::new();
     }

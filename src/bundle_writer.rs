@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::budget::Candidate;
+use crate::budget::{allocate, estimate_tokens, truncate_to_tokens, Candidate};
 
 #[derive(Serialize)]
 pub struct Citation {
@@ -25,9 +25,107 @@ pub fn truncation_note(c: &Candidate) -> Option<String> {
     })
 }
 
+/// Label used for the recent diff entry in `citations.json`.
+pub const DIFF_CITATION_PATH: &str = "(recent diff)";
+
+/// The recent-diff section of `task.md`, fitted to the remaining token budget.
+#[derive(Debug, Clone, Default)]
+pub struct DiffPart {
+    /// Rendered Markdown section (empty when nothing is shown).
+    pub text: String,
+    /// Estimated tokens of `text` (counted against the budget).
+    pub tokens: usize,
+    /// Estimated tokens of the full diff before any cut.
+    pub original_tokens: usize,
+    /// True when the diff was cut or dropped to fit.
+    pub truncated: bool,
+}
+
+fn diff_section(body: &str, note: Option<&str>) -> String {
+    let mut s = String::from("\n## Recent Diff\n\n");
+    if !body.is_empty() {
+        let fence = safe_fence(body);
+        s.push_str(&format!("{fence}diff\n{body}\n{fence}\n"));
+    }
+    if let Some(n) = note {
+        if !body.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(n);
+        s.push('\n');
+    }
+    s
+}
+
+fn omitted_note(diff: &str) -> String {
+    format!(
+        "[diff omitted: 0 of {} tokens fit in the budget]",
+        estimate_tokens(diff)
+    )
+}
+
+/// Fit the recent diff into `remaining` tokens (the whole section, including
+/// heading, fences and note, is counted). A cut diff is trimmed to whole lines and
+/// followed by a note outside the fence, so the fence stays intact.
+pub fn fit_diff(diff: &str, remaining: usize) -> DiffPart {
+    if diff.is_empty() {
+        return DiffPart::default();
+    }
+    let original_tokens = estimate_tokens(diff);
+    let full = diff_section(diff, None);
+    let full_tokens = estimate_tokens(&full);
+    if full_tokens <= remaining {
+        return DiffPart {
+            text: full,
+            tokens: full_tokens,
+            original_tokens,
+            truncated: false,
+        };
+    }
+    let mut cap = remaining;
+    loop {
+        let mut body = truncate_to_tokens(diff, cap);
+        // Cut back to a line boundary so a half line is not shown.
+        match body.rfind('\n') {
+            Some(i) => body.truncate(i),
+            None => body.clear(),
+        }
+        let note = if body.is_empty() {
+            omitted_note(diff)
+        } else {
+            format!(
+                "[diff truncated: first {} of {original_tokens} tokens]",
+                estimate_tokens(&body)
+            )
+        };
+        let text = diff_section(&body, Some(&note));
+        let tokens = estimate_tokens(&text);
+        if tokens <= remaining {
+            return DiffPart {
+                text,
+                tokens,
+                original_tokens,
+                truncated: true,
+            };
+        }
+        if cap == 0 {
+            // Even the bare note does not fit: still show it (never cut silently);
+            // the overshoot is visible in `Used`.
+            return DiffPart {
+                tokens,
+                text,
+                original_tokens,
+                truncated: true,
+            };
+        }
+        cap = (cap - 1).min(cap * 9 / 10);
+    }
+}
+
 /// Render the `task.md` document (task description, selected file list, and the
 /// recent diff) as a String. Shared by [`write_bundle`] and the `query` command
-/// so both produce identical Markdown.
+/// so both produce identical Markdown. The diff counts toward `budget` and is cut
+/// to fit what the selected files leave over.
 pub fn render_task_md(
     task: &str,
     budget: usize,
@@ -35,7 +133,17 @@ pub fn render_task_md(
     diff_summary: &str,
     explain: bool,
 ) -> String {
-    let used: usize = selected.iter().map(|c| c.tokens()).sum();
+    render_task_md_parts(task, budget, selected, diff_summary, explain).0
+}
+
+/// Header + selected-file list of `task.md` (everything except the diff section).
+fn render_head(
+    task: &str,
+    budget: usize,
+    used: usize,
+    selected: &[Candidate],
+    explain: bool,
+) -> String {
     // Collapse newlines/whitespace runs so the task cannot inject block-level
     // Markdown structure (inline HTML in the task is out of scope). Paths are
     // escaped separately by `inline_code`.
@@ -60,15 +168,141 @@ pub fn render_task_md(
             note,
         ));
     }
-
-    if !diff_summary.is_empty() {
-        let fence = safe_fence(diff_summary);
-        task_md.push_str(&format!("\n## Recent Diff\n\n{fence}diff\n"));
-        task_md.push_str(diff_summary);
-        task_md.push_str(&format!("\n{fence}\n"));
-    }
-
     task_md
+}
+
+fn render_task_md_parts(
+    task: &str,
+    budget: usize,
+    selected: &[Candidate],
+    diff_summary: &str,
+    explain: bool,
+) -> (String, DiffPart) {
+    let files_used: usize = selected.iter().map(|c| c.tokens()).sum();
+    let diff = fit_diff(diff_summary, budget.saturating_sub(files_used));
+    let used = files_used + diff.tokens;
+    let mut task_md = render_head(task, budget, used, selected, explain);
+    task_md.push_str(&diff.text);
+    (task_md, diff)
+}
+
+/// Markdown of one `relevant-code/*.md` file.
+fn render_file_md(c: &Candidate) -> String {
+    let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+    let fence = safe_fence(&c.content);
+    let mut file_md = format!(
+        "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
+        comment_path(&c.path.to_string_lossy()),
+        c.content,
+    );
+    if let Some(note) = truncation_note(c) {
+        file_md.push_str(&format!("\n{note}\n"));
+    }
+    file_md
+}
+
+/// Shrink `selected` so its file bodies total at most `eff` tokens, keeping the
+/// original (pre-cut) token counts of already-truncated files.
+fn shrink_selection(selected: &[Candidate], eff: usize) -> Vec<Candidate> {
+    if eff == 0 {
+        return Vec::new();
+    }
+    if selected.iter().map(|c| c.tokens()).sum::<usize>() <= eff {
+        return selected.to_vec();
+    }
+    allocate(selected.to_vec(), eff)
+        .into_iter()
+        .map(|mut c| {
+            if let Some(prev) = selected
+                .iter()
+                .find(|p| p.file_id == c.file_id && p.path == c.path)
+            {
+                if prev.truncated {
+                    c.original_tokens = prev.original_tokens;
+                }
+            }
+            c
+        })
+        .collect()
+}
+
+/// A fully rendered bundle whose `task.md` plus `relevant-code/*.md` fit `budget`
+/// (unless the fixed overhead alone exceeds it; then bodies and diff are empty and
+/// `used` reports the real overshoot).
+struct Rendered {
+    task_md: String,
+    selected: Vec<Candidate>,
+    file_mds: Vec<String>,
+    diff: DiffPart,
+    used: usize,
+}
+
+fn render_bundle(
+    task: &str,
+    budget: usize,
+    selected: &[Candidate],
+    diff_summary: &str,
+    explain: bool,
+) -> Rendered {
+    let file_tokens = |sel: &[Candidate]| -> usize {
+        sel.iter()
+            .map(|c| estimate_tokens(&render_file_md(c)))
+            .sum()
+    };
+    // Fixed overhead (header, list, per-file wrappers) is charged before the file
+    // bodies: lower the body budget until head + files fit.
+    let mut eff = selected
+        .iter()
+        .map(|c| c.tokens())
+        .sum::<usize>()
+        .min(budget);
+    // Reserve room for the "diff omitted" note so a dropped diff is never silent.
+    let reserve_text = if diff_summary.is_empty() {
+        String::new()
+    } else {
+        diff_section("", Some(&omitted_note(diff_summary)))
+    };
+    let (sel, fixed) = loop {
+        let sel = shrink_selection(selected, eff);
+        let head = render_head(task, budget, budget, &sel, explain);
+        let files = file_tokens(&sel);
+        let fixed = estimate_tokens(&head) + files;
+        // Measured on the concatenated text: estimates are not additive across strings.
+        let with_reserve = estimate_tokens(&format!("{head}{reserve_text}")) + files;
+        if with_reserve <= budget || eff == 0 {
+            break (sel, fixed);
+        }
+        eff = eff.saturating_sub((with_reserve - budget).max(1));
+    };
+    let file_mds: Vec<String> = sel.iter().map(render_file_md).collect();
+
+    // Fit the diff into what is left; re-check the whole because token estimates
+    // are not exactly additive across strings.
+    let mut remaining = budget.saturating_sub(fixed);
+    loop {
+        let diff = fit_diff(diff_summary, remaining);
+        let mut used = budget;
+        let mut task_md = String::new();
+        for _ in 0..8 {
+            task_md = render_head(task, budget, used, &sel, explain);
+            task_md.push_str(&diff.text);
+            let actual = estimate_tokens(&task_md) + file_tokens(&sel);
+            if actual == used {
+                break;
+            }
+            used = actual;
+        }
+        if used <= budget || remaining == 0 {
+            return Rendered {
+                task_md,
+                selected: sel,
+                file_mds,
+                diff,
+                used,
+            };
+        }
+        remaining = remaining.saturating_sub((used - budget).max(1));
+    }
 }
 
 /// Replace line breaks with visible escapes so a path stays on one line.
@@ -188,7 +422,18 @@ fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write a context bundle to `out_dir`.
+/// Written bundle summary.
+#[derive(Debug, Clone, Copy)]
+pub struct BundleStats {
+    /// Estimated tokens of `task.md` plus all `relevant-code/*.md` (= the `Used` shown).
+    pub used: usize,
+    /// Number of files written to `relevant-code/`.
+    pub files: usize,
+}
+
+/// Write a context bundle to `out_dir`. Everything written (`task.md` and
+/// `relevant-code/`) is counted against `budget`; the selection is shrunk, and the
+/// diff cut, to fit.
 ///
 /// Layout:
 ///   out_dir/
@@ -202,7 +447,7 @@ pub fn write_bundle(
     diff_summary: &str,
     out_dir: &Path,
     explain: bool,
-) -> Result<()> {
+) -> Result<BundleStats> {
     // Refuse a symlinked --out (final component only; parents may legitimately be links,
     // e.g. /tmp on macOS). `components()` drops a trailing slash so `link/` is checked too.
     let out_checked: std::path::PathBuf = out_dir.components().collect();
@@ -238,13 +483,20 @@ pub fn write_bundle(
     }
     std::fs::create_dir_all(&rc_dir)?;
 
-    let task_md = render_task_md(task, budget, selected, diff_summary, explain);
+    let Rendered {
+        task_md,
+        selected,
+        file_mds,
+        diff,
+        used,
+    } = render_bundle(task, budget, selected, diff_summary, explain);
+    let selected = &selected[..];
     write_file_no_symlink(&out_dir.join("task.md"), &task_md)?;
 
     // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for c in selected {
+    for (c, file_md) in selected.iter().zip(&file_mds) {
         let base_slug = base_slug(&c.path.to_string_lossy());
         // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
         // so generated `_N` slugs never collide with another base slug and
@@ -258,21 +510,11 @@ pub fn write_bundle(
             }
         };
 
-        let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
-        let fence = safe_fence(&c.content);
-        let mut file_md = format!(
-            "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
-            comment_path(&c.path.to_string_lossy()),
-            c.content,
-        );
-        if let Some(note) = truncation_note(c) {
-            file_md.push_str(&format!("\n{note}\n"));
-        }
-        write_file_no_symlink(&rc_dir.join(format!("{slug}.md")), &file_md)?;
+        write_file_no_symlink(&rc_dir.join(format!("{slug}.md")), file_md)?;
     }
 
     // citations.json
-    let citations: Vec<Citation> = selected
+    let mut citations: Vec<Citation> = selected
         .iter()
         .map(|c| Citation {
             path: c.path.clone(),
@@ -282,10 +524,22 @@ pub fn write_bundle(
             truncated: c.truncated,
         })
         .collect();
+    if diff.original_tokens > 0 {
+        citations.push(Citation {
+            path: PathBuf::from(DIFF_CITATION_PATH),
+            score: 0.0,
+            tokens: diff.tokens,
+            reason: "recent_diff".to_string(),
+            truncated: diff.truncated,
+        });
+    }
     let json = serde_json::to_string_pretty(&citations)?;
     write_file_no_symlink(&out_dir.join("citations.json"), &json)?;
 
-    Ok(())
+    Ok(BundleStats {
+        used,
+        files: selected.len(),
+    })
 }
 
 #[cfg(test)]
@@ -874,6 +1128,124 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&cj).unwrap();
         assert_eq!(v[0]["truncated"], true);
         assert_eq!(v[1]["truncated"], false);
+    }
+
+    fn big_diff() -> String {
+        (0..20000)
+            .map(|i| format!("+line {i} of a very large diff\n"))
+            .collect()
+    }
+
+    /// Tokens of everything written: task.md + every relevant-code/*.md.
+    fn written_tokens(out: &Path) -> usize {
+        let mut n = estimate_tokens(&std::fs::read_to_string(out.join("task.md")).unwrap());
+        for e in std::fs::read_dir(out.join("relevant-code")).unwrap() {
+            n += estimate_tokens(&std::fs::read_to_string(e.unwrap().path()).unwrap());
+        }
+        n
+    }
+
+    fn many_files() -> Vec<Candidate> {
+        (0..6)
+            .map(|i| {
+                cand(
+                    &format!("src/module_{i}.rs"),
+                    1.0 - i as f32 * 0.1,
+                    &"fn f() { /* body */ }\n".repeat(40),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_output_total_fits_budget() {
+        for budget in [1000usize, 300] {
+            let tmp = tempfile::tempdir().unwrap();
+            let out = tmp.path().join("b");
+            let sel = crate::budget::allocate(many_files(), budget);
+            write_bundle("t", budget, &sel, &big_diff(), &out, false).unwrap();
+            let total = written_tokens(&out);
+            assert!(total <= budget, "budget={budget} total={total}");
+            let md = std::fs::read_to_string(out.join("task.md")).unwrap();
+            assert!(
+                md.contains(&format!("**Used:** {total} tokens")),
+                "Used must equal the real total {total}; got:\n{md}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_dropped_diff_is_noted_in_task_md() {
+        // Files use up nearly the whole budget, so no diff body fits: task.md must
+        // still say the diff was omitted (never a silent cut).
+        for budget in (100usize..2100).step_by(53).chain([300, 1000, 2000]) {
+            let tmp = tempfile::tempdir().unwrap();
+            let out = tmp.path().join("b");
+            let sel = crate::budget::allocate(many_files(), budget);
+            write_bundle("t", budget, &sel, &big_diff(), &out, false).unwrap();
+            let md = std::fs::read_to_string(out.join("task.md")).unwrap();
+            assert!(md.contains("## Recent Diff"), "budget={budget}:\n{md}");
+            assert!(
+                md.contains("[diff omitted:") || md.contains("[diff truncated:"),
+                "budget={budget}:\n{md}"
+            );
+            assert!(written_tokens(&out) <= budget, "budget={budget}");
+            let json = std::fs::read_to_string(out.join("citations.json")).unwrap();
+            assert!(json.contains(DIFF_CITATION_PATH));
+        }
+    }
+
+    #[test]
+    fn build_overhead_above_budget_reports_real_overshoot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("b");
+        let sel = crate::budget::allocate(many_files(), 10);
+        write_bundle("t", 10, &sel, &big_diff(), &out, false).unwrap();
+        let md = std::fs::read_to_string(out.join("task.md")).unwrap();
+        let total = written_tokens(&out);
+        assert!(total > 10);
+        assert!(md.contains(&format!("**Used:** {total} tokens")), "{md}");
+        assert!(!md.contains("```"), "no diff body expected:\n{md}");
+        assert!(!out.join("relevant-code/src_module_0_rs.md").exists());
+    }
+
+    #[test]
+    fn build_diff_is_cut_with_note_and_balanced_fence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("b");
+        let sel = vec![cand("src/a.rs", 0.9, "fn a() {}")];
+        write_bundle("t", 400, &sel, &big_diff(), &out, false).unwrap();
+        let md = std::fs::read_to_string(out.join("task.md")).unwrap();
+        assert!(md.contains("[diff truncated: first"), "{md}");
+        assert_eq!(md.matches("```").count(), 2, "fence must stay balanced");
+        let json = std::fs::read_to_string(out.join("citations.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let last = v.as_array().unwrap().last().unwrap();
+        assert_eq!(last["path"], DIFF_CITATION_PATH);
+        assert_eq!(last["truncated"], true);
+        assert!(written_tokens(&out) <= 400);
+    }
+
+    #[test]
+    fn fit_diff_small_diff_is_kept_whole() {
+        let p = fit_diff("+a\n+b", 1000);
+        assert!(!p.truncated);
+        assert!(p.text.contains("+a\n+b"));
+        assert_eq!(p.tokens, estimate_tokens(&p.text));
+    }
+
+    #[test]
+    fn fit_diff_fits_remaining_and_never_drops_silently() {
+        let diff = big_diff();
+        let note_cost = estimate_tokens(&diff_section("", Some(&omitted_note(&diff))));
+        for rem in [0usize, 1, 5, 10, 30, 100, 1000] {
+            let p = fit_diff(&diff, rem);
+            assert!(p.truncated);
+            assert!(p.text.contains("[diff "), "rem={rem}: note missing");
+            if rem >= note_cost {
+                assert!(p.tokens <= rem, "rem={rem} tokens={}", p.tokens);
+            }
+        }
     }
 
     #[test]
