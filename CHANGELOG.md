@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A warning is printed when `EMBEDDING_SVC_URL` points to a plain `http://` host that is not
   loopback, because the API key and file contents would be sent unencrypted. Set
   `EMBEDDING_ALLOW_INSECURE=1` to silence it (#242).
+- Library users: `select_candidates` and `SelectOptions` are now exported from the crate
+  root, moved from the binary into the library (#316).
 
 ### Changed
 - **The index is rebuilt in full once after upgrading.** The index now records the version of
@@ -26,13 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target are symbolic links (#358).
 - `citations.json` `reason` now says `relevance_score=` instead of `bm25_score=`, because the
   value is after fusion, decay and weighting (#357).
-- Files with equal scores are ordered by path, not by internal id, in search results and in
-  embedding fusion (#246, #332, #357).
+- Files with equal scores are ordered by path, not by internal id, in search results
+  (#332, #357). In embedding fusion (`rrf_fuse`) ties are now ordered by file id, so the
+  result is the same on every run instead of varying between runs (#246).
 - The index now follows the working tree: file hashes are computed from the working-tree
   content, so uncommitted edits are indexed and reverting them is picked up. Unchanged files
   are not reprocessed (#184).
 - Library users: `rusqlite` is updated from 0.31 to 0.41, and `rusqlite::Connection` appears
   in public signatures, so this is a breaking change for library users (#305).
+- Library users: `populate_fts_with_paths` is no longer public (it is test-only), which is a
+  breaking change (#315).
 - A lock conflict with another `index` run, or with a write in progress, now reports
   "locked by another process" instead of "database is locked" or a misleading
   "Index DB is corrupt" (#295, #301, #334).
