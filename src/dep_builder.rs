@@ -94,8 +94,65 @@ fn resolve_import(
         "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
             resolve_ts_js(import_str, from_path, path_to_id)
         }
+        "rb" => resolve_ruby(import_str, from_path, path_to_id),
         _ => vec![],
     }
+}
+
+/// Resolve a Ruby `require_relative 'x'` / `require 'x'` call to a file id.
+/// The stored import text is the whole call (`require_relative '../x'`).
+/// `require_relative` is resolved against the caller's directory; `require` only
+/// matches `lib/x.rb` or `x.rb` inside the repo (gems are not resolved).
+/// A path that climbs above the repo root (`normalize_path` → None) is ignored.
+fn resolve_ruby(
+    import_str: &str,
+    from_path: &Path,
+    path_to_id: &HashMap<PathBuf, i64>,
+) -> Vec<i64> {
+    let s = import_str.trim_start();
+    let (relative, rest) = if let Some(r) = s.strip_prefix("require_relative") {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix("require") {
+        (false, r)
+    } else {
+        return vec![];
+    };
+    if !rest.starts_with(|c: char| c.is_whitespace() || c == '(') {
+        return vec![];
+    }
+    let Some(open) = rest.find(['\'', '"']) else {
+        return vec![];
+    };
+    let quote = rest.as_bytes()[open] as char;
+    let after = &rest[open + 1..];
+    let Some(end) = after.find(quote) else {
+        return vec![];
+    };
+    let spec = &after[..end];
+    // `require './x'` / `require '../x'` are cwd-relative, not repo-resolvable.
+    if spec.is_empty() || Path::new(spec).is_absolute() || (!relative && spec.starts_with('.')) {
+        return vec![];
+    }
+    let file = if spec.ends_with(".rb") {
+        spec.to_string()
+    } else {
+        format!("{spec}.rb")
+    };
+    let candidates: Vec<Option<PathBuf>> = if relative {
+        let base = from_path.parent().unwrap_or(Path::new(""));
+        vec![normalize_path(&base.join(&file))]
+    } else {
+        vec![
+            normalize_path(&Path::new("lib").join(&file)),
+            normalize_path(Path::new(&file)),
+        ]
+    };
+    for c in candidates.into_iter().flatten() {
+        if let Some(&id) = path_to_id.get(&c) {
+            return vec![id];
+        }
+    }
+    vec![]
 }
 
 /// Resolve an ES `import ... from './x'`, a re-export `export ... from './x'`, or CommonJS `require('./x')` to a file id.
@@ -1176,6 +1233,45 @@ mod tests {
         // excess `..` above the root is reported as an escape (None), not swallowed
         assert_eq!(normalize_path(Path::new("a/../../b")), None);
         assert_eq!(normalize_path(Path::new("a/..")), Some(PathBuf::new()));
+    }
+
+    #[test]
+    fn resolve_ruby_require_relative_and_require() {
+        let map = ids(&[
+            ("lib/a/main.rb", 1),
+            ("lib/a/helper.rb", 2),
+            ("lib/util.rb", 3),
+            ("lib/x/y.rb", 4),
+            ("top.rb", 5),
+        ]);
+        let from = Path::new("lib/a/main.rb");
+        let r = |s: &str| resolve_ruby(s, from, &map);
+        assert_eq!(r("require_relative 'helper'"), vec![2]);
+        assert_eq!(r("require_relative \"./helper.rb\""), vec![2]);
+        assert_eq!(r("require_relative('../util')"), vec![3]);
+        assert_eq!(r("require 'util'"), vec![3]);
+        assert_eq!(r("require \"x/y\""), vec![4]);
+        assert_eq!(r("require 'top'"), vec![5]);
+        // gems, missing files and repo-escaping paths are not resolved
+        assert!(r("require 'json'").is_empty());
+        assert!(r("require_relative 'missing'").is_empty());
+        assert!(r("require_relative '../../../top'").is_empty());
+        assert!(r("require '../top'").is_empty());
+        assert!(r("require_relative").is_empty());
+    }
+
+    #[test]
+    fn resolve_import_dispatches_ruby() {
+        let map = ids(&[("lib/a.rb", 1), ("lib/b.rb", 2)]);
+        assert_eq!(
+            resolve_import(
+                "require_relative 'b'",
+                Path::new("lib/a.rb"),
+                &map,
+                &HashMap::new()
+            ),
+            vec![2]
+        );
     }
 
     #[test]
