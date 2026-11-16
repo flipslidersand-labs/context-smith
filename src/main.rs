@@ -231,13 +231,12 @@ fn main() -> anyhow::Result<()> {
                 }
             };
             let out_path = PathBuf::from(&out);
-            let used: usize = selected.iter().map(|c| c.tokens()).sum();
-            write_bundle(&task, budget, &selected, &diff_summary, &out_path, explain)?;
+            let stats = write_bundle(&task, budget, &selected, &diff_summary, &out_path, explain)?;
 
             println!(
                 "bundle: {} files, {}/{} tokens → {}",
-                selected.len(),
-                used,
+                stats.files,
+                stats.used,
                 budget,
                 out_path.display(),
             );
