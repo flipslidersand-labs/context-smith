@@ -206,6 +206,7 @@ impl IndexDb {
              ON CONFLICT(path) DO UPDATE
                SET blob_sha = excluded.blob_sha,
                    size     = excluded.size,
+                   indexed_sha = CASE WHEN lang != excluded.lang THEN NULL ELSE indexed_sha END,
                    lang     = excluded.lang",
             params![path_str.as_ref(), lang.as_str(), blob_sha, size],
         )?;
@@ -436,6 +437,9 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
 
             // File is new or changed — re-index symbols and FTS.
             if *lang == Language::Unknown {
+                // Drop stale rows left from a previous known language (lang
+                // change), keeping the files row and path FTS.
+                db.delete_content_records(file_id)?;
                 // Still mark as indexed so we don't re-check every run.
                 db.mark_indexed(file_id)?;
                 stats.files_indexed += 1;
@@ -779,6 +783,25 @@ mod tests {
             .unwrap();
         assert_eq!(id, id2);
         assert!(!changed);
+    }
+
+    #[test]
+    fn upsert_file_lang_change_with_same_sha_is_changed() {
+        let db = mem_db();
+        let (id, _) = db
+            .upsert_file(Path::new("a.rb"), Language::Unknown, "sha1", 10)
+            .unwrap();
+        db.mark_indexed(id).unwrap();
+        let (id2, changed) = db
+            .upsert_file(Path::new("a.rb"), Language::Rust, "sha1", 10)
+            .unwrap();
+        assert_eq!(id, id2);
+        assert!(changed, "lang change must trigger re-index");
+        db.mark_indexed(id2).unwrap();
+        let (_, changed) = db
+            .upsert_file(Path::new("a.rb"), Language::Rust, "sha1", 10)
+            .unwrap();
+        assert!(!changed, "same lang and sha stays unchanged");
     }
 
     #[test]
