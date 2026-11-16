@@ -68,7 +68,7 @@ enum Command {
         /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
         #[arg(long)]
         index: Option<String>,
-        /// Include BM25 score annotations in task.md
+        /// Include relevance score annotations in task.md
         #[arg(long)]
         explain: bool,
         /// Number of recent commits to include as diff context
@@ -96,7 +96,7 @@ enum Command {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryFormat::Json)]
         format: QueryFormat,
-        /// Include BM25 score annotations (md format only)
+        /// Include relevance score annotations (md format only)
         #[arg(long)]
         explain: bool,
         /// Disable semantic (embedding) seeds even when the index has them; BM25 only
@@ -132,6 +132,25 @@ fn resolve_index_path(repo: &GitRepo, index: Option<String>) -> anyhow::Result<P
     Ok(db_path)
 }
 
+/// Refuse if the db file or its `-wal`/`-shm` sidecars is a symlink, since
+/// SQLite would write through it to wherever it points.
+fn refuse_symlinked_index_files(db_path: &std::path::Path) -> anyhow::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        let p = PathBuf::from(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&p) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                    p.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -141,6 +160,7 @@ fn main() -> anyhow::Result<()> {
                 Some(p) => {
                     // Keep an index outside the repository (e.g. in a cache dir) with one command.
                     let p = PathBuf::from(p);
+                    refuse_symlinked_index_files(&p)?;
                     if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -148,8 +168,19 @@ fn main() -> anyhow::Result<()> {
                 }
                 None => {
                     let dir = repo.root().join(".contextsmith");
+                    // A committed symlink here would put index.db/-wal/-shm outside the repo.
+                    if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+                        if meta.file_type().is_symlink() {
+                            anyhow::bail!(
+                                "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                                dir.display()
+                            );
+                        }
+                    }
+                    let db_path = dir.join("index.db");
+                    refuse_symlinked_index_files(&db_path)?;
                     std::fs::create_dir_all(&dir)?;
-                    dir.join("index.db")
+                    db_path
                 }
             };
             let db = IndexDb::open(&db_path)?;
@@ -379,5 +410,77 @@ mod tests {
         let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
+    }
+
+    /// Commit `files` (path, content) plus `links` (path, target) as tracked symlinks.
+    fn indexed_repo_with_links(
+        files: &[(&str, &str)],
+        links: &[(&str, &str)],
+    ) -> (tempfile::TempDir, GitRepo, tempfile::TempDir, IndexDb) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        for (f, c) in files {
+            std::fs::write(tmp.path().join(f), c).unwrap();
+            index.add_path(Path::new(f)).unwrap();
+        }
+        for (l, t) in links {
+            std::os::unix::fs::symlink(t, tmp.path().join(l)).unwrap();
+            index.add_path(Path::new(l)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let dbdir = tempfile::TempDir::new().unwrap();
+        let db = IndexDb::open(&dbdir.path().join("i.db")).unwrap();
+        build_index(&repo, &db, false).unwrap();
+        (tmp, repo, dbdir, db)
+    }
+
+    #[test]
+    fn select_candidates_errors_when_all_matches_are_empty() {
+        // An empty __init__.py is indexed by path; matching only it must not be a silent success.
+        let (_t, repo, _d, db) = indexed_repo_with_links(&[("zzqx_pkg.py", "")], &[]);
+        let err = select_candidates(&repo, &db, "zzqx_pkg", &opts(10_000, true)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("No matching files"), "msg: {msg}");
+        assert!(msg.contains("empty"), "msg: {msg}");
+        assert!(msg.contains("zzqx_pkg.py"), "msg: {msg}");
+    }
+
+    #[test]
+    fn select_candidates_keeps_nonempty_when_some_matches_are_empty() {
+        let (_t, repo, _d, db) = indexed_repo_with_links(
+            &[("zzqx_a.py", ""), ("zzqx_b.py", "def zzqx_b(): pass\n")],
+            &[],
+        );
+        let sel = select_candidates(&repo, &db, "zzqx", &opts(10_000, true)).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].path, PathBuf::from("zzqx_b.py"));
+    }
+
+    #[test]
+    fn select_candidates_dedups_in_repo_symlink_keeping_real_file() {
+        // "a_link.rs" sorts before "real.rs"; the real file must still be the one kept.
+        let (_t, repo, _d, db) = indexed_repo_with_links(
+            &[("real.rs", "pub fn alpha_widget() {}\n")],
+            &[("a_link.rs", "real.rs")],
+        );
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        let paths: Vec<_> = sel.iter().map(|c| c.path.clone()).collect();
+        assert_eq!(paths, vec![PathBuf::from("real.rs")]);
+    }
+
+    #[test]
+    fn select_candidates_dedups_symlinks_without_scored_target() {
+        let (_t, repo, _d, db) = indexed_repo_with_links(
+            &[("zz_real.rs", "pub fn alpha_widget() {}\n")],
+            &[("alpha_widget_link.rs", "zz_real.rs")],
+        );
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        assert_eq!(sel.len(), 1);
     }
 }

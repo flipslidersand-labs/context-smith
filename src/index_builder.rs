@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -7,7 +7,7 @@ use crate::dep_builder;
 use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
 /// Message shown when the index DB is locked by another process.
-fn locked_message(path: &Path, detail: &str) -> String {
+pub(crate) fn locked_message(path: &Path, detail: &str) -> String {
     format!(
         "Index DB {} is locked by another process (an 'index' may be running). \
          Wait for it to finish and retry. ({detail})",
@@ -16,7 +16,7 @@ fn locked_message(path: &Path, detail: &str) -> String {
 }
 
 /// True if any error in the chain is SQLITE_BUSY / SQLITE_LOCKED (by code).
-fn is_lock_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
         matches!(
             e.downcast_ref::<rusqlite::Error>(),
@@ -262,6 +262,21 @@ impl IndexDb {
         Ok(())
     }
 
+    /// Delete everything derived from a file's content (symbols, symbol/body
+    /// FTS, deps, embeddings) but keep its files row and path FTS row.
+    fn delete_content_records(&self, file_id: i64) -> Result<()> {
+        for sql in [
+            "DELETE FROM fts_symbols WHERE file_id = ?1",
+            "DELETE FROM fts_body    WHERE file_id = ?1",
+            "DELETE FROM symbols     WHERE file_id = ?1",
+            "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
+            "DELETE FROM embeddings WHERE file_id = ?1",
+        ] {
+            self.conn.execute(sql, params![file_id])?;
+        }
+        Ok(())
+    }
+
     /// Delete all index records for a file (FTS, symbols, deps, files row).
     fn delete_file_records(&self, file_id: i64) -> Result<()> {
         self.conn.execute(
@@ -312,6 +327,14 @@ impl IndexDb {
     }
 }
 
+/// Version of the extraction logic and index format. Bump by hand whenever a
+/// change alters what is stored: symbols/deps/FTS extraction or the index
+/// format. An index built with a different value (or none) is rebuilt in full.
+/// Deliberately not the crate version, so unrelated releases keep the index.
+pub const EXTRACT_VERSION: u32 = 2;
+
+const EXTRACT_VERSION_KEY: &str = "extract_version";
+
 pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
     build_index_inner(repo, db, force).map_err(|e| {
         if is_lock_error(&e) {
@@ -323,15 +346,44 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
     })
 }
 
+/// Stored extractor version. Only a missing row means "no version"; other errors
+/// (SQLITE_BUSY, ...) propagate instead of silently forcing a full re-index.
+fn stored_extract_version(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![EXTRACT_VERSION_KEY],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
     db.init_schema()?;
+
+    // An index built by a different extractor version (or a pre-versioning
+    // one with no record) is rebuilt through the same path as `--force`.
+    let mut force = force;
+    if !force {
+        let stored = stored_extract_version(db.connection())?;
+        let has_files: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+        if has_files > 0 && stored.as_deref() != Some(EXTRACT_VERSION.to_string().as_str()) {
+            eprintln!("note: index built by an older extractor; rebuilding");
+            force = true;
+        }
+    }
 
     if force {
         db.reset_indexed_sha()?;
     }
 
-    let files = repo.scan()?;
+    let (files, path_skipped) = repo.scan_with_skipped()?;
     let mut stats = IndexStats::default();
+    // Non-UTF-8 paths cannot be stored; they count as seen-but-skipped (#308).
+    stats.files_total += path_skipped;
+    stats.files_skipped += path_skipped;
 
     // Build a set of paths currently tracked in git.
     let git_paths: HashSet<String> = files
@@ -385,6 +437,26 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             let abs_path = repo.root().join(rel_path);
             let source = match repo.read_tracked(rel_path) {
                 Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    // Content is not UTF-8: drop stale symbol/body/dep/embedding
+                    // rows (#286) but keep the files row and a path FTS row so
+                    // the file stays findable by name (#308). indexed_sha stays
+                    // unset so it is retried next run.
+                    eprintln!("warn: unreadable content {:?}: {e}", abs_path);
+                    db.delete_content_records(file_id)?;
+                    db.connection()
+                        .execute("DELETE FROM fts_path WHERE file_id = ?1", params![file_id])?;
+                    db.connection().execute(
+                        "INSERT INTO fts_path (file_id, path) VALUES (?1, ?2)",
+                        params![
+                            file_id,
+                            crate::tokenizer::tokenize_path(&rel_path.to_string_lossy())
+                        ],
+                    )?;
+                    file_paths.remove(&file_id);
+                    stats.files_skipped += 1;
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
                     // Drop stale rows (symbols/FTS/deps/embeddings/files) so
@@ -495,6 +567,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         .as_secs()
         .to_string();
     db.upsert_meta("indexed_at", &indexed_at)?;
+    db.upsert_meta(EXTRACT_VERSION_KEY, &EXTRACT_VERSION.to_string())?;
 
     Ok(stats)
 }
@@ -770,6 +843,20 @@ mod tests {
     }
 
     #[test]
+    fn stored_extract_version_missing_row_is_none_but_errors_propagate() {
+        let db = mem_db();
+        assert_eq!(stored_extract_version(db.connection()).unwrap(), None);
+        db.upsert_meta(EXTRACT_VERSION_KEY, "7").unwrap();
+        assert_eq!(
+            stored_extract_version(db.connection()).unwrap().as_deref(),
+            Some("7")
+        );
+        // A query failure (here: no meta table) must not read as "no version".
+        db.connection().execute_batch("DROP TABLE meta").unwrap();
+        assert!(stored_extract_version(db.connection()).is_err());
+    }
+
+    #[test]
     fn upsert_meta_inserts_then_overwrites() {
         let db = mem_db();
         db.upsert_meta("k", "v1").unwrap();
@@ -909,6 +996,52 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 2);
+    }
+
+    fn stale_extractor_index_is_rebuilt(set_old: Option<&str>) {
+        let (_tmp, repo) = repo_with(&[
+            ("pkg/main.py", "from pkg import helper\n"),
+            ("pkg/helper.py", "def h():\n    pass\n"),
+            ("pkg/__init__.py", ""),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert!(count(&db, "SELECT COUNT(*) FROM deps") > 0);
+        // Simulate an index made by an older extractor that missed the deps.
+        db.connection().execute("DELETE FROM deps", []).unwrap();
+        match set_old {
+            Some(v) => db.upsert_meta("extract_version", v).unwrap(),
+            None => {
+                db.connection()
+                    .execute("DELETE FROM meta WHERE key='extract_version'", [])
+                    .unwrap();
+            }
+        }
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_skipped, 0);
+        assert!(count(&db, "SELECT COUNT(*) FROM deps") > 0);
+        let v: String = db
+            .connection()
+            .query_row(
+                "SELECT value FROM meta WHERE key='extract_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, EXTRACT_VERSION.to_string());
+        // Same version again: incremental, nothing re-indexed.
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_indexed, 0);
+    }
+
+    #[test]
+    fn build_index_rebuilds_when_extract_version_is_older() {
+        stale_extractor_index_is_rebuilt(Some("0"));
+    }
+
+    #[test]
+    fn build_index_rebuilds_when_extract_version_is_missing() {
+        stale_extractor_index_is_rebuilt(None);
     }
 
     #[test]
@@ -1299,9 +1432,11 @@ mod tests {
             0
         );
         assert_eq!(count(&db, "SELECT COUNT(*) FROM embeddings"), 0);
+        // The files row (and its path FTS row) is kept so the file stays
+        // findable by name (#308); only content-derived rows are dropped.
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM files WHERE path='a.rs'"),
-            0
+            1
         );
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM files WHERE path='ok.rs'"),
@@ -1474,6 +1609,113 @@ mod tests {
                 s.deps_total
             ),
             (0, 0, 0, 0, 0, 0)
+        );
+    }
+
+    // ---- non-UTF-8 paths / contents (#308) ----
+
+    /// Commit files whose path / content are raw bytes (unix only).
+    #[cfg(unix)]
+    fn repo_with_raw(files: &[(&[u8], &[u8])]) -> (TempDir, GitRepo) {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new().unwrap();
+        let git = git2::Repository::init(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        for (rel, content) in files {
+            let rel = Path::new(std::ffi::OsStr::from_bytes(rel));
+            let abs = tmp.path().join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, content).unwrap();
+            index.add_path(rel).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "raw", &tree, &[])
+            .unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        (tmp, repo)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_survives_non_utf8_directory_name() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"bad\xffdir/inner.rs", b"fn inner() {}\n"),
+        ]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_total, 2);
+        assert_eq!(stats.files_skipped, 1);
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_does_not_collapse_non_utf8_file_names() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"src/a\xff.rs", b"fn one() {}\n"),
+            (b"src/b\xfe.rs", b"fn two() {}\n"),
+        ]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_total, 3);
+        assert_eq!(stats.files_skipped, 2);
+        let rows = count(&db, "SELECT COUNT(*) FROM files");
+        assert_eq!(rows, 1);
+        assert_eq!(rows as usize, stats.files_total - stats.files_skipped);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files WHERE path='src'"), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_registers_path_fts_for_non_utf8_content() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"zzquuxnotes.rs", b"fn gone() {}\n"),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        // Shift_JIS-ish bytes make the content unreadable as UTF-8.
+        std::fs::write(
+            repo.root().join("zzquuxnotes.rs"),
+            [0x83, 0x65, 0x83, 0x58, 0x83, 0x67, b'\n'],
+        )
+        .unwrap();
+        commit_existing(repo.root(), &["zzquuxnotes.rs"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "gone");
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_path WHERE fts_path MATCH 'zzquuxnotes'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path='zzquuxnotes.rs')"),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_index_registers_path_fts_for_new_non_utf8_content_file() {
+        let (_tmp, repo) = repo_with_raw(&[
+            (b"ok.rs", b"fn ok() {}\n"),
+            (b"zzfreshnotes.rs", &[0x83, 0x65, 0x83, 0x58, b'\n']),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_path WHERE fts_path MATCH 'zzfreshnotes'"
+            ),
+            1
         );
     }
 }
