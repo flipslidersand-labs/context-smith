@@ -146,17 +146,23 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 
 ## 精度
 
-公開 Rust リポジトリ 5 つの、マージ済みの修正 PR で測定。タスク = その PR が閉じた Issue の題名、正解 = PR が変更した `src/**/*.rs`、インデックスは PR の**マージ前**のコミットで作成(修正の漏れ込みなし)。ファイルの内容が 50% 以上バンドルに入っている場合だけ「見つかった」と数える。比較対象は素朴な単語一致(タスクの語を含む数でファイルを並べ、パス一致は ×3 で加点、同じトークン予算を埋める)。タスク平均の再現率(recall):
+公開リポジトリ 9 つの、マージ済みの修正 PR で測定。Rust 5 つ(axum・clap・bat・ripgrep・fd)、Python 2 つ(scrapy・poetry)、TypeScript 2 つ(hono・zod)。タスク = その PR が閉じた Issue の題名、正解 = PR が変更したソースファイル(`src/**/*.rs`、`*.py`、`*.ts` / `*.tsx`。テストとドキュメントは除く)、インデックスは PR の**マージ前**のコミットで作成(修正の漏れ込みなし)。ファイルの内容が 50% 以上バンドルに入っている場合だけ「見つかった」と数える。比較対象は素朴な単語一致(タスクの語を含む数でファイルを並べ、パス一致は ×3 で加点、同じトークン予算を埋める)。タスク平均の再現率(recall)、context-smith / 素朴な単語一致(括弧内は差):
 
-| リポ(タスク数) | 予算 | context-smith | 素朴な単語一致 |
+| リポ(タスク数) | 4k | 8k | 16k |
 |---|---|---|---|
-| axum (54) | 4k / 8k / 16k | 0.45 / 0.54 / 0.67 | 0.17 / 0.49 / 0.56 |
-| clap (60) | 4k / 8k / 16k | 0.23 / 0.33 / 0.48 | 0.16 / 0.27 / 0.38 |
-| bat (56) | 4k / 8k / 16k | 0.25 / 0.35 / 0.48 | 0.18 / 0.24 / 0.42 |
-| ripgrep (26) | 4k / 8k / 16k | 0.15 / 0.22 / 0.49 | 0.08 / 0.19 / 0.27 |
-| fd (74) | 4k / 8k / 16k | 0.37 / 0.48 / 0.60 | 0.25 / 0.37 / 0.69 |
+| axum (54) | 0.46 / 0.17 (+0.29) | 0.56 / 0.49 (+0.07) | 0.69 / 0.56 (+0.13) |
+| clap (60) | 0.26 / 0.16 (+0.10) | 0.35 / 0.27 (+0.08) | 0.53 / 0.38 (+0.15) |
+| bat (56) | 0.28 / 0.18 (+0.10) | 0.40 / 0.24 (+0.16) | 0.59 / 0.42 (+0.17) |
+| ripgrep (26) | 0.15 / 0.08 (+0.07) | 0.22 / 0.19 (+0.03) | 0.49 / 0.27 (+0.22) |
+| fd (74) | 0.40 / 0.25 (+0.15) | 0.57 / 0.37 (+0.20) | 0.75 / 0.69 (+0.06) |
+| scrapy (59) | 0.29 / 0.19 (+0.10) | 0.42 / 0.29 (+0.13) | 0.48 / 0.47 (+0.01) |
+| poetry (60) | 0.23 / 0.19 (+0.04) | 0.26 / 0.31 (**-0.05**) | 0.30 / 0.40 (**-0.10**) |
+| hono (60) | 0.60 / 0.35 (+0.25) | 0.72 / 0.56 (+0.16) | 0.83 / 0.66 (+0.17) |
+| zod (60) | 0.20 / 0.04 (+0.16) | 0.28 / 0.07 (+0.21) | 0.39 / 0.18 (+0.21) |
 
-Rust の 5 リポでは、context-smith は素朴な単語一致を、4k(0.07〜0.28)と 8k(0.03〜0.11)ではすべてのリポで、16k では 5 つのうち 4 つ(0.06〜0.22)で上回ります。fd の 16k は下回ります(0.09。74 件中 約 7 タスク分)。1 タスクはリポにより 0.014〜0.04(74 件〜26 件)なので、0.03 以下の差は誤差の範囲。参考: 正しいファイルが事前に分かっていれば、16k に全文で入るのは 87〜99%。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151)・[#162](https://github.com/flipslidersand-labs/context-smith/pull/162))が入っていません。限界: Rust リポジトリ 5 つのみ、BM25 のみ(埋め込みなし)、比較対象は未チューニング。他の言語(Python・TypeScript)は [bench/](./bench/README.md#other-languages-python-typescript-added-2026-11-01-148) を参照: TypeScript は測定した 2 リポともですべての予算で素朴な単語一致を上回る(hono の 16k の差 0.02 は誤差)が、**Python は 2 リポとも 16k で下回る**(scrapy 0.10、poetry 0.21。poetry は 8k でも 0.09)ので、Rust の数字がそのまま通用するとは考えないこと。poetry と hono では、16k の recall が 8k より低い。予算を増やして下がるのは本来起きないはずの現象。原因(16k で 1.00 から 0.00 に落ちた poetry の 2 タスクで確認。8k では飛ばされる 16,000 トークンのテストファイルが、断片として予算全部を使う): 半分規則([#162](https://github.com/flipslidersand-labs/context-smith/pull/162))が、予算の 2 倍以内の、上位だが正解でない大きなファイルに、予算全部を使い切らせている。詳細は [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。シンボルの重み(0.5)と予算配分の規則は axum・clap・bat・ripgrep で開発したため、この表はそれらのリポに対して楽観的。fd と、Python・TypeScript の 4 リポは、どのパラメータの選択にも使っていない。ripgrep は正解ファイルが大きく(中央値 約 9,400 トークン。他は約 3,500)、予算配分の規則が最も効く。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
+出典: [bench/README.md](./bench/README.md#targets-and-current-status-147)。2026-11-03 に master `038eadc`([#164](https://github.com/flipslidersand-labs/context-smith/pull/164) の後)で、release ビルドのバイナリ、リポごとに 1 回、strict 指標・題名のみのタスクで測定。再現: `REPO=<clone> TASKMODE=title python3 bench/bench.py`(準備とリポごとのオプションは [bench/](./bench/README.md))。1 タスクは 0.02〜0.04 に相当するので、0.03 以下の差は誤差の範囲。
+
+**精度の目標は未達です([#135](https://github.com/flipslidersand-labs/context-smith/issues/135) は未解決)。** 下限(どのセルでも context-smith が単語一致 − 0.02 以上)は 27 セル中 25 で成立し、満たさないのは **poetry の 8k(-0.05)と 16k(-0.10)** の 2 つ。価値の目標(16k で単語一致を 0.05 以上上回る)は 9 リポ中 7 で成立し、外れるのは scrapy(+0.01)と poetry(-0.10)、どちらも Python。Rust の数字がそのまま通用するとは考えないこと。この測定では、poetry(0.26、0.30)と hono(0.72、0.83)で 8k から 16k に recall が下がる現象は起きていない。以前の値(master `aa4ef89`、[#164](https://github.com/flipslidersand-labs/context-smith/pull/164) より前)では起きており、[bench/](./bench/README.md) に残してある。正しいファイルが事前に分かっている場合に 16k に全文で入るものの上限(ceiling)は、axum 0.97、clap 0.87、bat 0.99、scrapy 0.97、poetry 0.99、hono 1.00、zod 0.68(bench による。ripgrep と fd は記載なし)。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151)・[#162](https://github.com/flipslidersand-labs/context-smith/pull/162))と [#164](https://github.com/flipslidersand-labs/context-smith/pull/164) が入っていません。限界: BM25 のみ(埋め込みなし)、比較対象は未チューニング、リポごとに 1 回の測定。シンボルの重み(0.5)と予算配分の規則は axum・clap・bat・scrapy・poetry で開発したため、この表はそれらのリポに対して楽観的。ripgrep・fd・hono・zod は、どのパラメータの選択にも使っていない。ripgrep は正解ファイルが大きく(中央値 約 9,400 トークン。他は約 3,500)、予算配分の規則が最も効く。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
 
 ## ステータス
 
