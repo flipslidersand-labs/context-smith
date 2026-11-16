@@ -358,10 +358,11 @@ impl GitRepo {
                     let rel = PathBuf::from(name);
                     let lang = Language::from_path(&rel);
                     let mut sha = entry.id().to_string();
-                    let mut size = entry
-                        .to_object(repo)
-                        .and_then(|o| o.peel_to_blob())
-                        .map(|b| b.size() as i64)
+                    // Header only: avoids loading every blob's content just for its size.
+                    let mut size = repo
+                        .odb()
+                        .and_then(|odb| odb.read_header(entry.id()))
+                        .map(|(size, _)| size as i64)
                         .unwrap_or(0);
                     if lang != Language::Unknown {
                         match read_bytes_within_root(&self.canonical_root, &self.root.join(&rel)) {
@@ -894,6 +895,25 @@ mod tests {
         assert_eq!(files[1].1, Language::Rust);
         assert_eq!(files[1].3, 13);
         assert_eq!(files[1].2.len(), 40, "blob sha should be 40 hex chars");
+    }
+
+    #[test]
+    fn scan_size_matches_blob_size_for_text_and_binary() {
+        let tmp = TempDir::new().unwrap();
+        // Unknown-language entries keep HEAD's size, so this exercises the
+        // header-only path directly.
+        commit_files(
+            tmp.path(),
+            &[("data.bin", "\0\u{1}\0binary\0"), ("empty.dat", "")],
+            &[],
+        );
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let mut files = repo.scan().unwrap();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(files[0].0, PathBuf::from("data.bin"));
+        assert_eq!(files[0].3, 10);
+        assert_eq!(files[1].0, PathBuf::from("empty.dat"));
+        assert_eq!(files[1].3, 0);
     }
 
     #[test]

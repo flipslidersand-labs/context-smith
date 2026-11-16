@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
+- `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
 - Go imports no longer create dependency edges to non-Go files (`.ts`, `.py`, ...) in the same directory (#327).
