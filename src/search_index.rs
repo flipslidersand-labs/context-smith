@@ -150,16 +150,7 @@ pub fn populate_fts_with_paths(
                     continue;
                 }
             };
-            // Truncate at a safe char boundary to avoid UTF-8 panics on multi-byte characters
-            let truncated = if content.len() > 512 * 1024 {
-                let mut end = 512 * 1024;
-                while !content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                &content[..end]
-            } else {
-                &content
-            };
+            let truncated = crate::index_builder::truncate_fts_body(&content);
             conn.execute(
                 "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
                 params![file_id, truncated],
