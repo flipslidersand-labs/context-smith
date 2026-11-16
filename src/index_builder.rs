@@ -34,6 +34,21 @@ pub struct IndexDb {
     conn: Connection,
 }
 
+/// Maximum bytes of a file body stored in `fts_body`.
+const FTS_BODY_MAX_BYTES: usize = 512 * 1024;
+
+/// Cut `content` to at most `FTS_BODY_MAX_BYTES`, backing up to a UTF-8 char boundary.
+pub(crate) fn truncate_fts_body(content: &str) -> &str {
+    if content.len() <= FTS_BODY_MAX_BYTES {
+        return content;
+    }
+    let mut end = FTS_BODY_MAX_BYTES;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
+}
+
 impl IndexDb {
     /// Open for read-only use (query/build). Skips the integrity check, which
     /// can misreport corruption while another process holds a write
@@ -532,15 +547,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
 
             db.connection()
                 .execute("DELETE FROM fts_body WHERE file_id = ?1", params![file_id])?;
-            let truncated = if source.len() > 512 * 1024 {
-                let mut end = 512 * 1024;
-                while !source.is_char_boundary(end) {
-                    end -= 1;
-                }
-                &source[..end]
-            } else {
-                &source
-            };
+            let truncated = truncate_fts_body(&source);
             db.connection().execute(
                 "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
                 params![file_id, truncated],

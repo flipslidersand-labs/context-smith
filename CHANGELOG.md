@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
+
 ### Fixed
 - Go imports no longer create dependency edges to non-Go files (`.ts`, `.py`, ...) in the same directory (#327).
 - Ruby `require` / `require_relative` are now resolved into dependencies (previously `.rb` files got no deps despite the 0.3.0 note) (#327).
