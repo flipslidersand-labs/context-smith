@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-16
+
 ### Added
 - Files that were cut to fit the budget are now marked: `task.md` and `relevant-code/*.md`
   show `[truncated: first N of M tokens]`, and `query --format json` and `citations.json`
@@ -16,8 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EMBEDDING_ALLOW_INSECURE=1` to silence it (#242).
 - Library users: `select_candidates` and `SelectOptions` are now exported from the crate
   root, moved from the binary into the library (#316).
+- Library users: `embed_index(repo, db)` is exported from the crate root when the
+  `remote-embed` feature is enabled. It returns `None` when `EMBEDDING_SVC_URL` is not
+  configured (#322).
+- The minimum supported Rust version is now declared as `rust-version = "1.89"` in
+  `Cargo.toml`; it is the requirement of `rusqlite` 0.41 (#305).
 
 ### Changed
+- **BREAKING (library users):** the public API is narrowed to a few entry points. The modules
+  (`budget`, `bundle_writer`, `dep_builder`, `embed`, `index_builder`, `path_kind`,
+  `search_index`, `select`, `tokenizer`) are now private. The crate root exports
+  `Candidate`, `render_task_md`, `write_bundle`, `build_index`, `IndexDb`, `IndexStats`,
+  `select_candidates`, `SelectOptions`, `GitRepo` and, with `remote-embed`, `embed_index`.
+  `GitRepo`, `IndexDb`, `IndexStats`, `Candidate` and `SelectOptions` are `#[non_exhaustive]`, so they can no
+  longer be built with struct literals outside the crate. `rusqlite` types no longer appear
+  in public signatures, and `GitRepo::new`, `root`, `canonical_root` and `recent_diff` remain
+  public (#307, #322).
+- `build` now counts the Recent Diff against the token budget, together with the header, file
+  list and wrappers, so `Used` matches the real total. A diff that does not fit is cut, and
+  `task.md` says so; when the whole diff is dropped, a note is still written (#309, #331).
+- The embedding client reports a 3xx response as an explicit redirect error (status and
+  `Location`) instead of failing with a JSON parse error; redirects are still not followed
+  (#369).
+- `index --out ""` is now rejected with an error. BM25 sub-query ties are cut by path before
+  file id, so equal-scored results come out in the same order on every run (#370).
 - Updated tree-sitter to 0.26 and tree-sitter-javascript to 0.25 (#373).
 - **The index is rebuilt in full once after upgrading.** The index now records the version of
   the extractor that built it. When it is missing or differs, `index` prints
@@ -282,6 +306,10 @@ Initial release. Published to [crates.io](https://crates.io/crates/context-smith
 - Short (<4 char) files are still selected when the budget allows (#17).
 - Slug collisions now produce distinct bundle output filenames (#20).
 
-[Unreleased]: https://github.com/flipslidersand/context-smith/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/flipslidersand/context-smith/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/flipslidersand/context-smith/releases/tag/v0.1.0
+[Unreleased]: https://github.com/flipslidersand-labs/context-smith/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/flipslidersand-labs/context-smith/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/flipslidersand-labs/context-smith/releases/tag/v0.1.0
