@@ -5,6 +5,94 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Files that were cut to fit the budget are now marked: `task.md` and `relevant-code/*.md`
+  show `[truncated: first N of M tokens]`, and `query --format json` and `citations.json`
+  gain a `truncated` field (#245).
+- A warning is printed when `EMBEDDING_SVC_URL` points to a plain `http://` host that is not
+  loopback, because the API key and file contents would be sent unencrypted. Set
+  `EMBEDDING_ALLOW_INSECURE=1` to silence it (#242).
+
+### Changed
+- **The index is rebuilt in full once after upgrading.** The index now records the version of
+  the extractor that built it. When it is missing or differs, `index` prints
+  `note: index built by an older extractor; rebuilding` and rebuilds everything, as `--force`
+  does (#335). The extractor version is now 2, because path tokens also keep the joined form
+  (for example `parsehttprequest`); existing indexes are rebuilt on the next `index` (#357).
+- `--out` is rejected when it is a symbolic link; pass the real path instead (#319). An
+  `index` run is also refused when the index files (`index.db`, `-wal`, `-shm`) or the `--out`
+  target are symbolic links (#358).
+- `citations.json` `reason` now says `relevance_score=` instead of `bm25_score=`, because the
+  value is after fusion, decay and weighting (#357).
+- Files with equal scores are ordered by path, not by internal id, in search results and in
+  embedding fusion (#246, #332, #357).
+- The index now follows the working tree: file hashes are computed from the working-tree
+  content, so uncommitted edits are indexed and reverting them is picked up. Unchanged files
+  are not reprocessed (#184).
+- Library users: `rusqlite` is updated from 0.31 to 0.41, and `rusqlite::Connection` appears
+  in public signatures, so this is a breaking change for library users (#305).
+- A lock conflict with another `index` run, or with a write in progress, now reports
+  "locked by another process" instead of "database is locked" or a misleading
+  "Index DB is corrupt" (#295, #301, #334).
+- An empty or whitespace-only `EMBEDDING_SVC_URL` is treated as unset (#329).
+
+### Fixed
+- `index` no longer fails permanently with a foreign key error after a file that has embeddings
+  is deleted from git (#182).
+- `index` no longer leaves a transaction open when the cleanup step or `COMMIT` fails
+  (#226, #249).
+- `index` continues when a repository contains non-UTF-8 paths (skipped with a warning) or
+  non-UTF-8 file contents (the file stays searchable by name) (#330).
+- Stale rows of files that can no longer be read are removed, and a `query` whose matches are
+  all unreadable fails with the reason instead of returning nothing (#299). A `query` whose
+  matches are all empty files also fails with a reason (#332).
+- Candidate selection no longer hides database errors when reading the `files` table (#225, #235).
+- An error while reading the stored extractor version is reported instead of being treated as
+  "no version" (#357).
+- Symbolic links that resolve to the same file are listed once (#332).
+- Embeddings: a vector count or dimension mismatch is detected (#224); 4xx responses and
+  responses with invalid JSON are not retried (#217, #271).
+- `recent_diff`: lines carry their `+` / `-` / space prefix (#250), and `0` commits always
+  gives an empty diff (#253).
+- Bundles: the Recent Diff fence can no longer be closed by a diff containing a code fence,
+  and newlines in the task are collapsed (#227); a path containing backticks, newlines or
+  `-->` can no longer break the file list or the comment (#252); slugs longer than 255 bytes
+  are shortened instead of failing the write (#248); a generated slug can no longer overwrite
+  another file (#215); stale `relevant-code/*.md` from an earlier run are removed (#223).
+- Dependency graph: Rust `use` of an item resolves to its module (#212) and `pub use`
+  re-exports are recorded (#244); TypeScript/JavaScript `export ... from` re-exports (#216),
+  `.js` specifiers that point to TypeScript sources (#222), module specifiers after comments
+  or strings (#247) and imports that climb above the repository root (#298) are handled
+  correctly; Python `from X import a, b`, `import a, b` and relative-import edge cases are
+  resolved (#254, #266); Go grouped, aliased and commented imports are resolved (#265, #270).
+- Dependency expansion: duplicate seeds use the highest score (#279), and large neighbour
+  sets no longer exceed the SQLite variable limit (#277).
+- `ctx-select.sh` creates its cache directory with mode 700 and refuses a symbolic-link or
+  other-user cache directory (#243), and rejects a non-numeric `--top` / `--budget` (#332).
+
+### Security
+- Symbolic links: tracked symbolic links that point outside the repository, or to files that
+  are not tracked, are no longer read into the index or bundle, including links reached
+  through a directory (#211, #338, #358). `task.md`, `citations.json` and `relevant-code/*.md`
+  are not written through a symbolic link, and bundle files are created with `create_new`
+  (#306, #319).
+- The embedding client no longer follows redirects, so the API key cannot be sent to a
+  redirect target, and response bodies are limited to 10 MiB (#338).
+- `ring` is updated to 0.17.14 (RUSTSEC-2025-0009) (#338).
+- `rustls`, `rustls-webpki` and `webpki-roots` are updated; this fixes RUSTSEC-2026-0285,
+  RUSTSEC-2026-0346, RUSTSEC-2026-0348, RUSTSEC-2026-0349, RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382 (#348).
+- `libz-sys` is updated to 1.1.31, which fixes a build script that leaked environment
+  variables into the build directory (#186).
+- `git2` is updated to 0.21, which resolves three unsoundness advisories (#213).
+- The bundled SQLite is updated to 3.51.3 or later through `rusqlite` 0.41, which includes the
+  WAL-reset bug fix; RUSTSEC-2026-0459 is no longer reported (#305).
+
+### Removed
+- The unused `walkdir` dependency (#305).
+
 ## [0.4.1] - 2026-11-01
 
 Retrieval fixes found while measuring accuracy on real fix PRs (#135, #160). On the `bench/`
