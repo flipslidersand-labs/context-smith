@@ -18,12 +18,14 @@ fn is_go_generated_or_test(path: &Path) -> bool {
 /// Build a directory-to-file-ids index from `file_paths` for O(1) Go import resolution.
 /// Maps each file's parent directory path to the list of file IDs in that directory.
 ///
+/// Only `.go` files are indexed (other files in the same directory are ignored).
 /// Go test and generated files (`*_test.go`, `*.pb.go`, `mock_*.go`) are excluded so
 /// they do not inflate the BFS frontier when `resolve_go` returns IDs for a directory. (#91)
 fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Vec<i64>> {
     let mut dir_to_files: HashMap<PathBuf, Vec<i64>> = HashMap::new();
     for (id, path) in file_paths {
-        if is_go_generated_or_test(path) {
+        if path.extension().and_then(|e| e.to_str()) != Some("go") || is_go_generated_or_test(path)
+        {
             continue;
         }
         if let Some(dir) = path.parent() {
@@ -794,6 +796,20 @@ mod tests {
         assert!(is_go_generated_or_test(Path::new("a/x.pb.go")));
         assert!(is_go_generated_or_test(Path::new("a/mock_x.go")));
         assert!(!is_go_generated_or_test(Path::new("a/x.go")));
+    }
+
+    #[test]
+    fn go_dir_index_only_contains_go_files() {
+        let paths: HashMap<i64, PathBuf> = [
+            (1, PathBuf::from("pkg/auth/auth.go")),
+            (2, PathBuf::from("pkg/auth/view.ts")),
+            (3, PathBuf::from("pkg/auth/tool.py")),
+            (4, PathBuf::from("pkg/auth/README")),
+        ]
+        .into();
+        let idx = build_go_dir_index(&paths);
+        assert_eq!(idx[&PathBuf::from("pkg/auth")], vec![1]);
+        assert_eq!(resolve_go("\"x/pkg/auth\"", &idx), vec![1]);
     }
 
     #[test]
