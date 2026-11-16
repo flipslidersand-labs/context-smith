@@ -515,6 +515,18 @@ impl Embedder for RemoteEmbedder {
                     req = req.set("X-API-Key", key.as_str());
                 }
                 match req.send_json(body.clone()) {
+                    // `.redirects(0)` makes ureq return 3xx as Ok: fail fast with a clear cause.
+                    Ok(r) if (300..400).contains(&r.status()) => {
+                        let loc = r
+                            .header("Location")
+                            .map(|l| format!(" (Location: {l})"))
+                            .unwrap_or_default();
+                        return Err(anyhow::anyhow!(
+                            "embedding request failed: HTTP {} redirect not followed{loc}; \
+                             point EMBEDDING_SVC_URL at the final URL",
+                            r.status()
+                        ));
+                    }
                     Ok(r) => match read_json_limited::<EmbedResponse>(r) {
                         Ok(parsed) => break parsed,
                         // A malformed 200 body is not transient: fail fast.
@@ -1110,7 +1122,13 @@ mod tests {
         let mut e = remote_for(url);
         e.api_key = Some(zeroize::Zeroizing::new("sekret-test-key".to_string()));
         let r = e.embed(&["x".to_string()], EmbedMode::Index);
-        assert!(r.is_err(), "a redirect response must be an error");
+        let msg = format!("{:#}", r.expect_err("a redirect response must be an error"));
+        assert!(
+            msg.contains("redirect") && msg.contains("Location: "),
+            "got: {msg}"
+        );
+        assert!(msg.contains("/steal"), "got: {msg}");
+        assert!(!msg.contains("sekret-test-key"), "got: {msg}");
         assert!(
             seen.lock().unwrap().is_empty(),
             "redirect target must receive no request: {:?}",

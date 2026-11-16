@@ -45,7 +45,7 @@ enum Command {
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
         /// Override the default output path (.contextsmith/index.db inside the repo)
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         out: Option<String>,
         /// Force a full re-index even for files whose content has not changed
         #[arg(long)]
@@ -66,7 +66,7 @@ enum Command {
         /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
         #[arg(long)]
         index: Option<String>,
-        /// Include BM25 score annotations in task.md
+        /// Include relevance score annotations in task.md
         #[arg(long)]
         explain: bool,
         /// Number of recent commits to include as diff context
@@ -94,7 +94,7 @@ enum Command {
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryFormat::Json)]
         format: QueryFormat,
-        /// Include BM25 score annotations (md format only)
+        /// Include relevance score annotations (md format only)
         #[arg(long)]
         explain: bool,
         /// Disable semantic (embedding) seeds even when the index has them; BM25 only
@@ -130,6 +130,25 @@ fn resolve_index_path(repo: &GitRepo, index: Option<String>) -> anyhow::Result<P
     Ok(db_path)
 }
 
+/// Refuse if the db file or its `-wal`/`-shm` sidecars is a symlink, since
+/// SQLite would write through it to wherever it points.
+fn refuse_symlinked_index_files(db_path: &std::path::Path) -> anyhow::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        let p = PathBuf::from(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&p) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                    p.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -139,6 +158,7 @@ fn main() -> anyhow::Result<()> {
                 Some(p) => {
                     // Keep an index outside the repository (e.g. in a cache dir) with one command.
                     let p = PathBuf::from(p);
+                    refuse_symlinked_index_files(&p)?;
                     if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -155,8 +175,10 @@ fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
+                    let db_path = dir.join("index.db");
+                    refuse_symlinked_index_files(&db_path)?;
                     std::fs::create_dir_all(&dir)?;
-                    dir.join("index.db")
+                    db_path
                 }
             };
             let db = IndexDb::open(&db_path)?;

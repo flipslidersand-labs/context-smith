@@ -278,7 +278,7 @@ pub fn write_bundle(
             path: c.path.clone(),
             score: c.score,
             tokens: c.tokens(),
-            reason: format!("bm25_score={:.3}", c.score),
+            reason: format!("relevance_score={:.3}", c.score),
             truncated: c.truncated,
         })
         .collect();
@@ -874,5 +874,22 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&cj).unwrap();
         assert_eq!(v[0]["truncated"], true);
         assert_eq!(v[1]["truncated"], false);
+    }
+
+    #[test]
+    fn citation_reason_does_not_claim_raw_bm25() {
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle(
+            "t",
+            1000,
+            &[cand("src/a.rs", 0.5, "fn a() {}")],
+            "",
+            dir.path(),
+            false,
+        )
+        .unwrap();
+        let cj = std::fs::read_to_string(dir.path().join("citations.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cj).unwrap();
+        assert_eq!(v[0]["reason"], "relevance_score=0.500");
     }
 }

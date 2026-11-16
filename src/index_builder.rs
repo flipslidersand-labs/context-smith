@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -333,7 +333,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 1;
+pub const EXTRACT_VERSION: u32 = 2;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
@@ -348,6 +348,18 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
     })
 }
 
+/// Stored extractor version. Only a missing row means "no version"; other errors
+/// (SQLITE_BUSY, ...) propagate instead of silently forcing a full re-index.
+fn stored_extract_version(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![EXTRACT_VERSION_KEY],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
     db.init_schema()?;
 
@@ -355,14 +367,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     // one with no record) is rebuilt through the same path as `--force`.
     let mut force = force;
     if !force {
-        let stored: Option<String> = db
-            .connection()
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![EXTRACT_VERSION_KEY],
-                |r| r.get(0),
-            )
-            .ok();
+        let stored = stored_extract_version(db.connection())?;
         let has_files: i64 = db
             .connection()
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
@@ -838,6 +843,20 @@ mod tests {
         db.delete_deps_from(a).unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM deps"), 1);
         assert_eq!(count(&db, "SELECT from_file FROM deps"), b);
+    }
+
+    #[test]
+    fn stored_extract_version_missing_row_is_none_but_errors_propagate() {
+        let db = mem_db();
+        assert_eq!(stored_extract_version(db.connection()).unwrap(), None);
+        db.upsert_meta(EXTRACT_VERSION_KEY, "7").unwrap();
+        assert_eq!(
+            stored_extract_version(db.connection()).unwrap().as_deref(),
+            Some("7")
+        );
+        // A query failure (here: no meta table) must not read as "no version".
+        db.connection().execute_batch("DROP TABLE meta").unwrap();
+        assert!(stored_extract_version(db.connection()).is_err());
     }
 
     #[test]
