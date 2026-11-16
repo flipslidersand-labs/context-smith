@@ -2,36 +2,39 @@
 
 ## 言語・バージョン
 
-- Rust 1.78+ (edition 2021)
+- Rust 1.89+ (edition 2021)。`Cargo.toml` の `rust-version` が正本（rusqlite 0.41 の要求に合わせた値）
 
 ## 主要クレートと選定理由
 
-| クレート               | バージョン | 役割                           | 選定理由                                        |
-| ---------------------- | ---------- | ------------------------------ | ----------------------------------------------- |
-| `git2`                 | 0.19       | Git リポジトリ走査・差分取得   | libgit2 の Rust バインディング、GitHub API 不要 |
-| `tree-sitter`          | 0.22       | シンボル抽出・AST 解析         | 多言語対応・インクリメンタル解析が強力          |
-| `tree-sitter-rust`     | 0.21       | Rust 文法                      | tree-sitter の言語グラマー                      |
-| `tree-sitter-python`   | 0.21       | Python 文法                    | 同上                                            |
-| `tantivy`              | 0.21       | BM25 全文検索インデックス      | Rust ネイティブ・Lucene 相当の機能              |
-| `rusqlite`             | 0.31       | シンボル・インデックスの永続化 | ファイル1つで完結                               |
-| `serde` / `serde_json` | 1          | citations.json・グラフ出力     | derive で簡潔                                   |
-| `clap`                 | 4          | CLI                            | derive マクロ                                   |
-| `anyhow`               | 1          | エラーハンドリング             | 複数クレートのエラーを集約                      |
+版は `Cargo.toml` が正本。この表は 0.5.0 時点。
+
+| クレート               | バージョン | 役割                                         | 選定理由                                        |
+| ---------------------- | ---------- | -------------------------------------------- | ----------------------------------------------- |
+| `git2`                 | 0.21       | Git リポジトリ走査・差分取得                 | libgit2 の Rust バインディング、GitHub API 不要 |
+| `tree-sitter`          | 0.26       | シンボル抽出・AST 解析                       | 多言語対応・インクリメンタル解析が強力          |
+| `tree-sitter-*` 文法   | 0.23〜0.25 | Rust / Python / Go / TypeScript / JavaScript / Ruby | tree-sitter の言語グラマー。javascript のみ 0.25（0.26 ランタイムが前提） |
+| `rusqlite`             | 0.41       | シンボル・インデックスの永続化、FTS5 による BM25 検索 | ファイル1つで完結。検索も同じ DB に置ける（ADR-003） |
+| `serde` / `serde_json` | 1          | citations.json・`query --format json` 出力   | derive で簡潔                                   |
+| `clap`                 | 4          | CLI                                          | derive マクロ                                   |
+| `anyhow`               | 1          | エラーハンドリング                           | 複数クレートのエラーを集約                      |
+| `ureq` / `zeroize`     | 2 / 1      | 埋め込みサービス連携（`remote-embed` feature のみ） | 既定ビルドは BM25 のみでオフライン動作      |
+
+SQLite は既定で同梱ビルド（`bundled-sqlite` feature）。`--no-default-features` でシステムの SQLite を使う。
 
 ## アーキテクチャ
 
 ```
 contextsmith index
-  ├── GitWalker (git2)       全ファイルの blob を取得
-  ├── SymbolExtractor (tree-sitter)  関数・型・import を抽出
-  ├── DependencyBuilder (rusqlite)   import 関係を deps テーブルに保存
-  └── Indexer (tantivy + rusqlite)   BM25 インデックス + シンボル DB 構築
+  ├── index_builder (git2)           HEAD の全ファイルを走査
+  ├── tree-sitter                    関数・型・import を抽出
+  ├── dep_builder                    import 関係を deps テーブルに保存
+  └── search_index (SQLite FTS5)     シンボル・本文・パスの検索インデックス
 
 contextsmith build --task "..." --budget N
-  ├── Retriever (tantivy)    BM25 でタスク関連ファイルをランキング
-  ├── GraphExpander (SQL)    上位ファイルの依存を BFS 展開
-  ├── BudgetAllocator        トークン数を計算しグリーディー選択
-  └── BundleWriter           Markdown + citations.json 出力
+  ├── select (search_index)          FTS5 の BM25 でタスク関連ファイルをランキング
+  ├── dep_builder::bfs_expand        上位ファイルの依存を BFS 展開（select から呼ぶ）
+  ├── budget                         トークン数を計算しグリーディー選択
+  └── bundle_writer                  Markdown + citations.json 出力
 ```
 
 ## 開発ツール

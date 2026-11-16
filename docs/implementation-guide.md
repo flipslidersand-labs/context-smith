@@ -64,8 +64,7 @@ contextsmith build --task "認証エラー" --budget 10000 --explain
 
 ### 実装内容
 
-- `src/indexer.rs` — `tantivy` でファイル内容 + シンボル名のインデックスを構築
-- `src/retriever.rs` — タスク文字列で BM25 クエリを発行しスコア付きファイル一覧を取得
+- `src/search_index.rs` — SQLite FTS5 でファイル内容・シンボル名・パスのインデックスを構築し、BM25 クエリでスコア付きファイル一覧を取得（実装時に tantivy から変更。ADR-003）
 
 ### 完成条件
 
