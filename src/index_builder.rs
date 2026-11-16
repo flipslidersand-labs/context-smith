@@ -1449,6 +1449,27 @@ mod tests {
     }
 
     #[test]
+    fn build_index_drops_stale_rows_when_tracked_file_deleted_uncommitted() {
+        let (tmp, repo) = repo_with(&[
+            ("a.rs", "pub fn gone_marker() {}\n"),
+            ("ok.rs", "fn ok() {}\n"),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='gone_marker'"),
+            1
+        );
+        std::fs::remove_file(tmp.path().join("a.rs")).unwrap();
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "gone_marker");
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM files WHERE path='a.rs'"),
+            0
+        );
+    }
+
+    #[test]
     fn build_index_drops_stale_rows_when_file_becomes_non_utf8() {
         let (tmp, repo) = repo_with(&[
             ("a.rs", "pub fn stale_marker() {}\n"),

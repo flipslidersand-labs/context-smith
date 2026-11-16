@@ -306,8 +306,9 @@ impl GitRepo {
     ///
     /// The sha and size describe the working-tree content (git blob hash), so
     /// uncommitted edits are noticed and the sha equals HEAD's for an unchanged
-    /// file. Unknown-language files and files missing from the working tree
-    /// keep HEAD's values.
+    /// file. Unknown-language files keep HEAD's values; a file missing or
+    /// unreadable in the working tree gets an `unreadable:`-prefixed sha so it is
+    /// never treated as unchanged.
     #[cfg(test)]
     pub(crate) fn scan(&self) -> Result<Vec<(PathBuf, Language, String, i64)>> {
         Ok(self.scan_with_skipped()?.0)
@@ -376,7 +377,10 @@ impl GitRepo {
                                 eprintln!("warn: skip {:?}: {e}", rel);
                                 continue;
                             }
-                            Err(_) => {}
+                            // Missing/unreadable in the working tree: HEAD's sha
+                            // would look "unchanged" and keep stale rows. A
+                            // sentinel forces a re-read that fails and drops them.
+                            Err(_) => sha = format!("unreadable:{sha}"),
                         }
                     }
                     results.push((rel, lang, sha, size));
