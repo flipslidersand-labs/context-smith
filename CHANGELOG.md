@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Embeddings are recomputed when the embedding model or vector dimension changes (stored in `meta` as `embed_model` / `embed_dim`), and `index --force` now re-embeds unchanged files too (#194).
+
 ## [0.5.0] - 2026-11-16
 
 ### Added
