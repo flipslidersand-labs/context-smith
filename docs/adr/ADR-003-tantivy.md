@@ -57,7 +57,7 @@ GROUP BY file_id ORDER BY total ASC LIMIT 20
 
 - camelCase（`authenticateUser` → `authenticate user`）は FTS5 の tokenizer が分割できないため、
   アプリ側でプリトークナイズして格納する（`src/tokenizer.rs`）
-- Phase 6 でベクトル検索と RRF 統合する際は、現行の BM25 スコアが `rank / MIN(rank)` による 0〜1 の正規化済み（重み付き合算の結果、大きいほど良い）である点を踏まえる。生の FTS5 rank（負値）を再度変換すると二重変換になるため、`search_bm25` の返すスコアまたは順位をそのまま RRF の入力にする
+- Phase 6 でベクトル検索と RRF 統合する際は、現行の BM25 スコアは、テーブル別スコアを `rank / MIN(rank)` で 0〜1 に正規化し、重み付き合算した total（大きいほど良い）である点を踏まえる。重み付け後の total は 0〜1 に収まらない。生の FTS5 rank（負値）を再度変換すると二重変換になるため、`search_bm25` の返すスコアまたは順位をそのまま RRF の入力にする
 
 ## 実装照合（2026-11-15、CHANGELOG 0.4.1 時点）
 
