@@ -90,7 +90,7 @@ fn resolve_import(
 ) -> Vec<i64> {
     let ext = from_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
-        "rs" => resolve_rust(import_str, path_to_id),
+        "rs" => resolve_rust(import_str, from_path, path_to_id),
         "py" => resolve_python(import_str, from_path, path_to_id),
         "go" => resolve_go(import_str, go_dir_index),
         "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
@@ -339,7 +339,27 @@ fn split_brace_aware(s: &str) -> impl Iterator<Item = &str> {
     parts.into_iter()
 }
 
-fn resolve_rust(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64> {
+/// from_path の祖先のうち `<dir>/src/lib.rs` か `<dir>/src/main.rs` を持つ最も近いディレクトリ
+/// をクレートルートとみなす。見つからなければリポジトリ直下("")。
+fn rust_crate_root(from_path: &Path, path_to_id: &HashMap<PathBuf, i64>) -> PathBuf {
+    from_path
+        .ancestors()
+        .skip(1)
+        .find(|dir| {
+            ["src/lib.rs", "src/main.rs"]
+                .iter()
+                .any(|f| path_to_id.contains_key(&dir.join(f)))
+        })
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+}
+
+fn resolve_rust(
+    import_str: &str,
+    from_path: &Path,
+    path_to_id: &HashMap<PathBuf, i64>,
+) -> Vec<i64> {
+    let root = rust_crate_root(from_path, path_to_id);
     let mut ids = Vec::new();
     for expanded in expand_rust_use(import_str) {
         let Some(tail) = expanded.strip_prefix("crate::") else {
@@ -350,8 +370,8 @@ fn resolve_rust(import_str: &str, path_to_id: &HashMap<PathBuf, i64>) -> Vec<i64
         'search: while !segs.is_empty() {
             let rel = segs.join("/");
             for candidate in [
-                PathBuf::from(format!("src/{}.rs", rel)),
-                PathBuf::from(format!("src/{}/mod.rs", rel)),
+                root.join(format!("src/{}.rs", rel)),
+                root.join(format!("src/{}/mod.rs", rel)),
             ] {
                 if let Some(&id) = path_to_id.get(&candidate) {
                     if !ids.contains(&id) {
@@ -963,21 +983,58 @@ mod tests {
     #[test]
     fn resolve_rust_finds_file_and_mod_rs() {
         let map = ids(&[("src/a.rs", 1), ("src/b/mod.rs", 2)]);
-        assert_eq!(resolve_rust("crate::{a, b}", &map), vec![1, 2]);
-        assert!(resolve_rust("std::fmt", &map).is_empty());
+        assert_eq!(
+            resolve_rust("crate::{a, b}", Path::new("src/lib.rs"), &map),
+            vec![1, 2]
+        );
+        assert!(resolve_rust("std::fmt", Path::new("src/lib.rs"), &map).is_empty());
     }
 
     #[test]
     fn resolve_rust_drops_trailing_item_segments() {
         let map = ids(&[("src/budget.rs", 1), ("src/a/mod.rs", 2), ("src/a/b.rs", 3)]);
-        assert_eq!(resolve_rust("crate::budget::Candidate", &map), vec![1]);
-        assert_eq!(resolve_rust("crate::a::Item::method", &map), vec![2]);
+        assert_eq!(
+            resolve_rust("crate::budget::Candidate", Path::new("src/lib.rs"), &map),
+            vec![1]
+        );
+        assert_eq!(
+            resolve_rust("crate::a::Item::method", Path::new("src/lib.rs"), &map),
+            vec![2]
+        );
         // 最長一致: a::b があれば a より優先する
-        assert_eq!(resolve_rust("crate::a::b::Thing", &map), vec![3]);
+        assert_eq!(
+            resolve_rust("crate::a::b::Thing", Path::new("src/lib.rs"), &map),
+            vec![3]
+        );
         // 同じ親に解決される複数 item は重複しない
-        assert_eq!(resolve_rust("crate::a::{x, y}", &map), vec![2]);
-        assert!(resolve_rust("std::fmt", &map).is_empty());
-        assert!(resolve_rust("crate::missing::Item", &map).is_empty());
+        assert_eq!(
+            resolve_rust("crate::a::{x, y}", Path::new("src/lib.rs"), &map),
+            vec![2]
+        );
+        assert!(resolve_rust("std::fmt", Path::new("src/lib.rs"), &map).is_empty());
+        assert!(resolve_rust("crate::missing::Item", Path::new("src/lib.rs"), &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_uses_nearest_crate_root_in_workspace() {
+        let map = ids(&[
+            ("src/lib.rs", 10),
+            ("src/x.rs", 11),
+            ("crates/foo/src/lib.rs", 20),
+            ("crates/foo/src/x.rs", 21),
+            ("crates/foo/src/m/mod.rs", 22),
+            ("crates/bar/src/main.rs", 30),
+            ("crates/bar/src/y.rs", 31),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        assert_eq!(r("crates/foo/src/lib.rs", "crate::x"), vec![21]);
+        assert_eq!(r("crates/foo/src/m/mod.rs", "crate::x::T"), vec![21]);
+        assert_eq!(r("crates/bar/src/main.rs", "crate::y"), vec![31]);
+        // 別クレートの src/x.rs には接続しない
+        assert!(r("crates/bar/src/main.rs", "crate::x").is_empty());
+        // ルート直下の src/ は従来通り
+        assert_eq!(r("src/lib.rs", "crate::x"), vec![11]);
     }
 
     #[test]
