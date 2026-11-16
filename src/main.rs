@@ -47,7 +47,7 @@ enum Command {
         #[arg(long, value_parser = non_empty_string)]
         repo: String,
         /// Override the default output path (.contextsmith/index.db inside the repo)
-        #[arg(long)]
+        #[arg(long, value_parser = non_empty_string)]
         out: Option<String>,
         /// Force a full re-index even for files whose content has not changed
         #[arg(long)]
