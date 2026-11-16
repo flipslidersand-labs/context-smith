@@ -5,7 +5,7 @@ use std::collections::HashSet;
 // BM25 signal weights (higher = stronger signal).
 // path: file-name/directory match is the strongest localization cue.
 // symbols: function/type names match the task vocabulary directly. Kept low (0.5): symbol
-//   matches are plentiful and noisy; at the old 2.0 they pushed the right file down (#135).
+//   matches are plentiful and noisy; at the old 2.0 a file with many symbols outranked the best match (#151).
 // body: full-text fallback, broadest but noisiest.
 const W_PATH: f64 = 3.0;
 const W_SYMBOLS: f64 = 0.5;
@@ -180,7 +180,7 @@ pub fn populate_fts_with_paths(
 
 /// BM25 search across fts_path (×3), fts_symbols (×0.5, best match per file) and fts_body (×1).
 ///
-/// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MAX(rank)` so
+/// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MIN(rank)` (BM25 `rank` is negative, so MIN is the best match) so
 /// that the absolute magnitude difference between small path tables and large body tables
 /// does not drown out the configured weights.  Each sub-query is also limited to
 /// `top_n * 3` rows before the UNION ALL to prevent intermediate memory explosion.
@@ -210,7 +210,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     // preventing intermediate memory explosion.
     // fts_symbols has one row per symbol while fts_path / fts_body have one row per file, so its
     // rows are collapsed to the best match per file (`MIN(rank)`); summing them let a file with many
-    // symbols outrank the file that matches the task best (#135).
+    // symbols outrank the file that matches the task best (#151).
     // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
     // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
     let sub_limit = (top_n * 3) as i64;
