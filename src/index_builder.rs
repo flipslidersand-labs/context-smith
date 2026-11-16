@@ -366,6 +366,12 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     // An index built by a different extractor version (or a pre-versioning
     // one with no record) is rebuilt through the same path as `--force`.
     let mut force = force;
+    if force {
+        // `--force` also recomputes embeddings: mark them stale (vectors stay
+        // usable until a new embedding pass replaces them).
+        db.connection()
+            .execute_batch("UPDATE embeddings SET content_sha = NULL;")?;
+    }
     if !force {
         let stored = stored_extract_version(db.connection())?;
         let has_files: i64 = db
@@ -985,6 +991,24 @@ mod tests {
         assert_eq!(stats.files_indexed, 0);
         assert_eq!(stats.files_skipped, 2);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols"), 3);
+    }
+
+    #[test]
+    fn build_index_force_marks_embeddings_stale() {
+        let (_tmp, repo) = repo_with(&[("a.py", "def a():\n    pass\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO embeddings (file_id, vector, content_sha)
+                 SELECT id, x'00', blob_sha FROM files",
+                [],
+            )
+            .unwrap();
+        build_index(&repo, &db, false).unwrap();
+        assert!(db.files_needing_embed().unwrap().is_empty());
+        build_index(&repo, &db, true).unwrap();
+        assert_eq!(db.files_needing_embed().unwrap().len(), 1);
     }
 
     #[test]

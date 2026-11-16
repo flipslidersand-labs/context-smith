@@ -6,7 +6,7 @@
 //! default crates.io build stays lean and works offline (BM25 only).
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Embedding intent. e5-style models embed documents and queries differently;
 /// the embedding service applies the right prefix based on this mode, so callers
@@ -33,6 +33,23 @@ impl EmbedMode {
 pub trait Embedder {
     /// Embed each input text, returning one vector per input in the same order.
     fn embed(&self, texts: &[String], mode: EmbedMode) -> Result<Vec<Vec<f32>>>;
+
+    /// Identifier of the model behind this embedder. Stored in the index `meta`
+    /// table; when it changes, every stored vector is recomputed.
+    fn model_id(&self) -> String {
+        "unknown".to_string()
+    }
+}
+
+const EMBED_MODEL_KEY: &str = "embed_model";
+const EMBED_DIM_KEY: &str = "embed_dim";
+
+fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+            r.get(0)
+        })
+        .optional()?)
 }
 
 /// Serialize a vector as little-endian f32 bytes for BLOB storage.
@@ -107,7 +124,9 @@ const EMBED_BATCH: usize = 64;
 /// vectors in the `embeddings` table.
 ///
 /// Only files where `embeddings.content_sha IS NULL OR content_sha != blob_sha`
-/// are re-embedded; unchanged files are left untouched. Files are processed in
+/// are re-embedded; unchanged files are left untouched. The exception is a
+/// change of embedder model or vector dimension (recorded in `meta` as
+/// `embed_model` / `embed_dim`): all stored vectors are then recomputed. Files are processed in
 /// chunks of [`EMBED_BATCH`] to cap peak RAM usage. Returns the number of files
 /// actually embedded (skipped files are not counted).
 pub fn populate_embeddings(
@@ -139,6 +158,15 @@ fn populate_embeddings_inner(
 ) -> Result<usize> {
     // Query only the files that actually need (re-)embedding — avoids the
     // full-table DELETE and re-insert of the previous implementation.
+    //
+    // A different embedding model than the one that produced the stored vectors
+    // invalidates all of them, even for files whose content is unchanged.
+    let model = embedder.model_id();
+    if has_embeddings(conn)? && get_meta(conn, EMBED_MODEL_KEY)?.as_deref() != Some(model.as_str())
+    {
+        conn.execute("DELETE FROM embeddings", [])?;
+    }
+    db.upsert_meta(EMBED_MODEL_KEY, &model)?;
     let stale_files = db.files_needing_embed()?;
     if stale_files.is_empty() {
         return Ok(0);
@@ -184,9 +212,24 @@ fn populate_embeddings_inner(
             );
         }
 
+        // A different vector dimension than the stored one means the existing
+        // vectors are unusable: drop them and start over with the new dimension.
+        let dim = vecs.first().map_or(0, |v| v.len());
+        let stored_dim = get_meta(conn, EMBED_DIM_KEY)?;
+        if stored_dim.as_deref() != Some(dim.to_string().as_str()) && has_embeddings(conn)? {
+            conn.execute("DELETE FROM embeddings", [])?;
+            db.upsert_meta(EMBED_DIM_KEY, &dim.to_string())?;
+            return populate_embeddings_inner(conn, repo_root, embedder, db);
+        }
+
         // Persist each vector with its content_sha in a single transaction.
         conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<()> {
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![EMBED_DIM_KEY, dim.to_string()],
+            )?;
             for ((id, sha), v) in ids.iter().zip(shas.iter()).zip(vecs.iter()) {
                 conn.execute(
                     "INSERT INTO embeddings (file_id, vector, content_sha)
@@ -492,6 +535,11 @@ impl RemoteEmbedder {
 
 #[cfg(feature = "remote-embed")]
 impl Embedder for RemoteEmbedder {
+    fn model_id(&self) -> String {
+        // The service picks the model per collection.
+        self.collection.clone()
+    }
+
     fn embed(&self, texts: &[String], mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
         #[derive(serde::Deserialize)]
         struct EmbedResponse {
@@ -886,6 +934,82 @@ mod tests {
             .unwrap();
         let n3 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n3, 1, "only the changed file should be re-embedded");
+    }
+
+    struct IdEmbedder(&'static str, usize);
+    impl Embedder for IdEmbedder {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![1.0; self.1]).collect())
+        }
+        fn model_id(&self) -> String {
+            self.0.to_string()
+        }
+    }
+
+    fn two_file_db() -> (tempfile::TempDir, crate::index_builder::IndexDb) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn bb() {}").unwrap();
+        let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
+        (dir, db)
+    }
+
+    #[test]
+    fn populate_embeddings_reembeds_all_when_model_changes() {
+        let (dir, db) = two_file_db();
+        let c = db.connection();
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            2
+        );
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            0
+        );
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m2", 4), &db).unwrap(),
+            2
+        );
+        assert_eq!(get_meta(c, EMBED_MODEL_KEY).unwrap().as_deref(), Some("m2"));
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m2", 4), &db).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn populate_embeddings_reembeds_all_when_dim_changes() {
+        let (dir, db) = two_file_db();
+        let c = db.connection();
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            2
+        );
+        assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("4"));
+        // Same model name, new dimension. The dimension is only observable when
+        // the embedder is called, so one file changes to trigger a call.
+        c.execute(
+            "UPDATE files SET blob_sha = 'sha-a2' WHERE path = 'a.rs'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
+            2
+        );
+        assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("8"));
+        let lens: Vec<i64> = c
+            .prepare("SELECT length(vector) FROM embeddings")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(lens, vec![32, 32]);
+        assert_eq!(
+            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
+            0
+        );
     }
 
     #[cfg(feature = "remote-embed")]
@@ -1345,7 +1469,7 @@ mod tests {
             if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 {
                 anyhow::bail!("embedding service unavailable");
             }
-            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
         }
     }
 
