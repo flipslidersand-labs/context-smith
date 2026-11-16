@@ -32,7 +32,7 @@ contextsmith index
 
 contextsmith build --task "..." --budget N
   ├── select (search_index)          FTS5 の BM25 でタスク関連ファイルをランキング
-  ├── select (deps テーブル)         上位ファイルの依存を BFS 展開
+  ├── dep_builder::bfs_expand        上位ファイルの依存を BFS 展開（select から呼ぶ）
   ├── budget                         トークン数を計算しグリーディー選択
   └── bundle_writer                  Markdown + citations.json 出力
 ```
