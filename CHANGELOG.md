@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root, moved from the binary into the library (#316).
 
 ### Changed
+- Updated tree-sitter to 0.26 and tree-sitter-javascript to 0.25 (#373).
 - **The index is rebuilt in full once after upgrading.** The index now records the version of
   the extractor that built it. When it is missing or differs, `index` prints
   `note: index built by an older extractor; rebuilding` and rebuilds everything, as `--force`
