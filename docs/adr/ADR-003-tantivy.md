@@ -64,7 +64,7 @@ GROUP BY file_id ORDER BY total ASC LIMIT 20
 現在は `fts_path`・`fts_symbols`・`fts_body` の 3 テーブルを使用する（定義は [index_builder.rs](../../src/index_builder.rs)）。検索は [search_index.rs](../../src/search_index.rs) にあり、次のとおり。
 
 - 各テーブルの BM25 `rank` を、そのクエリ内の `MIN(rank)` で割って 0〜1 に正規化する（`NULLIF(..., 0)` でゼロ除算を避け、`COALESCE(SUM(score), 0)` で NULL を 0 にする）。
-- 重みは `W_PATH`・`W_SYMBOLS`・`W_BODY` の定数で、値と根拠は `search_index.rs` 冒頭のコメントを参照する。symbols は当初 2.0 だったが、シンボル数の多いファイルが最良一致のファイルを上回らないよう、file 単位の best match 集約と合わせて 0.5 に下げた（#151、CHANGELOG 0.4.1）。#135 は再現率を計測した Issue である。
+- 重みは `W_PATH`・`W_SYMBOLS`・`W_BODY` の定数で、値と根拠は `search_index.rs` 冒頭のコメントを参照する。symbols は当初 2.0 だったが、シンボル数の多いファイルが最良一致のファイルを上回らないよう、file 単位の best match 集約と合わせて 0.5 に下げた（#151、CHANGELOG 0.4.1）。この値は axum・clap・bat で選んだもので、他言語では楽観的な可能性がある（CHANGELOG 0.4.1 冒頭の注記）。#135 は再現率を計測した Issue である。
 - `fts_symbols` は 1 シンボル 1 行なので、file 単位に `MIN(rank)` で畳んでから合算する（多シンボルのファイルが過大評価されるのを防ぐ）。
 - 各サブクエリは上位だけ取ってから UNION ALL し、total の降順で `top_n` 件を返す（候補数の係数は `search_bm25` のドキュメントコメントを参照）。
 
