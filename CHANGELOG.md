@@ -99,7 +99,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An empty or whitespace-only `EMBEDDING_SVC_URL` is treated as unset (#329).
 
 ### Fixed
-- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - `index` no longer fails permanently with a foreign key error after a file that has embeddings
   is deleted from git (#182).
 - `index` no longer leaves a transaction open when the cleanup step or `COMMIT` fails
@@ -172,7 +171,6 @@ on axum, clap and bat, so their numbers are optimistic.
   repository (#145). Not included in the published crate.
 
 ### Fixed
-- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - Multi-word tasks no longer fail with "No matching files found": terms are OR-joined (#133).
 - `sanitize_fts_query` uses an allow-list of characters, so punctuation such as `.` or `=`
   in a task can no longer break the FTS5 query (#134).
@@ -232,7 +230,6 @@ on axum, clap and bat, so their numbers are optimistic.
   binary diffs (#94).
 
 ### Fixed
-- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - **Security**: `normalize_path` now rejects `..` traversals that escape the repo
   root, preventing potential arbitrary-file access via crafted import paths (#87).
 - **Security**: `RemoteEmbedder.api_key` is stored in `Zeroizing<String>` and
@@ -276,7 +273,6 @@ on axum, clap and bat, so their numbers are optimistic.
   `cc` version conflicts.
 
 ### Fixed
-- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - `blob_to_vec` replaced `as_chunks` (nightly) with `chunks_exact` (stable),
   fixing compilation on Rust ≤ 1.82.
 
@@ -311,7 +307,6 @@ on axum, clap and bat, so their numbers are optimistic.
   Kept dependency-free (no tiktoken) to preserve the offline design.
 
 ### Fixed
-- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - `RemoteEmbedder` now matches the real embedding-svc contract: `X-API-Key`
   auth, `{collection, texts, mode: index|search}` request, `{vectors}` response,
   and `EMBEDDING_SVC_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_COLLECTION` env vars
@@ -334,7 +329,6 @@ Initial release. Published to [crates.io](https://crates.io/crates/context-smith
 - Regression test suite (17 tests) covering the batch fixes #11–#20 (#21).
 
 ### Fixed
-- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - UTF-8 char-boundary panic when truncating multibyte bodies over 512 KiB (#11).
 - FTS5 MATCH special-character sanitization to avoid syntax errors (#12).
 - Python multi-dot relative import resolution to the parent package (#14).
