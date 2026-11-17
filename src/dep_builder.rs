@@ -659,7 +659,11 @@ fn parse_go_module(src: &str) -> Option<String> {
             if !rest.starts_with(char::is_whitespace) {
                 continue;
             }
-            let m = rest.trim().trim_matches(|c| c == '"' || c == '`');
+            let m = rest.trim();
+            if m.starts_with('(') {
+                return None; // block form `module ( ... )`: unsupported
+            }
+            let m = m.trim_matches(|c| c == '"' || c == '`');
             if !m.is_empty() {
                 return Some(m.to_string());
             }
@@ -1029,6 +1033,9 @@ mod tests {
         );
         assert_eq!(parse_go_module("modulex a\ngo 1.21\n"), None);
         assert_eq!(parse_go_module(""), None);
+        // block form is unsupported: fall back to legacy suffix matching
+        assert_eq!(parse_go_module("module (\n\texample.com/app\n)\n"), None);
+        assert_eq!(parse_go_module("module(\n\texample.com/app\n)\n"), None);
     }
 
     #[test]
