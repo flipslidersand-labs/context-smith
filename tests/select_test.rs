@@ -93,7 +93,8 @@ fn unknown_lang_and_missing_row_are_skipped() {
     conn.execute("DELETE FROM files WHERE path = 'b.rs'", [])
         .unwrap();
     let c = select_candidates(&repo, &db, "gamma_shared", &opts()).unwrap();
-    assert!(c.iter().all(|c| c.path != Path::new("b.rs")));
+    let paths: Vec<_> = c.iter().map(|c| c.path.to_str().unwrap()).collect();
+    assert_eq!(paths, vec!["a.rs"]);
 }
 
 #[test]
