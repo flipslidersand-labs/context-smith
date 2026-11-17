@@ -998,6 +998,26 @@ mod tests {
     }
 
     #[test]
+    fn build_index_survives_deeply_nested_file() {
+        let deep = format!(
+            "def top():\n    pass\nx = {}1{}\n",
+            "[".repeat(30_000),
+            "]".repeat(30_000)
+        );
+        let (_tmp, repo) = repo_with(&[("src/calc.rs", RS_SRC), ("deep.py", deep.as_str())]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_indexed, 2);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name = 'compute_total'"
+            ),
+            1
+        );
+    }
+
+    #[test]
     fn build_index_snippet_covers_surrounding_lines() {
         let src = "l1\nl2\nl3\nfn target() {}\nl5\nl6\nl7\nl8\n";
         let (_tmp, repo) = repo_with(&[("a.rs", src)]);
