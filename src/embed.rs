@@ -469,11 +469,7 @@ fn redact_url_userinfo(s: &str) -> String {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
         let end = tail
-            .find(|c: char| {
-                matches!(c, '/' | '?' | '#')
-                    || c.is_whitespace()
-                    || matches!(c, '"' | '\'' | ')' | '>')
-            })
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
             .unwrap_or(tail.len());
         let (authority, after) = tail.split_at(end);
         match authority.rfind('@') {
@@ -1231,6 +1227,64 @@ mod tests {
         );
         assert_eq!(redact_url_userinfo("http://host/a@b"), "http://host/a@b");
         assert_eq!(redact_url_userinfo("no url here"), "no url here");
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn redact_url_userinfo_handles_delimiter_chars_in_password() {
+        for pw in ["p)w", "p'w", "p\"w", "p>w", "p@w", "p(w"] {
+            let out = redact_url_userinfo(&format!("http://u:{pw}@host/x"));
+            assert_eq!(out, "http://***@host/x", "pw: {pw}");
+        }
+        // URL wrapped in brackets/quotes: only the userinfo is replaced.
+        assert_eq!(
+            redact_url_userinfo("failed (http://user:pw@host)"),
+            "failed (http://***@host)"
+        );
+        assert_eq!(
+            redact_url_userinfo("failed 'http://user:pw@host:9/embed/batch'"),
+            "failed 'http://***@host:9/embed/batch'"
+        );
+        // No userinfo, IPv6, no scheme: unchanged.
+        assert_eq!(redact_url_userinfo("(http://host)"), "(http://host)");
+        assert_eq!(
+            redact_url_userinfo("http://[::1]:80/x"),
+            "http://[::1]:80/x"
+        );
+        assert_eq!(
+            redact_url_userinfo("http://u:pw@[::1]:80/x"),
+            "http://***@[::1]:80/x"
+        );
+        assert_eq!(redact_url_userinfo("user:pw@host"), "user:pw@host");
+        // Two URLs in one message.
+        assert_eq!(
+            redact_url_userinfo("http://a:b@h1/x -> http://c:d@h2/y"),
+            "http://***@h1/x -> http://***@h2/y"
+        );
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_redirect_error_hides_location_userinfo() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 302 Found\r\nLocation: http://u:p)w@other/embed\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        });
+        let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("redirect not followed"), "got: {msg}");
+        assert!(!msg.contains("p)w"), "got: {msg}");
+        assert!(msg.contains("http://***@other/embed"), "got: {msg}");
     }
 
     #[cfg(feature = "remote-embed")]
