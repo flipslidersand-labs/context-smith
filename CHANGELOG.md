@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tracked files deleted or made unreadable in the working tree without a commit no longer keep stale rows: the next `index` drops them instead of treating them as unchanged (#327).
 - `ctx-select.sh` now runs its helper with `python3 -I`, so a `json.py` in the current directory can no longer run arbitrary code (#396).
 - `ctx-select.sh` now prints control characters (newlines, tabs, ...) in file names as `?`, so a crafted file name can no longer forge extra rank rows (#397).
+- Rust `mod x;` declarations now resolve from every Cargo target root (`build.rs`, `tests/*.rs`, `src/bin/*.rs`, `src/bin/<name>/main.rs`), not only `lib.rs`/`main.rs`/`mod.rs` (#420).
 
 ## [0.5.0] - 2026-11-16
 

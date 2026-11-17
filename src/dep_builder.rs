@@ -363,7 +363,19 @@ fn resolve_rust_mod_decl(
 ) -> Vec<i64> {
     let dir = from_path.parent().unwrap_or(Path::new(""));
     let stem = from_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let base = if matches!(stem, "lib" | "main" | "mod") {
+    let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let parent_name = dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // Cargo の target ルート: lib.rs / main.rs / mod.rs、build.rs、tests/*.rs、src/bin/*.rs
+    // (src/bin/<name>/main.rs は main.rs で網羅)。ルート内の `mod x;` は同ディレクトリを探す。
+    // 対象外: `#[path]` 属性、bin から lib への `use <crate>::…` のエッジ。
+    let is_target_root = matches!(stem, "lib" | "main" | "mod" | "build")
+        || dir_name == "tests"
+        || (dir_name == "bin" && parent_name == "src");
+    let base = if is_target_root {
         dir.to_path_buf()
     } else {
         dir.join(stem)
@@ -1062,6 +1074,31 @@ mod tests {
         assert_eq!(r("src/a.rs", "mod c"), vec![4]);
         assert_eq!(r("src/b/mod.rs", "mod d"), vec![5]);
         assert!(r("src/lib.rs", "mod missing").is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_handles_cargo_target_roots() {
+        let map = ids(&[
+            ("tests/it.rs", 1),
+            ("tests/common.rs", 2),
+            ("tests/util/mod.rs", 3),
+            ("src/bin/tool.rs", 4),
+            ("src/bin/helper.rs", 5),
+            ("src/bin/multi/main.rs", 6),
+            ("src/bin/multi/part.rs", 7),
+            ("build.rs", 8),
+            ("gen.rs", 9),
+            ("tests/it/sub.rs", 10),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        assert_eq!(r("tests/it.rs", "mod common"), vec![2]);
+        assert_eq!(r("tests/it.rs", "mod util"), vec![3]);
+        assert_eq!(r("src/bin/tool.rs", "mod helper"), vec![5]);
+        assert_eq!(r("src/bin/multi/main.rs", "mod part"), vec![7]);
+        assert_eq!(r("build.rs", "mod gen"), vec![9]);
+        // tests/it.rs は crate ルートなので tests/it/ ではなく tests/ を探す
+        assert!(r("tests/it.rs", "mod sub").is_empty());
     }
 
     #[test]
