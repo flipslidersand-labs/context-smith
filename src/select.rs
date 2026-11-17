@@ -8,6 +8,9 @@ use anyhow::Context;
 use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 
+const DEFAULT_SEED_COUNT: usize = 20;
+const DEFAULT_BFS_DEPTH: u8 = 2;
+
 /// Options for [`select_candidates`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -17,6 +20,11 @@ pub struct SelectOptions {
     /// Disable semantic (embedding) seeds; BM25 only. Only has an effect when
     /// built with the `remote-embed` feature.
     pub no_embed: bool,
+    /// Number of top BM25 seeds kept, and the `top_n` used when fusing with
+    /// semantic seeds (single source so the two never drift). Default 20.
+    pub seed_count: usize,
+    /// Dependency BFS depth from the seeds. Default 2.
+    pub bfs_depth: u8,
 }
 
 impl SelectOptions {
@@ -24,6 +32,8 @@ impl SelectOptions {
         Self {
             budget,
             no_embed: false,
+            seed_count: DEFAULT_SEED_COUNT,
+            bfs_depth: DEFAULT_BFS_DEPTH,
         }
     }
 }
@@ -36,12 +46,14 @@ fn build_seeds(
     task: &str,
     bm25: Vec<(i64, f32)>,
     no_embed: bool,
+    seed_count: usize,
 ) -> anyhow::Result<Vec<(i64, f32)>> {
     #[cfg(feature = "remote-embed")]
     {
         if !no_embed {
             if let Some(embedder) = crate::embed::RemoteEmbedder::from_env() {
-                match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, 20) {
+                match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, seed_count)
+                {
                     Ok((seeds, fused)) => {
                         if fused {
                             eprintln!("semantic: RRF-fused BM25 with embedding seeds");
@@ -58,7 +70,7 @@ fn build_seeds(
         }
     }
     #[cfg(not(feature = "remote-embed"))]
-    let _ = (conn, task, no_embed);
+    let _ = (conn, task, no_embed, seed_count);
     Ok(bm25)
 }
 
@@ -72,17 +84,17 @@ pub fn select_candidates(
     task: &str,
     opts: &SelectOptions,
 ) -> anyhow::Result<Vec<Candidate>> {
-    // Step 1: BM25 search → top-20 seeds, optionally RRF-fused with semantic
+    // Step 1: BM25 search → top-`seed_count` seeds, optionally RRF-fused with semantic
     // vectors. Fusion can surface files with zero lexical overlap, so the empty
     // check happens after fusion (semantic may rescue an empty BM25).
-    let bm25 = search_bm25(db.connection(), task, 20)?;
-    let seeds = build_seeds(db.connection(), task, bm25, opts.no_embed)?;
+    let bm25 = search_bm25(db.connection(), task, opts.seed_count)?;
+    let seeds = build_seeds(db.connection(), task, bm25, opts.no_embed, opts.seed_count)?;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
     }
 
-    // Step 2: BFS expand from seeds (depth=2)
-    let mut scored = bfs_expand(db.connection(), &seeds, 2)?;
+    // Step 2: BFS expand from seeds (depth=`bfs_depth`)
+    let mut scored = bfs_expand(db.connection(), &seeds, opts.bfs_depth)?;
     for (fid, s) in &seeds {
         scored
             .entry(*fid)
