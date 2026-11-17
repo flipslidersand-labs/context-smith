@@ -1419,7 +1419,7 @@ mod tests {
             ("src/bin/multi/part.rs", 10),
         ]);
         let go = HashMap::new();
-        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, &[]);
         assert_eq!(r("src/a/lib.rs", "mod y"), vec![2]);
         assert_eq!(r("src/x/main.rs", "mod z"), vec![5]);
         assert_eq!(r("crates/c/src/lib.rs", "mod q"), vec![8]);
@@ -1431,7 +1431,7 @@ mod tests {
         let map = ids(&[("src/lib.rs", 1), ("src/foo.rs", 2), ("src/foo/mod.rs", 3)]);
         let go = HashMap::new();
         assert_eq!(
-            resolve_import("mod foo", Path::new("src/lib.rs"), &map, &go, None),
+            resolve_import("mod foo", Path::new("src/lib.rs"), &map, &go, &[]),
             vec![2]
         );
     }
@@ -1440,7 +1440,7 @@ mod tests {
     fn resolve_rust_mod_decl_strips_raw_identifier_prefix() {
         let map = ids(&[("src/lib.rs", 1), ("src/type.rs", 2), ("src/fn/mod.rs", 3)]);
         let go = HashMap::new();
-        let r = |imp: &str| resolve_import(imp, Path::new("src/lib.rs"), &map, &go, None);
+        let r = |imp: &str| resolve_import(imp, Path::new("src/lib.rs"), &map, &go, &[]);
         assert_eq!(r("mod r#type"), vec![2]);
         assert_eq!(r("mod r#fn"), vec![3]);
     }
