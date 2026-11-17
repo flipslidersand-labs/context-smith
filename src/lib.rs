@@ -441,7 +441,7 @@ impl SymbolExtractor {
             .with_context(|| format!("Failed to load Rust grammar for {:?}", path))?;
         let tree = parser.parse(source, None).context("Rust parse failed")?;
         let root = tree.root_node();
-        Ok(collect_rust_symbols(root, source.as_bytes()))
+        Ok(collect_rust_symbols(root, source.as_bytes(), path))
     }
 
     fn extract_python(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
@@ -451,7 +451,7 @@ impl SymbolExtractor {
             .with_context(|| format!("Failed to load Python grammar for {:?}", path))?;
         let tree = parser.parse(source, None).context("Python parse failed")?;
         let root = tree.root_node();
-        Ok(collect_python_symbols(root, source.as_bytes()))
+        Ok(collect_python_symbols(root, source.as_bytes(), path))
     }
 
     fn extract_go(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
@@ -461,7 +461,7 @@ impl SymbolExtractor {
             .with_context(|| format!("Failed to load Go grammar for {:?}", path))?;
         let tree = parser.parse(source, None).context("Go parse failed")?;
         let root = tree.root_node();
-        Ok(collect_go_symbols(root, source.as_bytes()))
+        Ok(collect_go_symbols(root, source.as_bytes(), path))
     }
 
     fn extract_typescript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
@@ -480,7 +480,7 @@ impl SymbolExtractor {
             .parse(source, None)
             .context("TypeScript parse failed")?;
         let root = tree.root_node();
-        Ok(collect_ecma_symbols(root, source.as_bytes()))
+        Ok(collect_ecma_symbols(root, source.as_bytes(), path))
     }
 
     fn extract_javascript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
@@ -492,7 +492,7 @@ impl SymbolExtractor {
             .parse(source, None)
             .context("JavaScript parse failed")?;
         let root = tree.root_node();
-        Ok(collect_ecma_symbols(root, source.as_bytes()))
+        Ok(collect_ecma_symbols(root, source.as_bytes(), path))
     }
 
     fn extract_ruby(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
@@ -502,7 +502,21 @@ impl SymbolExtractor {
             .with_context(|| format!("Failed to load Ruby grammar for {:?}", path))?;
         let tree = parser.parse(source, None).context("Ruby parse failed")?;
         let root = tree.root_node();
-        Ok(collect_ruby_symbols(root, source.as_bytes()))
+        Ok(collect_ruby_symbols(root, source.as_bytes(), path))
+    }
+}
+
+/// Maximum syntax-tree depth the recursive symbol walkers descend. Deeper branches are
+/// skipped so a pathologically nested file cannot overflow the stack (#417). Real code
+/// nests well below this.
+const MAX_WALK_DEPTH: usize = 500;
+
+fn warn_if_truncated(path: &Path, truncated: bool) {
+    if truncated {
+        eprintln!(
+            "warn: {}: nesting deeper than {MAX_WALK_DEPTH}, deeper nodes skipped",
+            path.display()
+        );
     }
 }
 
@@ -510,13 +524,29 @@ fn node_text<'a>(node: tree_sitter::Node, src: &'a [u8]) -> &'a str {
     std::str::from_utf8(&src[node.byte_range()]).unwrap_or("")
 }
 
-fn collect_rust_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, SymbolKind, u32)> {
+fn collect_rust_symbols(
+    root: tree_sitter::Node,
+    src: &[u8],
+    path: &Path,
+) -> Vec<(String, SymbolKind, u32)> {
     let mut out = Vec::new();
-    traverse_rust(root, src, &mut out);
+    let mut truncated = false;
+    traverse_rust(root, src, &mut out, 0, &mut truncated);
+    warn_if_truncated(path, truncated);
     out
 }
 
-fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, SymbolKind, u32)>) {
+fn traverse_rust(
+    node: tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, SymbolKind, u32)>,
+    depth: usize,
+    truncated: &mut bool,
+) {
+    if depth > MAX_WALK_DEPTH {
+        *truncated = true;
+        return;
+    }
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_item" => {
@@ -574,14 +604,20 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
     }
     for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
-            traverse_rust(child, src, out);
+            traverse_rust(child, src, out, depth + 1, truncated);
         }
     }
 }
 
-fn collect_python_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, SymbolKind, u32)> {
+fn collect_python_symbols(
+    root: tree_sitter::Node,
+    src: &[u8],
+    path: &Path,
+) -> Vec<(String, SymbolKind, u32)> {
     let mut out = Vec::new();
-    collect_python_node(root, src, &mut out);
+    let mut truncated = false;
+    collect_python_node(root, src, &mut out, 0, &mut truncated);
+    warn_if_truncated(path, truncated);
     out
 }
 
@@ -589,7 +625,13 @@ fn collect_python_node(
     node: tree_sitter::Node,
     src: &[u8],
     out: &mut Vec<(String, SymbolKind, u32)>,
+    depth: usize,
+    truncated: &mut bool,
 ) {
+    if depth > MAX_WALK_DEPTH {
+        *truncated = true;
+        return;
+    }
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_definition" => {
@@ -609,16 +651,22 @@ fn collect_python_node(
     }
     for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
-            collect_python_node(child, src, out);
+            collect_python_node(child, src, out, depth + 1, truncated);
         }
     }
 }
 
 /// Symbol collector shared by TypeScript and JavaScript (TS is a superset of the
 /// JS node kinds; unknown kinds are simply ignored).
-fn collect_ecma_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, SymbolKind, u32)> {
+fn collect_ecma_symbols(
+    root: tree_sitter::Node,
+    src: &[u8],
+    path: &Path,
+) -> Vec<(String, SymbolKind, u32)> {
     let mut out = Vec::new();
-    collect_ecma_node(root, src, &mut out);
+    let mut truncated = false;
+    collect_ecma_node(root, src, &mut out, 0, &mut truncated);
+    warn_if_truncated(path, truncated);
     out
 }
 
@@ -626,7 +674,13 @@ fn collect_ecma_node(
     node: tree_sitter::Node,
     src: &[u8],
     out: &mut Vec<(String, SymbolKind, u32)>,
+    depth: usize,
+    truncated: &mut bool,
 ) {
+    if depth > MAX_WALK_DEPTH {
+        *truncated = true;
+        return;
+    }
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_declaration"
@@ -683,18 +737,34 @@ fn collect_ecma_node(
     }
     for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
-            collect_ecma_node(child, src, out);
+            collect_ecma_node(child, src, out, depth + 1, truncated);
         }
     }
 }
 
-fn collect_go_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, SymbolKind, u32)> {
+fn collect_go_symbols(
+    root: tree_sitter::Node,
+    src: &[u8],
+    path: &Path,
+) -> Vec<(String, SymbolKind, u32)> {
     let mut out = Vec::new();
-    collect_go_node(root, src, &mut out);
+    let mut truncated = false;
+    collect_go_node(root, src, &mut out, 0, &mut truncated);
+    warn_if_truncated(path, truncated);
     out
 }
 
-fn collect_go_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, SymbolKind, u32)>) {
+fn collect_go_node(
+    node: tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, SymbolKind, u32)>,
+    depth: usize,
+    truncated: &mut bool,
+) {
+    if depth > MAX_WALK_DEPTH {
+        *truncated = true;
+        return;
+    }
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_declaration" | "method_declaration" => {
@@ -720,14 +790,20 @@ fn collect_go_node(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, S
     }
     for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
-            collect_go_node(child, src, out);
+            collect_go_node(child, src, out, depth + 1, truncated);
         }
     }
 }
 
-fn collect_ruby_symbols(root: tree_sitter::Node, src: &[u8]) -> Vec<(String, SymbolKind, u32)> {
+fn collect_ruby_symbols(
+    root: tree_sitter::Node,
+    src: &[u8],
+    path: &Path,
+) -> Vec<(String, SymbolKind, u32)> {
     let mut out = Vec::new();
-    collect_ruby_node(root, src, &mut out);
+    let mut truncated = false;
+    collect_ruby_node(root, src, &mut out, 0, &mut truncated);
+    warn_if_truncated(path, truncated);
     out
 }
 
@@ -735,7 +811,13 @@ fn collect_ruby_node(
     node: tree_sitter::Node,
     src: &[u8],
     out: &mut Vec<(String, SymbolKind, u32)>,
+    depth: usize,
+    truncated: &mut bool,
 ) {
+    if depth > MAX_WALK_DEPTH {
+        *truncated = true;
+        return;
+    }
     let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "method" | "singleton_method" => {
@@ -766,7 +848,7 @@ fn collect_ruby_node(
     }
     for i in 0..node.child_count() as u32 {
         if let Some(child) = node.child(i) {
-            collect_ruby_node(child, src, out);
+            collect_ruby_node(child, src, out, depth + 1, truncated);
         }
     }
 }
@@ -1427,5 +1509,71 @@ mod tests {
         let out =
             SymbolExtractor::extract(Path::new("a.rs"), "fn ok() {} fn (", Language::Rust).unwrap();
         assert!(names(&out, SymbolKind::Function).contains(&"ok"));
+    }
+
+    // ---- deep nesting (#417) ----
+
+    /// Run extraction on a thread with a small stack: an unbounded recursive walk
+    /// overflows it (SIGABRT) on deeply nested input, while a depth-capped walk does not.
+    fn extract_small_stack(
+        file: &str,
+        src: String,
+        lang: Language,
+    ) -> Vec<(String, SymbolKind, u32)> {
+        let file = file.to_owned();
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || SymbolExtractor::extract(Path::new(&file), &src, lang).unwrap())
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn extract_deeply_nested_source_does_not_overflow_stack() {
+        const N: usize = 30_000;
+        let nest = |open: &str, close: &str| format!("{}1{}", open.repeat(N), close.repeat(N));
+        let cases = [
+            (
+                "a.py",
+                Language::Python,
+                format!("def top():\n    pass\nx = {}\n", nest("[", "]")),
+            ),
+            (
+                "a.js",
+                Language::JavaScript,
+                format!("function top() {{}}\nx = {};\n", nest("[", "]")),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                format!("function top() {{}}\nx = {};\n", nest("[", "]")),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                format!(
+                    "fn top() {{}}\nfn deep() {{ let x = {}; }}\n",
+                    nest("(", ")")
+                ),
+            ),
+            (
+                "a.go",
+                Language::Go,
+                format!("package p\nfunc top() {{}}\nvar x = {}\n", nest("(", ")")),
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                format!("def top; end\nx = {}\n", nest("[", "]")),
+            ),
+        ];
+        for (file, lang, src) in cases {
+            let syms = extract_small_stack(file, src, lang);
+            assert!(
+                names(&syms, SymbolKind::Function).contains(&"top"),
+                "{file}: shallow symbol before the deep nesting must still be extracted"
+            );
+        }
     }
 }

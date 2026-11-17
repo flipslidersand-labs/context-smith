@@ -349,7 +349,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 4;
+pub const EXTRACT_VERSION: u32 = 5;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
@@ -995,6 +995,26 @@ mod tests {
             })
             .unwrap();
         assert!(at.parse::<u64>().unwrap() > 0);
+    }
+
+    #[test]
+    fn build_index_survives_deeply_nested_file() {
+        let deep = format!(
+            "def top():\n    pass\nx = {}1{}\n",
+            "[".repeat(30_000),
+            "]".repeat(30_000)
+        );
+        let (_tmp, repo) = repo_with(&[("src/calc.rs", RS_SRC), ("deep.py", deep.as_str())]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_indexed, 2);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name = 'compute_total'"
+            ),
+            1
+        );
     }
 
     #[test]
