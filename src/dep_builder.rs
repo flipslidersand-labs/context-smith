@@ -37,7 +37,14 @@ fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Ve
 
 /// Populate the deps table by resolving import symbols already stored in the DB.
 /// Clears the table and rebuilds atomically inside a transaction.
-pub fn build_deps(conn: &Connection, file_paths: &HashMap<i64, PathBuf>) -> Result<()> {
+///
+/// `go_module` is the `module` path from the repo-root `go.mod` (see
+/// [`read_go_module`]); when present, Go imports resolve only inside that module (#419).
+pub fn build_deps(
+    conn: &Connection,
+    file_paths: &HashMap<i64, PathBuf>,
+    go_module: Option<&str>,
+) -> Result<()> {
     let path_to_id: HashMap<PathBuf, i64> =
         file_paths.iter().map(|(id, p)| (p.clone(), *id)).collect();
 
@@ -61,7 +68,9 @@ pub fn build_deps(conn: &Connection, file_paths: &HashMap<i64, PathBuf>) -> Resu
                 Some(p) => p,
                 None => continue,
             };
-            for to_id in resolve_import(import_str, from_path, &path_to_id, &go_dir_index) {
+            for to_id in
+                resolve_import(import_str, from_path, &path_to_id, &go_dir_index, go_module)
+            {
                 if *from_id != to_id {
                     conn.execute(
                         "INSERT OR IGNORE INTO deps (from_file, to_file) VALUES (?1, ?2)",
@@ -87,12 +96,13 @@ fn resolve_import(
     from_path: &Path,
     path_to_id: &HashMap<PathBuf, i64>,
     go_dir_index: &HashMap<PathBuf, Vec<i64>>,
+    go_module: Option<&str>,
 ) -> Vec<i64> {
     let ext = from_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "rs" => resolve_rust(import_str, from_path, path_to_id),
         "py" => resolve_python(import_str, from_path, path_to_id),
-        "go" => resolve_go(import_str, go_dir_index),
+        "go" => resolve_go(import_str, go_dir_index, go_module),
         "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
             resolve_ts_js(import_str, from_path, path_to_id)
         }
@@ -563,11 +573,21 @@ fn lookup_py_module(
 /// # Generated-file exclusion (#91)
 /// `*_test.go`, `*.pb.go`, and `mock_*.go` files are excluded from the returned
 /// IDs so they do not inflate the BFS frontier and consume token budget.
-fn resolve_go(import_str: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Vec<i64> {
+///
+/// # Module scoping (#419)
+/// With `go_module = Some(path)`, only imports equal to `path` or under `path/` resolve,
+/// and the remainder must match a repo directory exactly (no suffix matching), so
+/// `net/http` or external modules never attach to a same-named repo directory.
+/// With `None` (no readable `go.mod`) the legacy suffix match is kept.
+fn resolve_go(
+    import_str: &str,
+    go_dir_index: &HashMap<PathBuf, Vec<i64>>,
+    go_module: Option<&str>,
+) -> Vec<i64> {
     // Single, grouped, aliased, dot and blank imports all reduce to quoted literals.
     let mut out: Vec<i64> = Vec::new();
     for pkg in go_import_paths(import_str) {
-        for id in resolve_go_package(pkg, go_dir_index) {
+        for id in resolve_go_package(pkg, go_dir_index, go_module) {
             if !out.contains(&id) {
                 out.push(id);
             }
@@ -621,9 +641,58 @@ fn go_import_paths(src: &str) -> Vec<&str> {
     paths
 }
 
-fn resolve_go_package(pkg: &str, go_dir_index: &HashMap<PathBuf, Vec<i64>>) -> Vec<i64> {
+/// Read the `module` path from `<root>/go.mod`. Returns None if absent, a symlink,
+/// unreadable, oversized, or without a `module` line. Only the repo root is read.
+pub fn read_go_module(root: &Path) -> Option<String> {
+    let p = root.join("go.mod");
+    let meta = std::fs::symlink_metadata(&p).ok()?;
+    if !meta.is_file() || meta.len() > 1 << 20 {
+        return None;
+    }
+    parse_go_module(&std::fs::read_to_string(&p).ok()?)
+}
+
+fn parse_go_module(src: &str) -> Option<String> {
+    for line in src.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        if let Some(rest) = line.strip_prefix("module") {
+            if !rest.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let m = rest.trim();
+            if m.starts_with('(') {
+                return None; // block form `module ( ... )`: unsupported
+            }
+            let m = m.trim_matches(|c| c == '"' || c == '`');
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_go_package(
+    pkg: &str,
+    go_dir_index: &HashMap<PathBuf, Vec<i64>>,
+    go_module: Option<&str>,
+) -> Vec<i64> {
     if pkg.is_empty() {
         return vec![];
+    }
+
+    if let Some(module) = go_module {
+        let module = module.trim_end_matches('/');
+        let rest = if pkg == module {
+            ""
+        } else {
+            match pkg.strip_prefix(module).and_then(|r| r.strip_prefix('/')) {
+                Some(r) => r,
+                None => return vec![],
+            }
+        };
+        let dir: PathBuf = rest.split('/').filter(|s| !s.is_empty()).collect();
+        return go_dir_index.get(&dir).cloned().unwrap_or_default();
     }
 
     let import_segs: Vec<&str> = pkg.split('/').filter(|s| !s.is_empty()).collect();
@@ -874,7 +943,7 @@ mod tests {
         .into();
         let idx = build_go_dir_index(&paths);
         assert_eq!(idx[&PathBuf::from("pkg/auth")], vec![1]);
-        assert_eq!(resolve_go("\"x/pkg/auth\"", &idx), vec![1]);
+        assert_eq!(resolve_go("\"x/pkg/auth\"", &idx, None), vec![1]);
     }
 
     #[test]
@@ -896,13 +965,13 @@ mod tests {
         ]
         .into();
         assert_eq!(
-            resolve_go("\"example.com/app/internal/auth\"", &idx),
+            resolve_go("\"example.com/app/internal/auth\"", &idx, None),
             vec![1]
         );
-        assert_eq!(resolve_go("import \"other/auth\"", &idx), vec![2]);
-        assert!(resolve_go("\"example.com/none\"", &idx).is_empty());
-        assert!(resolve_go("\"\"", &idx).is_empty());
-        assert!(resolve_go("\"/\"", &idx).is_empty());
+        assert_eq!(resolve_go("import \"other/auth\"", &idx, None), vec![2]);
+        assert!(resolve_go("\"example.com/none\"", &idx, None).is_empty());
+        assert!(resolve_go("\"\"", &idx, None).is_empty());
+        assert!(resolve_go("\"/\"", &idx, None).is_empty());
     }
 
     #[test]
@@ -914,14 +983,69 @@ mod tests {
         ]
         .into();
         let group = "import (\n\t\"fmt\"\n\t\"example.com/app/internal/auth\"\n\tu \"example.com/app/pkg/util\"\n)";
-        assert_eq!(resolve_go(group, &idx), vec![1, 2, 3]);
-        assert_eq!(resolve_go("import foo \"x/internal/auth\"", &idx), vec![1]);
-        assert_eq!(resolve_go("import . \"x/db\"", &idx), vec![4]);
-        assert_eq!(resolve_go("import _ \"x/db\"", &idx), vec![4]);
+        assert_eq!(resolve_go(group, &idx, None), vec![1, 2, 3]);
+        assert_eq!(
+            resolve_go("import foo \"x/internal/auth\"", &idx, None),
+            vec![1]
+        );
+        assert_eq!(resolve_go("import . \"x/db\"", &idx, None), vec![4]);
+        assert_eq!(resolve_go("import _ \"x/db\"", &idx, None), vec![4]);
         // duplicates and comments are ignored
         let dup = "import (\n\t\"a/db\" // \"x/internal/auth\"\n\td \"b/db\"\n)";
-        assert_eq!(resolve_go(dup, &idx), vec![4]);
-        assert!(resolve_go("import (\n)", &idx).is_empty());
+        assert_eq!(resolve_go(dup, &idx, None), vec![4]);
+        assert!(resolve_go("import (\n)", &idx, None).is_empty());
+    }
+
+    #[test]
+    fn resolve_go_module_scopes_to_module_prefix() {
+        let idx: HashMap<PathBuf, Vec<i64>> = [
+            (PathBuf::from("http"), vec![1]),
+            (PathBuf::from("internal/auth"), vec![2]),
+            (PathBuf::from(""), vec![3]),
+        ]
+        .into();
+        let m = Some("example.com/app");
+        // stdlib / external imports never attach to same-named repo dirs
+        assert!(resolve_go("\"net/http\"", &idx, m).is_empty());
+        assert!(resolve_go("\"github.com/other/internal/auth\"", &idx, m).is_empty());
+        assert!(resolve_go("\"example.com/application/http\"", &idx, m).is_empty());
+        // module-internal imports resolve by exact directory
+        assert_eq!(
+            resolve_go("\"example.com/app/internal/auth\"", &idx, m),
+            vec![2]
+        );
+        assert_eq!(resolve_go("\"example.com/app/http\"", &idx, m), vec![1]);
+        assert_eq!(resolve_go("\"example.com/app\"", &idx, m), vec![3]);
+        assert!(resolve_go("\"example.com/app/auth\"", &idx, m).is_empty());
+        // without go.mod the legacy suffix match is kept
+        assert_eq!(resolve_go("\"net/http\"", &idx, None), vec![1]);
+    }
+
+    #[test]
+    fn parse_go_module_variants() {
+        assert_eq!(
+            parse_go_module("module a.b/c\n\ngo 1.21\n").as_deref(),
+            Some("a.b/c")
+        );
+        assert_eq!(
+            parse_go_module("// x\nmodule \"a.b/c\" // hi\n").as_deref(),
+            Some("a.b/c")
+        );
+        assert_eq!(parse_go_module("modulex a\ngo 1.21\n"), None);
+        assert_eq!(parse_go_module(""), None);
+        // block form is unsupported: fall back to legacy suffix matching
+        assert_eq!(parse_go_module("module (\n\texample.com/app\n)\n"), None);
+        assert_eq!(parse_go_module("module(\n\texample.com/app\n)\n"), None);
+    }
+
+    #[test]
+    fn read_go_module_reads_root_go_mod_only() {
+        let d = std::env::temp_dir().join(format!("cs419-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(read_go_module(&d), None);
+        std::fs::write(d.join("go.mod"), "module example.com/app\n").unwrap();
+        assert_eq!(read_go_module(&d).as_deref(), Some("example.com/app"));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -933,20 +1057,20 @@ mod tests {
         .into();
         // single-line block comment
         let single = "import (\n\t/* \"x/internal/auth\" */ \"a/db\"\n)";
-        assert_eq!(resolve_go(single, &idx), vec![4]);
+        assert_eq!(resolve_go(single, &idx, None), vec![4]);
         // multi-line block comment
         let multi = "import (\n\t/* old:\n\t\"x/internal/auth\"\n\t*/\n\t\"a/db\"\n)";
-        assert_eq!(resolve_go(multi, &idx), vec![4]);
+        assert_eq!(resolve_go(multi, &idx, None), vec![4]);
         // import after the closing marker on the same line
         let after = "import (\n\t/* c\n\t*/ \"x/internal/auth\"\n)";
-        assert_eq!(resolve_go(after, &idx), vec![1]);
+        assert_eq!(resolve_go(after, &idx, None), vec![1]);
         // `/*` inside string literals is not a comment
         let in_str = "import (\n\t\"a/*b\"\n\t`c/*d`\n\t\"x/internal/auth\"\n)";
-        assert_eq!(resolve_go(in_str, &idx), vec![1]);
+        assert_eq!(resolve_go(in_str, &idx, None), vec![1]);
         // `//` inside a block comment does not end it; unterminated does not panic
         let nested = "import (\n\t/* // \"x/internal/auth\" */ \"a/db\"\n)";
-        assert_eq!(resolve_go(nested, &idx), vec![4]);
-        assert!(resolve_go("import (\n\t/* \"x/internal/auth\"\n", &idx).is_empty());
+        assert_eq!(resolve_go(nested, &idx, None), vec![4]);
+        assert!(resolve_go("import (\n\t/* \"x/internal/auth\"\n", &idx, None).is_empty());
     }
 
     #[test]
@@ -1070,7 +1194,7 @@ mod tests {
             ("src/b/d.rs", 5),
         ]);
         let go = HashMap::new();
-        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
         assert_eq!(r("src/lib.rs", "mod a"), vec![2]);
         assert_eq!(r("src/lib.rs", "mod b"), vec![3]);
         // 非 mod.rs のファイルは `a/` の下を探す
@@ -1094,7 +1218,7 @@ mod tests {
             ("tests/it/sub.rs", 10),
         ]);
         let go = HashMap::new();
-        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
         assert_eq!(r("tests/it.rs", "mod common"), vec![2]);
         assert_eq!(r("tests/it.rs", "mod util"), vec![3]);
         assert_eq!(r("src/bin/tool.rs", "mod helper"), vec![5]);
@@ -1130,7 +1254,7 @@ mod tests {
             ("src/a/src/bin/e.rs", 21),
         ]);
         let go = HashMap::new();
-        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
         assert_eq!(r("src/tests/foo.rs", "mod x"), vec![2]);
         assert_eq!(r("src/foo/tests/y.rs", "mod z"), vec![5]);
         assert_eq!(r("src/build.rs", "mod x"), vec![8]);
@@ -1153,7 +1277,7 @@ mod tests {
             ("crates/bar/src/y.rs", 31),
         ]);
         let go = HashMap::new();
-        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
         assert_eq!(r("crates/foo/src/lib.rs", "crate::x"), vec![21]);
         assert_eq!(r("crates/foo/src/m/mod.rs", "crate::x::T"), vec![21]);
         assert_eq!(r("crates/bar/src/main.rs", "crate::y"), vec![31]);
@@ -1481,7 +1605,8 @@ mod tests {
                 "require_relative 'b'",
                 Path::new("lib/a.rb"),
                 &map,
-                &HashMap::new()
+                &HashMap::new(),
+                None
             ),
             vec![2]
         );
@@ -1492,10 +1617,10 @@ mod tests {
         let map = ids(&[("src/a.rs", 1)]);
         let go = HashMap::new();
         assert_eq!(
-            resolve_import("crate::a", Path::new("src/main.rs"), &map, &go),
+            resolve_import("crate::a", Path::new("src/main.rs"), &map, &go, None),
             vec![1]
         );
-        assert!(resolve_import("x", Path::new("README.md"), &map, &go).is_empty());
+        assert!(resolve_import("x", Path::new("README.md"), &map, &go, None).is_empty());
     }
 
     /// #231: a failing COMMIT (deferred FK violation) must not leave the
@@ -1518,7 +1643,7 @@ mod tests {
             (2, PathBuf::from("src/b.rs")),
         ]
         .into();
-        assert!(build_deps(&conn, &paths).is_err());
+        assert!(build_deps(&conn, &paths, None).is_err());
         assert!(
             conn.is_autocommit(),
             "transaction left open after failed COMMIT"
@@ -1541,7 +1666,7 @@ mod tests {
             (2, PathBuf::from("src/b.rs")),
         ]
         .into();
-        build_deps(&conn, &paths).unwrap();
+        build_deps(&conn, &paths, None).unwrap();
 
         let edges: Vec<(i64, i64)> = conn
             .prepare("SELECT from_file, to_file FROM deps")

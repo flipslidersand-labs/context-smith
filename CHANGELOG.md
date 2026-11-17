@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- Go imports are now resolved only inside the repo-root `go.mod` module path (exact directory match), so `net/http` or external modules no longer link to a same-named repo directory; without `go.mod` the old suffix match is kept (#419).
 - `--diff-commits` larger than the history now diffs against the empty tree, so files added by the root commit are included; non-UTF-8 diff lines are kept lossily instead of dropped (#418).
 - Remote embedding errors (request failure, redirect `Location`, decode failure) no longer print `user:pass@` from `EMBEDDING_SVC_URL`; it is shown as `***@` (#421).
 - `build`/`query` no longer read a path from `index.db` that is not tracked in git (e.g. a crafted row pointing at `.env`) (#395).
