@@ -466,9 +466,15 @@ impl SymbolExtractor {
 
     fn extract_typescript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
         let mut parser = tree_sitter::Parser::new();
-        // The TSX grammar is a superset of TS, so it parses both .ts and .tsx.
+        // TSX is not a superset of TS: `<T>x` assertions and `<T>(x) => x` parse as JSX
+        // there. Use the TSX grammar only for `.tsx`; `.ts`/`.mts`/`.cts` use plain TS.
+        let grammar = if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
+            tree_sitter_typescript::LANGUAGE_TSX
+        } else {
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+        };
         parser
-            .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+            .set_language(&grammar.into())
             .with_context(|| format!("Failed to load TypeScript grammar for {:?}", path))?;
         let tree = parser
             .parse(source, None)
@@ -1289,6 +1295,16 @@ mod tests {
         let src = "mod a;\npub mod b;\nmod inline { mod nested; }\nmod c { fn f() {} }\n";
         let out = SymbolExtractor::extract(Path::new("lib.rs"), src, Language::Rust).unwrap();
         assert_eq!(names(&out, SymbolKind::Import), vec!["mod a", "mod b"]);
+    }
+
+    #[test]
+    fn extract_ts_angle_bracket_assertion_keeps_later_symbols() {
+        let src = "const x = <Foo>y;\nconst f = <T>(v: T) => v;\nimport { a } from './a';\nfunction after() {}\n";
+        let out = SymbolExtractor::extract(Path::new("a.ts"), src, Language::TypeScript).unwrap();
+        // Under the TSX grammar `<T>(v: T) => v` is parsed as JSX and `f` is lost.
+        assert!(names(&out, SymbolKind::Function).contains(&"f"));
+        assert!(names(&out, SymbolKind::Function).contains(&"after"));
+        assert!(!names(&out, SymbolKind::Import).is_empty());
     }
 
     #[test]
