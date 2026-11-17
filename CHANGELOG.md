@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `index` no longer aborts with a stack overflow on deeply nested source files: the symbol walkers stop at depth 500 and skip deeper branches and print one warning per file; `EXTRACT_VERSION` is now 5, so existing indexes are rebuilt (#417).
 - `mod x;` in `examples/*.rs` and `benches/*.rs` now resolves next to the file (they are crate roots like `tests/*.rs`); `src/examples/` etc. stay normal modules (#426).
+- `mod x;` in a non-crate-root `lib.rs`/`main.rs` (e.g. `src/a/lib.rs`) now resolves under `lib/`/`main/` like a normal module, and `mod r#type;` finds `type.rs` (raw-identifier prefix stripped) (#434).
 - Go imports are now resolved only inside the repo-root `go.mod` module path (exact directory match), so `net/http` or external modules no longer link to a same-named repo directory; without `go.mod` the old suffix match is kept (#419).
 - `--diff-commits` larger than the history now diffs against the empty tree, so files added by the root commit are included; non-UTF-8 diff lines are kept lossily instead of dropped (#418).
 - Remote embedding errors (request failure, redirect `Location`, decode failure) no longer print `user:pass@` from `EMBEDDING_SVC_URL`; it is shown as `***@` (#421).
