@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Go module detection now reads only `go.mod` files tracked in git; untracked or ignored `go.mod` files are no longer used (#441).
+- `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - Go imports now resolve against every `go.mod` in the repo (longest module path wins), so nested modules and `go.work`-style layouts without a root `go.mod` no longer fall back to suffix matching (#429).
 - `index` no longer aborts with a stack overflow on deeply nested source files: the symbol walkers stop at depth 500 and skip deeper branches and print one warning per file; `EXTRACT_VERSION` is now 5, so existing indexes are rebuilt (#417).
 - `mod x;` in `examples/*.rs` and `benches/*.rs` now resolves next to the file (they are crate roots like `tests/*.rs`); `src/examples/` etc. stay normal modules (#426).

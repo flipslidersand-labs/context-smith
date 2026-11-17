@@ -377,17 +377,27 @@ fn resolve_rust_mod_decl(
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let parent = dir.parent().unwrap_or(Path::new(""));
     let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let grandparent = parent.parent().unwrap_or(Path::new(""));
+    let grandparent_name = grandparent
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     // Cargo の target ルート: lib.rs / main.rs / mod.rs、build.rs、tests/・examples/・benches/ 直下の *.rs、src/bin/*.rs
     // (src/bin/<name>/main.rs は main.rs で網羅)。ルート内の `mod x;` は同ディレクトリを探す。
     // build.rs と tests/・examples/・benches/ はパッケージ直下のみ(祖先に `src` があれば通常モジュール)、
     // src/bin は祖先にさらに `src` が無い場合のみ。
-    // 対象外: `#[path]` 属性、bin から lib への `use <crate>::…` のエッジ。
+    // 対象外: `#[path]` 属性、bin から lib への `use <crate>::…` のエッジ、
+    // `[lib] path` 等の非標準レイアウト(Cargo.toml を読まないため判別不可。リポジトリ直下の lib.rs / main.rs は通常モジュール)。
     // lib.rs / main.rs は `src/` 直下か `src/bin/<name>/`・`tests|examples|benches/<name>/` 直下のときだけルート
     // (それ以外の `a/lib.rs` は通常モジュール)。mod.rs は常に同ディレクトリ。
     let is_crate_file_root = match stem {
         "lib" => dir_name == "src",
         "main" => {
-            dir_name == "src" || matches!(parent_name, "bin" | "tests" | "examples" | "benches")
+            dir_name == "src"
+                || (matches!(parent_name, "tests" | "examples" | "benches") && !has_src(parent))
+                || (parent_name == "bin"
+                    && grandparent_name == "src"
+                    && !has_src(grandparent.parent().unwrap_or(Path::new(""))))
         }
         _ => false,
     };
@@ -1438,6 +1448,11 @@ mod tests {
             ("crates/c/src/q.rs", 8),
             ("src/bin/multi/main.rs", 9),
             ("src/bin/multi/part.rs", 10),
+            ("src/tests/foo/main.rs", 11),
+            ("src/tests/foo/main/w.rs", 12),
+            ("src/tests/foo/w.rs", 13),
+            ("tests/foo/main.rs", 14),
+            ("tests/foo/v.rs", 15),
         ]);
         let go = HashMap::new();
         let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, &[]);
@@ -1445,6 +1460,8 @@ mod tests {
         assert_eq!(r("src/x/main.rs", "mod z"), vec![5]);
         assert_eq!(r("crates/c/src/lib.rs", "mod q"), vec![8]);
         assert_eq!(r("src/bin/multi/main.rs", "mod part"), vec![10]);
+        assert_eq!(r("src/tests/foo/main.rs", "mod w"), vec![12]);
+        assert_eq!(r("tests/foo/main.rs", "mod v"), vec![15]);
     }
 
     #[test]
