@@ -332,6 +332,76 @@ mod tests {
         );
     }
 
+    /// Every truncation must be a prefix that fits the budget.
+    fn assert_truncation_invariants(content: &str, max: usize) -> String {
+        let cut = truncate_to_tokens(content, max);
+        assert!(content.starts_with(&cut), "{cut:?} is not a prefix");
+        if !cut.is_empty() {
+            assert!(
+                estimate_tokens(&cut) <= max,
+                "estimate {} > max {max} for {cut:?}",
+                estimate_tokens(&cut)
+            );
+        }
+        cut
+    }
+
+    #[test]
+    fn truncate_zero_budget_is_empty() {
+        assert_eq!(assert_truncation_invariants("abcdef", 0), "");
+        assert_eq!(assert_truncation_invariants("あいう", 0), "");
+    }
+
+    #[test]
+    fn truncate_returns_whole_content_when_it_fits() {
+        assert_eq!(assert_truncation_invariants("hello", 100), "hello");
+        assert_eq!(assert_truncation_invariants("", 5), "");
+        assert_eq!(assert_truncation_invariants("あいう", 3), "あいう");
+    }
+
+    #[test]
+    fn truncate_ascii_counts_four_chars_per_token() {
+        let cut = assert_truncation_invariants(&"a".repeat(400), 10);
+        // estimate is floor(n/4): 43 chars = 10 tokens, the 44th would make it 11.
+        assert_eq!(cut.len(), 43);
+        // A budget of 1 keeps up to 7 ASCII chars (7/4 = 1; the 8th makes 2).
+        assert_eq!(assert_truncation_invariants("abcdefghij", 1).len(), 7);
+    }
+
+    #[test]
+    fn truncate_non_ascii_counts_one_token_per_char() {
+        let cut = assert_truncation_invariants(&"あ".repeat(10), 3);
+        assert_eq!(cut.chars().count(), 3);
+    }
+
+    #[test]
+    fn truncate_mixed_content_crosses_budget_at_the_right_char() {
+        // 5 ASCII (=1 token via /4) + wide chars: budget 3 allows 4 ASCII-equivalent
+        // tokens' worth only as ascii/4 + wide <= 3.
+        let content = "abcdeあいうえお";
+        let cut = assert_truncation_invariants(content, 3);
+        // "abcde" = 5/4 = 1, then あ(2) い(3); う would make 4 > 3.
+        assert_eq!(cut, "abcdeあい");
+    }
+
+    #[test]
+    fn truncate_cuts_on_char_boundary_for_four_byte_chars() {
+        let content = "😀😀😀😀";
+        for max in 0..=5 {
+            let cut = assert_truncation_invariants(content, max);
+            assert_eq!(cut.chars().count(), max.min(4));
+        }
+    }
+
+    #[test]
+    fn truncate_never_splits_a_char_for_any_budget() {
+        let content = "aあb😀cいd";
+        for max in 0..=10 {
+            // Slicing inside `truncate_to_tokens` would panic on a bad boundary.
+            assert_truncation_invariants(content, max);
+        }
+    }
+
     #[test]
     fn cjk_allocation_never_overflows_budget() {
         // A large Japanese file against a small budget must be truncated so the
