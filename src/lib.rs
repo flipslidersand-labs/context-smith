@@ -256,8 +256,9 @@ impl GitRepo {
     /// callers always receive a valid (possibly incomplete) UTF-8 string that fits
     /// within the token budget.
     ///
-    /// When the ancestor is the root commit (no parents) the diff is computed
+    /// When `n_commits` reaches past the root commit the diff is computed
     /// against the empty tree so the initial commit's files are included.
+    /// Non-UTF-8 lines are converted lossily (U+FFFD), not dropped.
     pub fn recent_diff(&self, n_commits: usize) -> Result<String> {
         const DIFF_MAX_BYTES: usize = 512 * 1024; // 512 KiB
 
@@ -271,24 +272,22 @@ impl GitRepo {
             return Ok(String::new());
         }
 
+        // Walk back n commits. If history runs out first (the root commit would
+        // need a parent), diff against the empty tree so the root's files count.
         let mut ancestor = head_commit.clone();
+        let mut anc_tree_opt = None;
+        let mut reached = true;
         for _ in 0..n_commits {
             if ancestor.parent_count() == 0 {
+                reached = false;
                 break;
             }
             ancestor = ancestor.parent(0)?;
         }
-
         let head_tree = head_commit.tree()?;
-        // When ancestor == head (root commit with no parents after the loop),
-        // diff against the empty tree so the initial files are visible.
-        let anc_tree_opt = if ancestor.id() != head_commit.id() {
-            Some(ancestor.tree()?)
-        } else if ancestor.parent_count() == 0 {
-            None // empty tree → shows full initial commit
-        } else {
-            Some(ancestor.tree()?)
-        };
+        if reached {
+            anc_tree_opt = Some(ancestor.tree()?);
+        }
         let diff = repo.diff_tree_to_tree(anc_tree_opt.as_ref(), Some(&head_tree), None)?;
 
         let mut patch = String::new();
@@ -297,21 +296,22 @@ impl GitRepo {
             if truncated {
                 return true;
             }
-            if let Ok(s) = std::str::from_utf8(line.content()) {
-                // content() omits the +/-/space origin char for body lines; header
-                // ('F'/'H'), binary ('B') and no-newline ('=', '>', '<') lines
-                // already carry their full text.
-                let prefix = match line.origin() {
-                    o @ ('+' | '-' | ' ') => Some(o),
-                    _ => None,
-                };
-                let extra = prefix.map_or(0, char::len_utf8);
-                if patch.len() + extra + s.len() > DIFF_MAX_BYTES {
-                    truncated = true;
-                } else {
-                    patch.extend(prefix);
-                    patch.push_str(s);
-                }
+            // Invalid UTF-8 bytes become U+FFFD instead of dropping the line.
+            let s = String::from_utf8_lossy(line.content());
+            let s = s.as_ref();
+            // content() omits the +/-/space origin char for body lines; header
+            // ('F'/'H'), binary ('B') and no-newline ('=', '>', '<') lines
+            // already carry their full text.
+            let prefix = match line.origin() {
+                o @ ('+' | '-' | ' ') => Some(o),
+                _ => None,
+            };
+            let extra = prefix.map_or(0, char::len_utf8);
+            if patch.len() + extra + s.len() > DIFF_MAX_BYTES {
+                truncated = true;
+            } else {
+                patch.extend(prefix);
+                patch.push_str(s);
             }
             true
         })?;
@@ -1051,6 +1051,35 @@ mod tests {
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(100).unwrap();
         assert!(diff.contains("two"), "{diff}");
+        assert!(diff.contains("+one"), "{diff}");
+    }
+
+    #[test]
+    fn recent_diff_n_larger_than_three_commit_history_includes_root_files() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        commit_files(tmp.path(), &[("c.txt", "three\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(5).unwrap();
+        assert!(
+            diff.contains("+one") && diff.contains("+two") && diff.contains("+three"),
+            "{diff}"
+        );
+        // n = history length: one step past the root, so root files are included.
+        let diff3 = repo.recent_diff(3).unwrap();
+        assert!(diff3.contains("+one"), "{diff3}");
+        // Exactly reaching the root (n = commits - 1) still excludes root files.
+        let diff2 = repo.recent_diff(2).unwrap();
+        assert!(!diff2.contains("+one"), "{diff2}");
+    }
+
+    #[test]
+    fn recent_diff_single_commit_with_large_n_shows_files() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert!(repo.recent_diff(5).unwrap().contains("+first"));
     }
 
     #[test]
@@ -1090,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_diff_silently_drops_non_utf8_lines() {
+    fn recent_diff_converts_non_utf8_lines_lossily() {
         let tmp = TempDir::new().unwrap();
         let repo_git = git2::Repository::init(tmp.path()).unwrap();
         // No NUL byte, so git treats the file as text; line 2 is invalid UTF-8.
@@ -1105,11 +1134,10 @@ mod tests {
             .unwrap();
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
-        // Pins current behaviour: the invalid line is dropped without a marker,
-        // surrounding lines are kept and the result stays valid UTF-8.
+        // The invalid line is kept with U+FFFD replacements; no marker.
         assert!(diff.contains("\n+good1\n"), "{diff}");
         assert!(diff.contains("\n+good2\n"), "{diff}");
-        assert!(!diff.contains("bad"), "{diff}");
+        assert!(diff.contains("\n+bad\u{FFFD}\u{FFFD}\n"), "{diff}");
         assert!(!diff.contains("[diff truncated]"), "{diff}");
     }
 

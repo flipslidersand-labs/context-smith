@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- `--diff-commits` larger than the history now diffs against the empty tree, so files added by the root commit are included; non-UTF-8 diff lines are kept lossily instead of dropped (#418).
 - Remote embedding errors (request failure, redirect `Location`, decode failure) no longer print `user:pass@` from `EMBEDDING_SVC_URL`; it is shown as `***@` (#421).
 - `build`/`query` no longer read a path from `index.db` that is not tracked in git (e.g. a crafted row pointing at `.env`) (#395).
 - Rust `crate::` imports now resolve against the nearest crate root (`<dir>/src/lib.rs` or `main.rs`) instead of always the repository-root `src/`, fixing missing or wrong edges in Cargo workspaces (#393).
