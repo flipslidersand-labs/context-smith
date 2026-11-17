@@ -170,3 +170,53 @@ mod symlink {
         assert_eq!(paths, vec!["a_link.rs"]);
     }
 }
+
+#[test]
+fn select_options_defaults_are_20_and_2() {
+    let o = SelectOptions::new(1);
+    assert_eq!(o.seed_count, 20);
+    assert_eq!(o.bfs_depth, 2);
+}
+
+#[test]
+fn seed_count_limits_seeds() {
+    let files: Vec<(String, String)> = (0..5)
+        .map(|i| {
+            (
+                format!("f{i}.rs"),
+                format!("pub fn zeta_common_{i}() {{}}\n// zeta_common\n"),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let (_t, repo, db, _p) = setup(&refs);
+    let all = select_candidates(&repo, &db, "zeta_common", &opts()).unwrap();
+    let mut o = opts();
+    o.seed_count = 1;
+    let one = select_candidates(&repo, &db, "zeta_common", &o).unwrap();
+    assert_eq!(all.len(), 5);
+    assert_eq!(one.len(), 1);
+}
+
+#[test]
+fn bfs_depth_zero_skips_dependency_expansion() {
+    let (_t, repo, db, _p) = setup(&[
+        (
+            "src/main.py",
+            "from helper import run\n\ndef eta_entry():\n    run()\n",
+        ),
+        ("src/helper.py", "def run():\n    pass\n"),
+    ]);
+    let n = |d: u8| {
+        let mut o = opts();
+        o.bfs_depth = d;
+        select_candidates(&repo, &db, "eta_entry", &o)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(n(0), 1);
+    assert!(n(2) > n(0), "depth 2 should pull in the dependency");
+}

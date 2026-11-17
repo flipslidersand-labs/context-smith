@@ -363,7 +363,22 @@ fn resolve_rust_mod_decl(
 ) -> Vec<i64> {
     let dir = from_path.parent().unwrap_or(Path::new(""));
     let stem = from_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let base = if matches!(stem, "lib" | "main" | "mod") {
+    let has_src = |p: &Path| p.components().any(|c| c.as_os_str() == "src");
+    let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = dir.parent().unwrap_or(Path::new(""));
+    let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    // Cargo の target ルート: lib.rs / main.rs / mod.rs、build.rs、tests/*.rs、src/bin/*.rs
+    // (src/bin/<name>/main.rs は main.rs で網羅)。ルート内の `mod x;` は同ディレクトリを探す。
+    // build.rs と tests/ はパッケージ直下のみ(祖先に `src` があれば通常モジュール)、
+    // src/bin は祖先にさらに `src` が無い場合のみ。
+    // 対象外: `#[path]` 属性、bin から lib への `use <crate>::…` のエッジ。
+    let is_target_root = matches!(stem, "lib" | "main" | "mod")
+        || (stem == "build" && !has_src(dir))
+        || (dir_name == "tests" && !has_src(dir))
+        || (dir_name == "bin"
+            && parent_name == "src"
+            && !has_src(parent.parent().unwrap_or(Path::new(""))));
+    let base = if is_target_root {
         dir.to_path_buf()
     } else {
         dir.join(stem)
@@ -1062,6 +1077,68 @@ mod tests {
         assert_eq!(r("src/a.rs", "mod c"), vec![4]);
         assert_eq!(r("src/b/mod.rs", "mod d"), vec![5]);
         assert!(r("src/lib.rs", "mod missing").is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_handles_cargo_target_roots() {
+        let map = ids(&[
+            ("tests/it.rs", 1),
+            ("tests/common.rs", 2),
+            ("tests/util/mod.rs", 3),
+            ("src/bin/tool.rs", 4),
+            ("src/bin/helper.rs", 5),
+            ("src/bin/multi/main.rs", 6),
+            ("src/bin/multi/part.rs", 7),
+            ("build.rs", 8),
+            ("gen.rs", 9),
+            ("tests/it/sub.rs", 10),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        assert_eq!(r("tests/it.rs", "mod common"), vec![2]);
+        assert_eq!(r("tests/it.rs", "mod util"), vec![3]);
+        assert_eq!(r("src/bin/tool.rs", "mod helper"), vec![5]);
+        assert_eq!(r("src/bin/multi/main.rs", "mod part"), vec![7]);
+        assert_eq!(r("build.rs", "mod gen"), vec![9]);
+        // tests/it.rs は crate ルートなので tests/it/ ではなく tests/ を探す
+        assert!(r("tests/it.rs", "mod sub").is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_target_roots_ignore_nested_src_modules() {
+        let map = ids(&[
+            ("src/tests/foo.rs", 1),
+            ("src/tests/foo/x.rs", 2),
+            ("src/tests/x.rs", 3),
+            ("src/foo/tests/y.rs", 4),
+            ("src/foo/tests/y/z.rs", 5),
+            ("src/foo/tests/z.rs", 6),
+            ("src/build.rs", 7),
+            ("src/build/x.rs", 8),
+            ("src/x.rs", 9),
+            ("src/foo/build.rs", 10),
+            ("src/foo/build/w.rs", 11),
+            ("src/foo/w.rs", 12),
+            ("crates/x/tests/t.rs", 13),
+            ("crates/x/tests/u.rs", 14),
+            ("crates/x/build.rs", 15),
+            ("crates/x/g.rs", 16),
+            ("crates/x/src/bin/b.rs", 17),
+            ("crates/x/src/bin/c.rs", 18),
+            ("src/a/src/bin/d.rs", 19),
+            ("src/a/src/bin/d/e.rs", 20),
+            ("src/a/src/bin/e.rs", 21),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        assert_eq!(r("src/tests/foo.rs", "mod x"), vec![2]);
+        assert_eq!(r("src/foo/tests/y.rs", "mod z"), vec![5]);
+        assert_eq!(r("src/build.rs", "mod x"), vec![8]);
+        assert_eq!(r("src/foo/build.rs", "mod w"), vec![11]);
+        assert_eq!(r("crates/x/tests/t.rs", "mod u"), vec![14]);
+        assert_eq!(r("crates/x/build.rs", "mod g"), vec![16]);
+        assert_eq!(r("crates/x/src/bin/b.rs", "mod c"), vec![18]);
+        assert_eq!(r("src/a/src/bin/d.rs", "mod e"), vec![20]);
     }
 
     #[test]
