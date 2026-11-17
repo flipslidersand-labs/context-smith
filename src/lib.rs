@@ -549,6 +549,21 @@ fn traverse_rust(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, Sym
                 }
             }
         }
+        "mod_item" => {
+            // `mod foo;` (no body) at file level declares a child module file.
+            // Recorded as `mod foo` (never a valid `use` argument) so the resolver can
+            // tell it apart. Inline `mod foo { .. }` and nested declarations are skipped.
+            let top_level = node.parent().is_some_and(|p| p.kind() == "source_file");
+            if top_level && node.child_by_field_name("body").is_none() {
+                if let Some(name) = node.child_by_field_name("name") {
+                    out.push((
+                        format!("mod {}", node_text(name, src)),
+                        SymbolKind::Import,
+                        line,
+                    ));
+                }
+            }
+        }
         _ => {}
     }
     for i in 0..node.child_count() as u32 {
@@ -1267,6 +1282,13 @@ mod tests {
             "fn reuse() {}\n// use crate::commented::X;\nconst S: &str = \"use crate::s::Y;\";\n";
         let out = SymbolExtractor::extract(Path::new("a.rs"), src, Language::Rust).unwrap();
         assert!(names(&out, SymbolKind::Import).is_empty());
+    }
+
+    #[test]
+    fn extract_rust_mod_declarations_only_without_body() {
+        let src = "mod a;\npub mod b;\nmod inline { mod nested; }\nmod c { fn f() {} }\n";
+        let out = SymbolExtractor::extract(Path::new("lib.rs"), src, Language::Rust).unwrap();
+        assert_eq!(names(&out, SymbolKind::Import), vec!["mod a", "mod b"]);
     }
 
     #[test]
