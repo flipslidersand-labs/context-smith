@@ -377,14 +377,14 @@ fn resolve_rust_mod_decl(
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let parent = dir.parent().unwrap_or(Path::new(""));
     let parent_name = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    // Cargo の target ルート: lib.rs / main.rs / mod.rs、build.rs、tests/*.rs、src/bin/*.rs
+    // Cargo の target ルート: lib.rs / main.rs / mod.rs、build.rs、tests/・examples/・benches/ 直下の *.rs、src/bin/*.rs
     // (src/bin/<name>/main.rs は main.rs で網羅)。ルート内の `mod x;` は同ディレクトリを探す。
-    // build.rs と tests/ はパッケージ直下のみ(祖先に `src` があれば通常モジュール)、
+    // build.rs と tests/・examples/・benches/ はパッケージ直下のみ(祖先に `src` があれば通常モジュール)、
     // src/bin は祖先にさらに `src` が無い場合のみ。
     // 対象外: `#[path]` 属性、bin から lib への `use <crate>::…` のエッジ。
     let is_target_root = matches!(stem, "lib" | "main" | "mod")
         || (stem == "build" && !has_src(dir))
-        || (dir_name == "tests" && !has_src(dir))
+        || (matches!(dir_name, "tests" | "examples" | "benches") && !has_src(dir))
         || (dir_name == "bin"
             && parent_name == "src"
             && !has_src(parent.parent().unwrap_or(Path::new(""))));
@@ -1226,6 +1226,34 @@ mod tests {
         assert_eq!(r("build.rs", "mod gen"), vec![9]);
         // tests/it.rs は crate ルートなので tests/it/ ではなく tests/ を探す
         assert!(r("tests/it.rs", "mod sub").is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_handles_examples_and_benches_roots() {
+        let map = ids(&[
+            ("examples/e.rs", 1),
+            ("examples/helper.rs", 2),
+            ("examples/e/sub.rs", 3),
+            ("benches/b.rs", 4),
+            ("benches/util/mod.rs", 5),
+            ("crates/x/examples/e.rs", 6),
+            ("crates/x/examples/h.rs", 7),
+            ("src/examples/foo.rs", 8),
+            ("src/examples/foo/x.rs", 9),
+            ("src/examples/x.rs", 10),
+            ("src/benches/bar.rs", 11),
+            ("src/benches/bar/y.rs", 12),
+            ("src/benches/y.rs", 13),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
+        assert_eq!(r("examples/e.rs", "mod helper"), vec![2]);
+        assert!(r("examples/e.rs", "mod sub").is_empty());
+        assert_eq!(r("benches/b.rs", "mod util"), vec![5]);
+        assert_eq!(r("crates/x/examples/e.rs", "mod h"), vec![7]);
+        // src 配下の examples/benches は通常モジュール
+        assert_eq!(r("src/examples/foo.rs", "mod x"), vec![9]);
+        assert_eq!(r("src/benches/bar.rs", "mod y"), vec![12]);
     }
 
     #[test]
