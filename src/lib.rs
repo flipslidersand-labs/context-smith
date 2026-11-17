@@ -296,24 +296,22 @@ impl GitRepo {
             if truncated {
                 return true;
             }
-            {
-                // Invalid UTF-8 bytes become U+FFFD instead of dropping the line.
-                let s = String::from_utf8_lossy(line.content());
-                let s = s.as_ref();
-                // content() omits the +/-/space origin char for body lines; header
-                // ('F'/'H'), binary ('B') and no-newline ('=', '>', '<') lines
-                // already carry their full text.
-                let prefix = match line.origin() {
-                    o @ ('+' | '-' | ' ') => Some(o),
-                    _ => None,
-                };
-                let extra = prefix.map_or(0, char::len_utf8);
-                if patch.len() + extra + s.len() > DIFF_MAX_BYTES {
-                    truncated = true;
-                } else {
-                    patch.extend(prefix);
-                    patch.push_str(s);
-                }
+            // Invalid UTF-8 bytes become U+FFFD instead of dropping the line.
+            let s = String::from_utf8_lossy(line.content());
+            let s = s.as_ref();
+            // content() omits the +/-/space origin char for body lines; header
+            // ('F'/'H'), binary ('B') and no-newline ('=', '>', '<') lines
+            // already carry their full text.
+            let prefix = match line.origin() {
+                o @ ('+' | '-' | ' ') => Some(o),
+                _ => None,
+            };
+            let extra = prefix.map_or(0, char::len_utf8);
+            if patch.len() + extra + s.len() > DIFF_MAX_BYTES {
+                truncated = true;
+            } else {
+                patch.extend(prefix);
+                patch.push_str(s);
             }
             true
         })?;
@@ -1068,6 +1066,9 @@ mod tests {
             diff.contains("+one") && diff.contains("+two") && diff.contains("+three"),
             "{diff}"
         );
+        // n = history length: one step past the root, so root files are included.
+        let diff3 = repo.recent_diff(3).unwrap();
+        assert!(diff3.contains("+one"), "{diff3}");
         // Exactly reaching the root (n = commits - 1) still excludes root files.
         let diff2 = repo.recent_diff(2).unwrap();
         assert!(!diff2.contains("+one"), "{diff2}");
