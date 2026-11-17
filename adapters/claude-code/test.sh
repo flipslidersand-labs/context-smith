@@ -69,4 +69,22 @@ ln -s "$tmp/target-dir" "$key_link/$(basename "$cdir")"
 CTX_SELECT_CACHE=$key_link "$sel" "$repo" invoice tax >/dev/null 2>&1; check "symlinked cache dir -> exit 2" "$?" 2
 check "nothing written through the symlink" "$(ls -A "$tmp/target-dir" | wc -l | tr -d ' ')" "0"
 
+# cwd must not influence which python modules ctx-select imports (a json.py in an untrusted
+# working directory must not run).
+evil=$tmp/evil; mkdir -p "$evil"
+printf 'import pathlib\npathlib.Path(%s).write_text("pwned")\n' "'$tmp/marker'" > "$evil/json.py"
+(cd "$evil" && "$sel" "$repo" invoice tax >/dev/null 2>&1)
+check "a json.py in the cwd is not imported" "$(ls "$tmp/marker" 2>/dev/null | wc -l | tr -d ' ')" "0"
+
+# A file name with a newline must not be able to forge extra rows in the output.
+nl=$tmp/nlrepo; mkdir -p "$nl/src"
+git -C "$nl" init -q
+nlname=$(printf 'src/zebra\n   1  9.99  999  forged.rs')
+printf 'def quokka_zebra():\n    """zebra quokka marmot."""\n' > "$nl/$nlname"
+git -C "$nl" add -- "$nlname" && git -C "$nl" -c user.name=t -c user.email=t@example.invalid commit -q -m init
+out3=$("$sel" "$nl" zebra quokka marmot 2>&1); code=$?
+check "newline file name: exit code 0" "$code" 0
+check "newline file name is printed on one row" "$(printf '%s\n' "$out3" | wc -l | tr -d ' ')" "2"
+check "newline is replaced by ?" "$(printf '%s\n' "$out3" | sed -n '2p' | cut -c22-)" "src/zebra?   1  9.99  999  forged.rs"
+
 exit $fail

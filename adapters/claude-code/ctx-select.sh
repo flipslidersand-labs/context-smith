@@ -58,12 +58,14 @@ if ! out=$("$BIN" query --repo "$repo" --index "$cache/index.db" --task "$task" 
   die 2 "query failed"
 fi
 
-printf '%s' "$out" | python3 -c '
-import json, sys
+printf '%s' "$out" | python3 -I -c '
+import json, re, sys
 top = int(sys.argv[1])
 d = json.load(sys.stdin)
 files = d["files"]
 print("# %d files within %d tokens; showing %d. rank  score  tokens  path" % (len(files), d["budget"], min(top, len(files))))
+# File names may contain newlines or other control characters; show them as "?" so a name cannot forge extra rows.
+ctrl = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]")
 for i, f in enumerate(files[:top], 1):
-    print("%4d  %5.2f  %6d  %s" % (i, f["score"], f["tokens"], f["path"]))
+    print("%4d  %5.2f  %6d  %s" % (i, f["score"], f["tokens"], ctrl.sub("?", f["path"])))
 ' "$top"
