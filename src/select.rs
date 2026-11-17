@@ -99,6 +99,7 @@ pub fn select_candidates(
     // avoiding the O(all-files) read_to_string that wastes RAM (#80).
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
+    let git_index = repo.open_index()?;
     {
         let conn = db.connection();
         // Collect only the file IDs that have a positive score; the DB query
@@ -129,7 +130,7 @@ pub fn select_candidates(
             };
             let score = scored[&file_id] * path_score_factor(&rel_path);
             let abs = repo.root().join(&rel_path);
-            let content = match repo.read_tracked(Path::new(&rel_path)) {
+            let content = match repo.read_indexed(&git_index, Path::new(&rel_path)) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs);
