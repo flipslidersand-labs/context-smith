@@ -130,23 +130,53 @@ fn resolve_index_path(repo: &GitRepo, index: Option<String>) -> anyhow::Result<P
     Ok(db_path)
 }
 
+/// Bail if `path` itself is a symlink (dangling or not).
+fn refuse_symlink(path: &std::path::Path) -> anyhow::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Refuse if the db file or its `-wal`/`-shm` sidecars is a symlink, since
 /// SQLite would write through it to wherever it points.
 fn refuse_symlinked_index_files(db_path: &std::path::Path) -> anyhow::Result<()> {
     for suffix in ["", "-wal", "-shm"] {
         let mut name = db_path.as_os_str().to_owned();
         name.push(suffix);
-        let p = PathBuf::from(name);
-        if let Ok(meta) = std::fs::symlink_metadata(&p) {
-            if meta.file_type().is_symlink() {
-                anyhow::bail!(
-                    "{} is a symlink; refusing to write the index (use --out to choose a location)",
-                    p.display()
-                );
-            }
-        }
+        refuse_symlink(&PathBuf::from(name))?;
     }
     Ok(())
+}
+
+/// Resolve the index db path for `index`, rejecting symlinked targets and
+/// creating the parent directory. `out` is an explicit db path (kept outside
+/// the repo, e.g. in a cache dir); otherwise `<repo>/.contextsmith/index.db`.
+fn resolve_index_output(repo: &GitRepo, out: Option<&str>) -> anyhow::Result<PathBuf> {
+    match out {
+        Some(p) => {
+            let p = PathBuf::from(p);
+            refuse_symlinked_index_files(&p)?;
+            if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(p)
+        }
+        None => {
+            let dir = repo.root().join(".contextsmith");
+            // A committed symlink here would put index.db/-wal/-shm outside the repo.
+            refuse_symlink(&dir)?;
+            let db_path = dir.join("index.db");
+            refuse_symlinked_index_files(&db_path)?;
+            std::fs::create_dir_all(&dir)?;
+            Ok(db_path)
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -154,33 +184,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Index { repo, out, force } => {
             let repo = GitRepo::new(&repo)?;
-            let db_path = match out {
-                Some(p) => {
-                    // Keep an index outside the repository (e.g. in a cache dir) with one command.
-                    let p = PathBuf::from(p);
-                    refuse_symlinked_index_files(&p)?;
-                    if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    p
-                }
-                None => {
-                    let dir = repo.root().join(".contextsmith");
-                    // A committed symlink here would put index.db/-wal/-shm outside the repo.
-                    if let Ok(meta) = std::fs::symlink_metadata(&dir) {
-                        if meta.file_type().is_symlink() {
-                            anyhow::bail!(
-                                "{} is a symlink; refusing to write the index (use --out to choose a location)",
-                                dir.display()
-                            );
-                        }
-                    }
-                    let db_path = dir.join("index.db");
-                    refuse_symlinked_index_files(&db_path)?;
-                    std::fs::create_dir_all(&dir)?;
-                    db_path
-                }
-            };
+            let db_path = resolve_index_output(&repo, out.as_deref())?;
             let db = IndexDb::open(&db_path)?;
             let stats = build_index(&repo, &db, force)?;
             println!(
@@ -293,6 +297,77 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn empty_repo() -> (tempfile::TempDir, GitRepo) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        (tmp, repo)
+    }
+
+    #[test]
+    fn resolve_index_output_default_creates_dir() {
+        let (_tmp, repo) = empty_repo();
+        let p = resolve_index_output(&repo, None).unwrap();
+        assert_eq!(p, repo.root().join(".contextsmith").join("index.db"));
+        assert!(repo.root().join(".contextsmith").is_dir());
+    }
+
+    #[test]
+    fn resolve_index_output_default_rejects_symlinked_dir() {
+        let (_tmp, repo) = empty_repo();
+        let outside = tempfile::TempDir::new().unwrap();
+        let dir = repo.root().join(".contextsmith");
+        std::os::unix::fs::symlink(outside.path(), &dir).unwrap();
+        let err = resolve_index_output(&repo, None).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!(
+                "{} is a symlink; refusing to write the index (use --out to choose a location)",
+                dir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_index_output_rejects_symlinked_db_and_sidecars() {
+        let outside = tempfile::TempDir::new().unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            // default branch
+            let (_tmp, repo) = empty_repo();
+            let dir = repo.root().join(".contextsmith");
+            std::fs::create_dir(&dir).unwrap();
+            let link = dir.join(format!("index.db{suffix}"));
+            std::os::unix::fs::symlink(outside.path().join("x"), &link).unwrap();
+            let err = resolve_index_output(&repo, None).unwrap_err().to_string();
+            assert!(err.starts_with(&format!("{} is a symlink; refusing", link.display())));
+
+            // --out branch
+            let (_tmp2, repo2) = empty_repo();
+            let d = tempfile::TempDir::new().unwrap();
+            let db = d.path().join("c.db");
+            let link = d.path().join(format!("c.db{suffix}"));
+            std::os::unix::fs::symlink(outside.path().join("y"), &link).unwrap();
+            let err = resolve_index_output(&repo2, db.to_str())
+                .unwrap_err()
+                .to_string();
+            assert!(err.ends_with("(use --out to choose a location)"), "{err}");
+            assert!(err.starts_with(&format!("{} is a symlink", link.display())));
+        }
+    }
+
+    #[test]
+    fn resolve_index_output_out_creates_parent_and_keeps_path() {
+        let (_tmp, repo) = empty_repo();
+        let d = tempfile::TempDir::new().unwrap();
+        let db = d.path().join("a").join("b").join("i.db");
+        let p = resolve_index_output(&repo, db.to_str()).unwrap();
+        assert_eq!(p, db);
+        assert!(db.parent().unwrap().is_dir());
+        assert!(!db.exists());
+        // No repo-local dir is created when --out is used.
+        assert!(!repo.root().join(".contextsmith").exists());
+    }
 
     #[test]
     fn select_candidates_ignores_file_swapped_for_external_symlink_after_index() {

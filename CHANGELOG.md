@@ -8,10 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `SelectOptions` gains `seed_count` (default 20) and `bfs_depth` (default 2), replacing hard-coded values in the select pipeline; default behavior is unchanged (#401).
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- Remote embedding errors (request failure, redirect `Location`, decode failure) no longer print `user:pass@` from `EMBEDDING_SVC_URL`; it is shown as `***@` (#421).
 - `build`/`query` no longer read a path from `index.db` that is not tracked in git (e.g. a crafted row pointing at `.env`) (#395).
 - Rust `crate::` imports now resolve against the nearest crate root (`<dir>/src/lib.rs` or `main.rs`) instead of always the repository-root `src/`, fixing missing or wrong edges in Cargo workspaces (#393).
 - Ruby `spec/` / `specs/` directories and `*_spec.*` files, and Go `testdata/` directories, are now treated as test paths and get the halved search score (#405).
@@ -25,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tracked files deleted or made unreadable in the working tree without a commit no longer keep stale rows: the next `index` drops them instead of treating them as unchanged (#327).
 - `ctx-select.sh` now runs its helper with `python3 -I`, so a `json.py` in the current directory can no longer run arbitrary code (#396).
 - `ctx-select.sh` now prints control characters (newlines, tabs, ...) in file names as `?`, so a crafted file name can no longer forge extra rank rows (#397).
+- Rust `mod x;` declarations now resolve from every Cargo target root (`build.rs`, `tests/*.rs`, `src/bin/*.rs`, `src/bin/<name>/main.rs`), not only `lib.rs`/`main.rs`/`mod.rs` (#420).
 
 ## [0.5.0] - 2026-11-16
 
