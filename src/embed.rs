@@ -459,6 +459,36 @@ fn read_json_limited<T: serde::de::DeserializeOwned>(resp: ureq::Response) -> Re
     Ok(serde_json::from_slice(&buf)?)
 }
 
+/// Replace the `user:pass@` part of every `scheme://user:pass@host` URL in `s`
+/// with `***@`, so credentials never reach stderr or CI logs.
+#[cfg(feature = "remote-embed")]
+fn redact_url_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| {
+                matches!(c, '/' | '?' | '#')
+                    || c.is_whitespace()
+                    || matches!(c, '"' | '\'' | ')' | '>')
+            })
+            .unwrap_or(tail.len());
+        let (authority, after) = tail.split_at(end);
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&authority[at..]);
+            }
+            None => out.push_str(authority),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// True when `url` is plain `http://` to a host that is not loopback, i.e. the
 /// `X-API-Key` and the embedded source text would cross the network unencrypted.
 #[cfg(feature = "remote-embed")]
@@ -567,7 +597,7 @@ impl Embedder for RemoteEmbedder {
                     Ok(r) if (300..400).contains(&r.status()) => {
                         let loc = r
                             .header("Location")
-                            .map(|l| format!(" (Location: {l})"))
+                            .map(|l| format!(" (Location: {})", redact_url_userinfo(l)))
                             .unwrap_or_default();
                         return Err(anyhow::anyhow!(
                             "embedding request failed: HTTP {} redirect not followed{loc}; \
@@ -579,17 +609,26 @@ impl Embedder for RemoteEmbedder {
                         Ok(parsed) => break parsed,
                         // A malformed 200 body is not transient: fail fast.
                         Err(e) => {
-                            return Err(anyhow::anyhow!("embedding response decode failed: {e}"));
+                            return Err(anyhow::anyhow!(
+                                "embedding response decode failed: {}",
+                                redact_url_userinfo(&e.to_string())
+                            ));
                         }
                     },
                     Err(e) => {
                         // Non-retryable client errors (4xx except 408/425/429): fail fast.
                         if let ureq::Error::Status(code, _) = &e {
                             if *code < 500 && !matches!(*code, 408 | 425 | 429) {
-                                return Err(anyhow::anyhow!("embedding request failed: {e}"));
+                                return Err(anyhow::anyhow!(
+                                    "embedding request failed: {}",
+                                    redact_url_userinfo(&e.to_string())
+                                ));
                             }
                         }
-                        last_err = anyhow::anyhow!("embedding request failed: {e}");
+                        last_err = anyhow::anyhow!(
+                            "embedding request failed: {}",
+                            redact_url_userinfo(&e.to_string())
+                        );
                     }
                 }
                 attempt += 1;
@@ -1177,6 +1216,32 @@ mod tests {
             .unwrap();
         assert_eq!(out, vec![vec![1.0f32, 0.5]]);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn redact_url_userinfo_hides_credentials() {
+        assert_eq!(
+            redact_url_userinfo("http://user:pw@host:80/embed/batch: boom"),
+            "http://***@host:80/embed/batch: boom"
+        );
+        assert_eq!(
+            redact_url_userinfo("see https://u@h/x?a=b@c"),
+            "see https://***@h/x?a=b@c"
+        );
+        assert_eq!(redact_url_userinfo("http://host/a@b"), "http://host/a@b");
+        assert_eq!(redact_url_userinfo("no url here"), "no url here");
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn remote_embedder_error_hides_url_userinfo() {
+        let (url, _count) = status_server(404);
+        let url = url.replacen("http://", "http://user:pw@", 1);
+        let r = remote_for(url).embed(&["x".to_string()], EmbedMode::Index);
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(!msg.contains("user:pw"), "got: {msg}");
+        assert!(!msg.contains("pw@"), "got: {msg}");
     }
 
     #[cfg(feature = "remote-embed")]
