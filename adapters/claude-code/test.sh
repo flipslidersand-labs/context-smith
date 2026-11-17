@@ -85,6 +85,6 @@ git -C "$nl" add -- "$nlname" && git -C "$nl" -c user.name=t -c user.email=t@exa
 out3=$("$sel" "$nl" zebra quokka marmot 2>&1); code=$?
 check "newline file name: exit code 0" "$code" 0
 check "newline file name is printed on one row" "$(printf '%s\n' "$out3" | wc -l | tr -d ' ')" "2"
-check "newline is replaced by ?" "$(printf '%s\n' "$out3" | sed -n '2p' | cut -c19-)" "src/zebra?   1  9.99  999  forged.rs"
+check "newline is replaced by ?" "$(printf '%s\n' "$out3" | sed -n '2p' | cut -c22-)" "src/zebra?   1  9.99  999  forged.rs"
 
 exit $fail
