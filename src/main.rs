@@ -435,6 +435,24 @@ mod tests {
     }
 
     #[test]
+    fn select_candidates_rejects_zero_seed_count() {
+        let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
+        let mut o = opts(10_000, true);
+        o.seed_count = 0;
+        let err = select_candidates(&repo, &db, "alpha_widget", &o).unwrap_err();
+        assert!(err.to_string().contains("seed_count must be >= 1"), "{err}");
+    }
+
+    #[test]
+    fn select_candidates_clamps_huge_seed_count() {
+        let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
+        let mut o = opts(10_000, true);
+        o.seed_count = usize::MAX / 2;
+        let sel = select_candidates(&repo, &db, "alpha_widget", &o).unwrap();
+        assert_eq!(sel.len(), 1);
+    }
+
+    #[test]
     fn select_candidates_skips_candidate_with_no_files_row() {
         let (_t, repo, d, db) = indexed_repo(&["a.rs", "b.rs"]);
         conn_of(&d)
