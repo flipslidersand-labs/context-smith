@@ -69,4 +69,11 @@ ln -s "$tmp/target-dir" "$key_link/$(basename "$cdir")"
 CTX_SELECT_CACHE=$key_link "$sel" "$repo" invoice tax >/dev/null 2>&1; check "symlinked cache dir -> exit 2" "$?" 2
 check "nothing written through the symlink" "$(ls -A "$tmp/target-dir" | wc -l | tr -d ' ')" "0"
 
+# cwd must not influence which python modules ctx-select imports (a json.py in an untrusted
+# working directory must not run).
+evil=$tmp/evil; mkdir -p "$evil"
+printf 'import pathlib\npathlib.Path(%s).write_text("pwned")\n' "'$tmp/marker'" > "$evil/json.py"
+(cd "$evil" && "$sel" "$repo" invoice tax >/dev/null 2>&1)
+check "a json.py in the cwd is not imported" "$(ls "$tmp/marker" 2>/dev/null | wc -l | tr -d ' ')" "0"
+
 exit $fail

@@ -58,7 +58,7 @@ if ! out=$("$BIN" query --repo "$repo" --index "$cache/index.db" --task "$task" 
   die 2 "query failed"
 fi
 
-printf '%s' "$out" | python3 -c '
+printf '%s' "$out" | python3 -I -c '
 import json, sys
 top = int(sys.argv[1])
 d = json.load(sys.stdin)
