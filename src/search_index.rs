@@ -169,6 +169,9 @@ pub fn populate_fts_with_paths(
     }
 }
 
+/// Upper bound applied to `top_n` in [`search_bm25`].
+const MAX_TOP_N: usize = 1000;
+
 /// BM25 search across fts_path (×3), fts_symbols (×0.5, best match per file) and fts_body (×1).
 ///
 /// Each sub-table's raw BM25 `rank` is normalized to [0, 1] via `rank / MIN(rank)` (BM25 `rank` is negative, so MIN is the best match) so
@@ -204,6 +207,9 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     // symbols outrank the file that matches the task best (#151).
     // `ORDER BY rank` is required for the LIMIT to keep the *best* rows: without it FTS5 returns
     // matches in rowid order and the LIMIT keeps the first rows, not the highest-scoring ones (#135).
+    // Clamp so `top_n * 3` and the `as i64` casts can never overflow/wrap (a negative
+    // SQLite LIMIT means unlimited, defeating the sub-query cap).
+    let top_n = top_n.min(MAX_TOP_N);
     let sub_limit = (top_n * 3) as i64;
     let mut stmt = conn.prepare(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
@@ -733,6 +739,16 @@ mod tests {
         assert_eq!(all.len(), 2);
         let one = search_bm25(f.db.connection(), "fn", 1).unwrap();
         assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn search_huge_top_n_is_clamped_not_overflowing() {
+        let f = fixture();
+        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
+        for n in [usize::MAX / 2, usize::MAX] {
+            let hits = search_bm25(f.db.connection(), "fn", n).unwrap();
+            assert_eq!(hits.len(), 2);
+        }
     }
 
     #[test]

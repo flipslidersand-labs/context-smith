@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_SEED_COUNT: usize = 20;
 const DEFAULT_BFS_DEPTH: u8 = 2;
+const MAX_SEED_COUNT: usize = 1000;
 
 /// Options for [`select_candidates`].
 #[non_exhaustive]
@@ -84,11 +85,16 @@ pub fn select_candidates(
     task: &str,
     opts: &SelectOptions,
 ) -> anyhow::Result<Vec<Candidate>> {
+    if opts.seed_count == 0 {
+        anyhow::bail!("seed_count must be >= 1");
+    }
+    let seed_count = opts.seed_count.min(MAX_SEED_COUNT);
+
     // Step 1: BM25 search → top-`seed_count` seeds, optionally RRF-fused with semantic
     // vectors. Fusion can surface files with zero lexical overlap, so the empty
     // check happens after fusion (semantic may rescue an empty BM25).
-    let bm25 = search_bm25(db.connection(), task, opts.seed_count)?;
-    let seeds = build_seeds(db.connection(), task, bm25, opts.no_embed, opts.seed_count)?;
+    let bm25 = search_bm25(db.connection(), task, seed_count)?;
+    let seeds = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
     }
