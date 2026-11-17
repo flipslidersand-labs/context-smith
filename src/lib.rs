@@ -98,14 +98,14 @@ pub struct GitRepo {
 }
 
 /// Marker payload of the `io::Error` returned when a read is refused because
-/// the resolved target is outside the repo, inside a `.git` directory, or (for a
-/// symlink) an untracked file.
+/// the resolved target is outside the repo, inside a `.git` directory, or an
+/// untracked file (symlink target, or a path absent from the git index).
 #[derive(Debug)]
 pub(crate) struct PathEscape;
 
 impl std::fmt::Display for PathEscape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("path resolves outside the repository, into .git, or via a symlink to an untracked file")
+        f.write_str("path resolves outside the repository, into .git, or to an untracked file")
     }
 }
 
@@ -219,6 +219,25 @@ impl GitRepo {
     /// targets outside the repo or under `.git`, regardless of file mode.
     pub(crate) fn read_tracked(&self, rel: &Path) -> std::io::Result<String> {
         read_within_root(&self.canonical_root, &self.root.join(rel))
+    }
+
+    /// Open the repo's git index once so callers can check many paths with
+    /// [`GitRepo::read_indexed`] without reopening it per file.
+    pub(crate) fn open_index(&self) -> Result<git2::Index> {
+        git2::Repository::open(&self.root)
+            .and_then(|r| r.index())
+            .with_context(|| format!("Failed to read git index at {:?}", self.root))
+    }
+
+    /// Like [`GitRepo::read_tracked`], but additionally refuses a path that is
+    /// not a stage-0 entry in `index`, so a path taken from an untrusted
+    /// index.db cannot expose untracked files such as `.env` (#395). Uncommitted
+    /// edits to tracked files are still readable.
+    pub(crate) fn read_indexed(&self, index: &git2::Index, rel: &Path) -> std::io::Result<String> {
+        if index.get_path(rel, 0).is_none() {
+            return Err(std::io::Error::other(PathEscape));
+        }
+        self.read_tracked(rel)
     }
 
     pub fn root(&self) -> &Path {
