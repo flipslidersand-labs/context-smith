@@ -382,12 +382,23 @@ fn resolve_rust_mod_decl(
     // build.rs と tests/・examples/・benches/ はパッケージ直下のみ(祖先に `src` があれば通常モジュール)、
     // src/bin は祖先にさらに `src` が無い場合のみ。
     // 対象外: `#[path]` 属性、bin から lib への `use <crate>::…` のエッジ。
-    let is_target_root = matches!(stem, "lib" | "main" | "mod")
+    // lib.rs / main.rs は `src/` 直下か `src/bin/<name>/`・`tests|examples|benches/<name>/` 直下のときだけルート
+    // (それ以外の `a/lib.rs` は通常モジュール)。mod.rs は常に同ディレクトリ。
+    let is_crate_file_root = match stem {
+        "lib" => dir_name == "src",
+        "main" => {
+            dir_name == "src" || matches!(parent_name, "bin" | "tests" | "examples" | "benches")
+        }
+        _ => false,
+    };
+    let is_target_root = stem == "mod"
+        || is_crate_file_root
         || (stem == "build" && !has_src(dir))
         || (matches!(dir_name, "tests" | "examples" | "benches") && !has_src(dir))
         || (dir_name == "bin"
             && parent_name == "src"
             && !has_src(parent.parent().unwrap_or(Path::new(""))));
+    let name = name.strip_prefix("r#").unwrap_or(name);
     let base = if is_target_root {
         dir.to_path_buf()
     } else {
@@ -1391,6 +1402,47 @@ mod tests {
         assert_eq!(r("crates/x/build.rs", "mod g"), vec![16]);
         assert_eq!(r("crates/x/src/bin/b.rs", "mod c"), vec![18]);
         assert_eq!(r("src/a/src/bin/d.rs", "mod e"), vec![20]);
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_lib_main_outside_crate_root_are_normal_modules() {
+        let map = ids(&[
+            ("src/a/lib.rs", 1),
+            ("src/a/lib/y.rs", 2),
+            ("src/a/y.rs", 3),
+            ("src/x/main.rs", 4),
+            ("src/x/main/z.rs", 5),
+            ("src/x/z.rs", 6),
+            ("crates/c/src/lib.rs", 7),
+            ("crates/c/src/q.rs", 8),
+            ("src/bin/multi/main.rs", 9),
+            ("src/bin/multi/part.rs", 10),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go, None);
+        assert_eq!(r("src/a/lib.rs", "mod y"), vec![2]);
+        assert_eq!(r("src/x/main.rs", "mod z"), vec![5]);
+        assert_eq!(r("crates/c/src/lib.rs", "mod q"), vec![8]);
+        assert_eq!(r("src/bin/multi/main.rs", "mod part"), vec![10]);
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_prefers_file_over_mod_rs() {
+        let map = ids(&[("src/lib.rs", 1), ("src/foo.rs", 2), ("src/foo/mod.rs", 3)]);
+        let go = HashMap::new();
+        assert_eq!(
+            resolve_import("mod foo", Path::new("src/lib.rs"), &map, &go, None),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_strips_raw_identifier_prefix() {
+        let map = ids(&[("src/lib.rs", 1), ("src/type.rs", 2), ("src/fn/mod.rs", 3)]);
+        let go = HashMap::new();
+        let r = |imp: &str| resolve_import(imp, Path::new("src/lib.rs"), &map, &go, None);
+        assert_eq!(r("mod r#type"), vec![2]);
+        assert_eq!(r("mod r#fn"), vec![3]);
     }
 
     #[test]
