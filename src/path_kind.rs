@@ -3,8 +3,9 @@
 /// Score multiplier for test and fixture files (see [`path_score_factor`]).
 pub const TEST_PATH_FACTOR: f32 = 0.5;
 
-/// True for test, fixture and spec files: files under a `tests/`, `test/`, `__tests__/` or
-/// `fixtures/` directory, and files named `test_*`, `*_test.*`, `*.test.*` or `*.spec.*`.
+/// True for test, fixture and spec files: files under a `tests/`, `test/`, `__tests__/`,
+/// `fixtures/`, `spec/`, `specs/` or `testdata/` directory, and files named `test_*`,
+/// `*_test.*`, `*_spec.*`, `*.test.*` or `*.spec.*`.
 pub fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
@@ -12,10 +13,16 @@ pub fn is_test_path(path: &str) -> bool {
         .split('/')
         .rev()
         .skip(1) // the file name itself is not a directory
-        .any(|d| matches!(d, "tests" | "test" | "__tests__" | "fixtures"));
+        .any(|d| {
+            matches!(
+                d,
+                "tests" | "test" | "__tests__" | "fixtures" | "spec" | "specs" | "testdata"
+            )
+        });
     in_test_dir
         || name.starts_with("test_")
         || name.contains("_test.")
+        || name.contains("_spec.")
         || name.contains(".test.")
         || name.contains(".spec.")
 }
@@ -43,7 +50,10 @@ mod tests {
             "src/poetry/tests/helpers.py",
             "packages/x/__tests__/a.ts",
             "tests/fixtures/git/pkg/__init__.py",
-            "Tests/Foo.rs", // case-insensitive
+            "Tests/Foo.rs",        // case-insensitive
+            "spec/models/user.rb", // Ruby (RSpec)
+            "pkg/specs/helper.rb",
+            "pkg/parser/testdata/input.txt", // Go
         ] {
             assert!(is_test_path(p), "{p} should be a test path");
         }
@@ -57,6 +67,7 @@ mod tests {
             "src/foo_test.rs",
             "src/app.test.ts",
             "src/app.spec.tsx",
+            "app/models/user_spec.rb", // Ruby (RSpec)
         ] {
             assert!(is_test_path(p), "{p} should be a test path");
         }
@@ -73,6 +84,8 @@ mod tests {
             "src/protest_handler.ts", // not *.test.*
             "docs/testing-guide.md",  // not under tests/ and not test_*
             "src/attestation/mod.rs",
+            "src/inspect_specimen.rs",  // not *_spec.*
+            "src/specification/mod.rs", // "spec" inside a word is not a spec dir
         ] {
             assert!(!is_test_path(p), "{p} should not be a test path");
         }
