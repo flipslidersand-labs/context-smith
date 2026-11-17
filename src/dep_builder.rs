@@ -678,8 +678,14 @@ fn read_go_mod_file(dir: &Path) -> Option<String> {
 }
 
 /// Collect every `go.mod` that governs a tracked `.go` file: the repo root plus each
-/// ancestor directory of a tracked Go file (#429). Only those directories are probed.
-pub fn read_go_modules(root: &Path, file_paths: &HashMap<i64, PathBuf>) -> Vec<GoModule> {
+/// ancestor directory of a tracked Go file (#429). Only those directories are probed, and
+/// only if the `go.mod` itself is in `tracked` (repo-relative paths); untracked or ignored
+/// `go.mod` files are ignored like any other untracked file (#441).
+pub fn read_go_modules(
+    root: &Path,
+    file_paths: &HashMap<i64, PathBuf>,
+    tracked: &std::collections::HashSet<String>,
+) -> Vec<GoModule> {
     let mut dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     for path in file_paths.values() {
         if path.extension().and_then(|e| e.to_str()) != Some("go") {
@@ -695,6 +701,7 @@ pub fn read_go_modules(root: &Path, file_paths: &HashMap<i64, PathBuf>) -> Vec<G
     }
     dirs.insert(PathBuf::new());
     dirs.into_iter()
+        .filter(|d| tracked.contains(&d.join("go.mod").to_string_lossy().to_string()))
         .filter_map(|d| read_go_mod_file(&root.join(&d)).map(|m| (d, m)))
         .collect()
 }
@@ -719,6 +726,8 @@ fn parse_go_module(src: &str) -> Option<String> {
     None
 }
 
+// Known simplification (#441): a root-module import can also resolve into a child directory
+// that has its own go.mod. The impact is small, so it is accepted rather than excluded.
 fn resolve_go_package(
     pkg: &str,
     go_dir_index: &HashMap<PathBuf, Vec<i64>>,
@@ -1152,12 +1161,18 @@ mod tests {
             (3, PathBuf::from("c.rs")),
         ]
         .into();
-        assert!(read_go_modules(&d, &paths).is_empty());
+        let tracked: std::collections::HashSet<String> =
+            ["go.mod", "svc/go.mod", "svc/inner/go.mod"]
+                .map(String::from)
+                .into();
+        assert!(read_go_modules(&d, &paths, &tracked).is_empty());
         std::fs::write(d.join("go.mod"), "module example.com/app\n").unwrap();
         std::fs::write(d.join("svc/go.mod"), "module github.com/o/other\n").unwrap();
         // block form ignored; unrelated dir without go.mod skipped
         std::fs::write(d.join("svc/inner/go.mod"), "module (\n\tx\n)\n").unwrap();
-        let mut got = read_go_modules(&d, &paths);
+        // an untracked go.mod is ignored (#441)
+        std::fs::write(d.join("other/go.mod"), "module example.com/untracked\n").unwrap();
+        let mut got = read_go_modules(&d, &paths, &tracked);
         got.sort();
         assert_eq!(
             got,
@@ -1165,6 +1180,12 @@ mod tests {
                 (PathBuf::new(), "example.com/app".to_string()),
                 (PathBuf::from("svc"), "github.com/o/other".to_string()),
             ]
+        );
+        // root go.mod not tracked: ignored too
+        let only_svc: std::collections::HashSet<String> = ["svc/go.mod".to_string()].into();
+        assert_eq!(
+            read_go_modules(&d, &paths, &only_svc),
+            vec![(PathBuf::from("svc"), "github.com/o/other".to_string())]
         );
         std::fs::remove_dir_all(&d).unwrap();
     }
