@@ -354,11 +354,38 @@ fn rust_crate_root(from_path: &Path, path_to_id: &HashMap<PathBuf, i64>) -> Path
         .unwrap_or_default()
 }
 
+/// `mod foo;` を宣言ファイルの隣のモジュールファイルへ解決する。
+/// lib.rs / main.rs / mod.rs は同じディレクトリ、それ以外の `a.rs` は `a/` を探す。
+fn resolve_rust_mod_decl(
+    name: &str,
+    from_path: &Path,
+    path_to_id: &HashMap<PathBuf, i64>,
+) -> Vec<i64> {
+    let dir = from_path.parent().unwrap_or(Path::new(""));
+    let stem = from_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let base = if matches!(stem, "lib" | "main" | "mod") {
+        dir.to_path_buf()
+    } else {
+        dir.join(stem)
+    };
+    [
+        base.join(format!("{name}.rs")),
+        base.join(name).join("mod.rs"),
+    ]
+    .iter()
+    .find_map(|c| path_to_id.get(c).copied())
+    .into_iter()
+    .collect()
+}
+
 fn resolve_rust(
     import_str: &str,
     from_path: &Path,
     path_to_id: &HashMap<PathBuf, i64>,
 ) -> Vec<i64> {
+    if let Some(name) = import_str.strip_prefix("mod ") {
+        return resolve_rust_mod_decl(name.trim(), from_path, path_to_id);
+    }
     let root = rust_crate_root(from_path, path_to_id);
     let mut ids = Vec::new();
     for expanded in expand_rust_use(import_str) {
@@ -1016,6 +1043,25 @@ mod tests {
         );
         assert!(resolve_rust("std::fmt", Path::new("src/lib.rs"), &map).is_empty());
         assert!(resolve_rust("crate::missing::Item", Path::new("src/lib.rs"), &map).is_empty());
+    }
+
+    #[test]
+    fn resolve_rust_mod_decl_finds_sibling_module_files() {
+        let map = ids(&[
+            ("src/lib.rs", 1),
+            ("src/a.rs", 2),
+            ("src/b/mod.rs", 3),
+            ("src/a/c.rs", 4),
+            ("src/b/d.rs", 5),
+        ]);
+        let go = HashMap::new();
+        let r = |from: &str, imp: &str| resolve_import(imp, Path::new(from), &map, &go);
+        assert_eq!(r("src/lib.rs", "mod a"), vec![2]);
+        assert_eq!(r("src/lib.rs", "mod b"), vec![3]);
+        // 非 mod.rs のファイルは `a/` の下を探す
+        assert_eq!(r("src/a.rs", "mod c"), vec![4]);
+        assert_eq!(r("src/b/mod.rs", "mod d"), vec![5]);
+        assert!(r("src/lib.rs", "mod missing").is_empty());
     }
 
     #[test]
