@@ -493,14 +493,17 @@ fn lookup_py_module(
     allow_root: bool,
     path_to_id: &HashMap<PathBuf, i64>,
 ) -> Option<i64> {
-    let mut candidates = vec![
+    let local = [
         base_dir.join(format!("{}.py", rel)),
         base_dir.join(format!("{}/__init__.py", rel)),
     ];
+    let mut candidates = Vec::new();
     if allow_root {
+        // 絶対 import は sys.path(ルート)側を先に探し、無ければ呼び出し元へフォールバック
         candidates.push(PathBuf::from(format!("{}.py", rel)));
         candidates.push(PathBuf::from(format!("{}/__init__.py", rel)));
     }
+    candidates.extend(local);
     candidates
         .into_iter()
         .find_map(|c| path_to_id.get(&c).copied())
@@ -1133,6 +1136,20 @@ mod tests {
             ("import.py", 6),
             ("z.py", 7),
         ])
+    }
+
+    #[test]
+    fn resolve_python_absolute_import_prefers_root_over_caller_dir() {
+        let from = Path::new("pkg/main.py");
+        let map = ids(&[("util.py", 1), ("pkg/util.py", 2), ("only_pkg.py", 9)]);
+        // 絶対 import はルートの util.py を優先する
+        assert_eq!(resolve_python("import util", from, &map), vec![1]);
+        assert_eq!(resolve_python("from util import x", from, &map), vec![1]);
+        // 相対 import は従来どおり呼び出し元ディレクトリ
+        assert_eq!(resolve_python("from .util import x", from, &map), vec![2]);
+        // ルートに無ければ呼び出し元ディレクトリへフォールバック
+        let map = ids(&[("pkg/helper.py", 3)]);
+        assert_eq!(resolve_python("import helper", from, &map), vec![3]);
     }
 
     #[test]
