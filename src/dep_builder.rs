@@ -716,6 +716,8 @@ fn parse_go_module(src: &str) -> Option<String> {
     None
 }
 
+// Known simplification (#441): a root-module import can also resolve into a child directory
+// that has its own go.mod. The impact is small, so it is accepted rather than excluded.
 fn resolve_go_package(
     pkg: &str,
     go_dir_index: &HashMap<PathBuf, Vec<i64>>,
