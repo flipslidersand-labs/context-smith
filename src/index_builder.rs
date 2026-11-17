@@ -571,8 +571,8 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     }
 
     // --- Pass 2: resolve imports → deps table (has its own transaction) ---
-    let go_module = dep_builder::read_go_module(repo.root());
-    dep_builder::build_deps(db.connection(), &file_paths, go_module.as_deref())?;
+    let go_modules = dep_builder::read_go_modules(repo.root(), &file_paths);
+    dep_builder::build_deps(db.connection(), &file_paths, &go_modules)?;
     stats.deps_total = db
         .connection()
         .query_row("SELECT COUNT(*) FROM deps", [], |row| row.get::<_, i64>(0))?

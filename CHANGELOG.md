@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- Go imports now resolve against every `go.mod` in the repo (longest module path wins), so nested modules and `go.work`-style layouts without a root `go.mod` no longer fall back to suffix matching (#429).
 - `index` no longer aborts with a stack overflow on deeply nested source files: the symbol walkers stop at depth 500 and skip deeper branches and print one warning per file; `EXTRACT_VERSION` is now 5, so existing indexes are rebuilt (#417).
 - `mod x;` in `examples/*.rs` and `benches/*.rs` now resolves next to the file (they are crate roots like `tests/*.rs`); `src/examples/` etc. stay normal modules (#426).
 - `mod x;` in a non-crate-root `lib.rs`/`main.rs` (e.g. `src/a/lib.rs`) now resolves under `lib/`/`main/` like a normal module, and `mod r#type;` finds `type.rs` (raw-identifier prefix stripped) (#434).
