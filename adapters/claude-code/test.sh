@@ -57,8 +57,8 @@ check "--help prints usage" "$(printf '%s\n' "$out" | grep -c '^usage: ctx-selec
 "$sel" -h >/dev/null 2>&1; check "-h -> exit 0" "$?" 0
 "$sel" "$repo" invoice --budget >/dev/null 2>&1; check "task words with trailing --budget are taken as task, not option" "$?" 0
 # `${2:?}` aborts the shell with status 1 (not the documented 2); pinned as current behaviour.
-"$sel" --budget >/dev/null 2>&1; check "--budget without a value -> exit 1 (shell parameter error)" "$?" 1
-"$sel" --top >/dev/null 2>&1; check "--top without a value -> exit 1 (shell parameter error)" "$?" 1
+"$sel" --budget >/dev/null 2>&1; check "--budget without a value -> exit 2" "$?" 2
+"$sel" --top >/dev/null 2>&1; check "--top without a value -> exit 2" "$?" 2
 out=$("$sel" --top 0 "$repo" invoice tax total 2>&1); code=$?
 check "--top 0 -> exit 0" "$code" 0
 check "--top 0 prints the header only" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "1"
