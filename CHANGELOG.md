@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- `allocate` now sorts scores with a total order and drops NaN-scored candidates, so a NaN score can no longer panic the sort or take first place (#469).
 - `recent_diff` in a shallow clone (e.g. `actions/checkout` default) now diffs against the oldest reachable commit instead of the empty tree, so the whole repository no longer lands in the bundle's diff (#465).
 - A file extension containing a backtick or newline can no longer break the code fence in `relevant-code/*.md`; only `[A-Za-z0-9_+#-]` is kept in the info string (#328).
 - The "index is locked" message no longer prints an empty path (`Index DB  is locked`) for a temporary or in-memory DB (#354).
