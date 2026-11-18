@@ -285,7 +285,10 @@ impl GitRepo {
             ancestor = ancestor.parent(0)?;
         }
         let head_tree = head_commit.tree()?;
-        if reached {
+        // A shallow clone's boundary commit has no parent in the object store but
+        // is not the true root: diff against its tree (the oldest commit we can
+        // see) instead of the empty tree, or the whole repo shows up (#465).
+        if reached || repo.is_shallow() {
             anc_tree_opt = Some(ancestor.tree()?);
         }
         let diff = repo.diff_tree_to_tree(anc_tree_opt.as_ref(), Some(&head_tree), None)?;
@@ -1228,6 +1231,35 @@ mod tests {
         let diff2 = repo.recent_diff(2).unwrap();
         assert!(diff2.contains("three") && diff2.contains("two"));
         assert!(!diff2.contains("one"));
+    }
+
+    /// #465: in a shallow clone the boundary commit is not the true root, so
+    /// the diff must not fall back to the empty tree (whole repo).
+    #[test]
+    fn recent_diff_shallow_clone_does_not_include_whole_repo() {
+        let src = TempDir::new().unwrap();
+        for (f, c) in [
+            ("a.rs", "one"),
+            ("b.rs", "two"),
+            ("c.rs", "three"),
+            ("d.rs", "four"),
+        ] {
+            commit_files(src.path(), &[(f, &format!("{c}\n"))], &[]);
+        }
+        let dst = TempDir::new().unwrap();
+        let clone = dst.path().join("clone");
+        let url = format!("file://{}", src.path().display());
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "2", &url])
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let repo = GitRepo::new(&clone).unwrap();
+        let diff = repo.recent_diff(3).unwrap();
+        assert!(diff.contains("+four"), "{diff}");
+        assert!(!diff.contains("+one") && !diff.contains("+two"), "{diff}");
+        assert!(!diff.contains("+three"), "{diff}");
     }
 
     #[test]
