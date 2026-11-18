@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- Go grouped `type ( ... )` declarations now record each spec's own line (and include `X = Y` aliases) instead of the `type (` line; `EXTRACT_VERSION` is now 6, so existing indexes are rebuilt (#436).
 - `index` time no longer grows with the square of the file count: `symbols(file_id)` and `deps(to_file)` are now indexed and FTS rows are deleted by rowid; `EXTRACT_VERSION` is now 7, so existing indexes are rebuilt (#283).
 - `select` now rejects `seed_count = 0` with an error instead of reporting no matches, and clamps huge `seed_count`/`top_n` values (max 1000) so BM25 limits no longer overflow (#443).
 - Go module detection now reads only `go.mod` files tracked in git; untracked or ignored `go.mod` files are no longer used (#441).

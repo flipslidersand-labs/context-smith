@@ -775,9 +775,15 @@ fn collect_go_node(
         "type_declaration" => {
             for i in 0..node.child_count() as u32 {
                 if let Some(spec) = node.child(i) {
-                    if spec.kind() == "type_spec" {
+                    if matches!(spec.kind(), "type_spec" | "type_alias") {
                         if let Some(name) = spec.child_by_field_name("name") {
-                            out.push((node_text(name, src).to_owned(), SymbolKind::Struct, line));
+                            // Use the spec's own row so grouped `type ( ... )` entries point at their definition.
+                            let spec_line = spec.start_position().row as u32 + 1;
+                            out.push((
+                                node_text(name, src).to_owned(),
+                                SymbolKind::Struct,
+                                spec_line,
+                            ));
                         }
                     }
                 }
@@ -1486,6 +1492,19 @@ mod tests {
         assert_eq!(names(&out, SymbolKind::Struct), vec!["Server"]);
         assert_eq!(names(&out, SymbolKind::Function), vec!["Run", "main"]);
         assert_eq!(names(&out, SymbolKind::Import).len(), 1);
+    }
+
+    #[test]
+    fn extract_go_grouped_type_declaration() {
+        let src = "package p\n\ntype (\n    A struct{}\n    B interface{}\n    C = A\n)\n\ntype D struct{}\n";
+        let out = SymbolExtractor::extract(Path::new("a.go"), src, Language::Go).unwrap();
+        assert_eq!(names(&out, SymbolKind::Struct), vec!["A", "B", "C", "D"]);
+        let lines: Vec<u32> = out
+            .iter()
+            .filter(|(_, k, _)| *k == SymbolKind::Struct)
+            .map(|(_, _, l)| *l)
+            .collect();
+        assert_eq!(lines, vec![4, 5, 6, 9]);
     }
 
     #[test]
