@@ -143,7 +143,9 @@ impl IndexDb {
             CREATE TABLE IF NOT EXISTS embeddings (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id),
                 vector  BLOB NOT NULL
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);
+            CREATE INDEX IF NOT EXISTS idx_deps_to_file ON deps(to_file);",
         )?;
         // Migration: add indexed_sha column to existing databases (idempotent).
         // SQLite does not support IF NOT EXISTS on ADD COLUMN, so we check first.
@@ -284,8 +286,8 @@ impl IndexDb {
     /// FTS, deps, embeddings) but keep its files row and path FTS row.
     fn delete_content_records(&self, file_id: i64) -> Result<()> {
         for sql in [
-            "DELETE FROM fts_symbols WHERE file_id = ?1",
-            "DELETE FROM fts_body    WHERE file_id = ?1",
+            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
+            "DELETE FROM fts_body    WHERE rowid = ?1",
             "DELETE FROM symbols     WHERE file_id = ?1",
             "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
             "DELETE FROM embeddings WHERE file_id = ?1",
@@ -297,18 +299,14 @@ impl IndexDb {
 
     /// Delete all index records for a file (FTS, symbols, deps, files row).
     fn delete_file_records(&self, file_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM fts_path    WHERE rowid = ?1", params![file_id])?;
         self.conn.execute(
-            "DELETE FROM fts_path    WHERE file_id = ?1",
+            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
             params![file_id],
         )?;
-        self.conn.execute(
-            "DELETE FROM fts_symbols WHERE file_id = ?1",
-            params![file_id],
-        )?;
-        self.conn.execute(
-            "DELETE FROM fts_body    WHERE file_id = ?1",
-            params![file_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM fts_body    WHERE rowid = ?1", params![file_id])?;
         self.conn.execute(
             "DELETE FROM symbols     WHERE file_id = ?1",
             params![file_id],
@@ -349,7 +347,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 6;
+pub const EXTRACT_VERSION: u32 = 7;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
@@ -388,14 +386,21 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         db.connection()
             .execute_batch("UPDATE embeddings SET content_sha = NULL;")?;
     }
-    if !force {
+    {
         let stored = stored_extract_version(db.connection())?;
         let has_files: i64 = db
             .connection()
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
         if has_files > 0 && stored.as_deref() != Some(EXTRACT_VERSION.to_string().as_str()) {
-            eprintln!("note: index built by an older extractor; rebuilding");
+            if !force {
+                eprintln!("note: index built by an older extractor; rebuilding");
+            }
             force = true;
+            // Older indexes keyed FTS rows by auto rowid; rowid-based deletes
+            // would miss them, so drop them (they are rebuilt below).
+            db.connection().execute_batch(
+                "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
+            )?;
         }
     }
 
@@ -472,9 +477,9 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                     eprintln!("warn: unreadable content {:?}: {e}", abs_path);
                     db.delete_content_records(file_id)?;
                     db.connection()
-                        .execute("DELETE FROM fts_path WHERE file_id = ?1", params![file_id])?;
+                        .execute("DELETE FROM fts_path WHERE rowid = ?1", params![file_id])?;
                     db.connection().execute(
-                        "INSERT INTO fts_path (file_id, path) VALUES (?1, ?2)",
+                        "INSERT INTO fts_path (rowid, file_id, path) VALUES (?1, ?1, ?2)",
                         params![
                             file_id,
                             crate::tokenizer::tokenize_path(&rel_path.to_string_lossy())
@@ -496,7 +501,12 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                 }
             };
 
-            // (a) Clear stale symbol rows.
+            // (a) Clear stale symbol rows (fts_symbols rows are keyed by
+            // symbols.id, so they must go first).
+            db.connection().execute(
+                "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
+                params![file_id],
+            )?;
             db.delete_symbols_for(file_id)?;
 
             // (b) Extract and insert new symbols.
@@ -519,37 +529,33 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
 
             // (c) Replace FTS rows for this file.
             db.connection()
-                .execute("DELETE FROM fts_path WHERE file_id = ?1", params![file_id])?;
+                .execute("DELETE FROM fts_path WHERE rowid = ?1", params![file_id])?;
             let tokenized_path = crate::tokenizer::tokenize_path(&rel_path.to_string_lossy());
             db.connection().execute(
-                "INSERT INTO fts_path (file_id, path) VALUES (?1, ?2)",
+                "INSERT INTO fts_path (rowid, file_id, path) VALUES (?1, ?1, ?2)",
                 params![file_id, tokenized_path],
             )?;
 
-            db.connection().execute(
-                "DELETE FROM fts_symbols WHERE file_id = ?1",
-                params![file_id],
-            )?;
             {
-                let mut sym_stmt = db
-                    .connection()
-                    .prepare("SELECT name FROM symbols WHERE file_id = ?1 AND kind != 'import'")?;
-                let sym_names: Vec<String> = sym_stmt
-                    .query_map(params![file_id], |row| row.get(0))?
+                let mut sym_stmt = db.connection().prepare(
+                    "SELECT id, name FROM symbols WHERE file_id = ?1 AND kind != 'import'",
+                )?;
+                let sym_names: Vec<(i64, String)> = sym_stmt
+                    .query_map(params![file_id], |row| Ok((row.get(0)?, row.get(1)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                for name in sym_names {
+                for (sym_id, name) in sym_names {
                     db.connection().execute(
-                        "INSERT INTO fts_symbols (file_id, name) VALUES (?1, ?2)",
-                        params![file_id, crate::tokenizer::tokenize_code(&name)],
+                        "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
+                        params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
                     )?;
                 }
             }
 
             db.connection()
-                .execute("DELETE FROM fts_body WHERE file_id = ?1", params![file_id])?;
+                .execute("DELETE FROM fts_body WHERE rowid = ?1", params![file_id])?;
             let truncated = truncate_fts_body(&source);
             db.connection().execute(
-                "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
+                "INSERT INTO fts_body (rowid, file_id, content) VALUES (?1, ?1, ?2)",
                 params![file_id, truncated],
             )?;
 
@@ -1659,6 +1665,38 @@ mod tests {
         build_index(&repo, &db, false).unwrap();
         assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols"), 2);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 1);
+    }
+
+    /// #283: an existing index.db (no file_id indexes, FTS rows keyed by auto
+    /// rowid, older extractor version) gets the new indexes and is rebuilt
+    /// without leaving stale FTS rows.
+    #[test]
+    fn init_schema_adds_file_id_indexes_to_existing_db() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "pub fn alpha_marker() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        let conn = db.connection();
+        // Simulate a pre-#283 database.
+        conn.execute_batch(
+            "DROP INDEX idx_symbols_file_id; DROP INDEX idx_deps_to_file;
+             DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;
+             INSERT INTO fts_path (rowid, file_id, path) VALUES (900, 1, 'stale');
+             INSERT INTO fts_symbols (rowid, file_id, name) VALUES (901, 1, 'stale');
+             INSERT INTO fts_body (rowid, file_id, content) VALUES (902, 1, 'stale');
+             UPDATE meta SET value = '1' WHERE key = 'extract_version';",
+        )
+        .unwrap();
+        build_index(&repo, &db, false).unwrap();
+        let idx = "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ";
+        assert_eq!(count(&db, &format!("{idx}'idx_symbols_file_id'")), 1);
+        assert_eq!(count(&db, &format!("{idx}'idx_deps_to_file'")), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM fts_body WHERE content = 'stale'"),
+            0
+        );
     }
 
     #[test]
