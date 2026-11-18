@@ -275,8 +275,14 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
 
     // Ordered by score ascending so the smallest score is always at the top
     // of the min-heap, making eviction O(log top_n) instead of O(n).
-    #[derive(PartialEq)]
     struct MinEntry(f32, i64); // (score, file_id)
+                               // Derive-free so Eq agrees with Ord (f32 `==` treats 0.0 and -0.0 as equal
+                               // while `total_cmp` does not).
+    impl PartialEq for MinEntry {
+        fn eq(&self, other: &Self) -> bool {
+            self.cmp(other) == Ordering::Equal
+        }
+    }
     impl Eq for MinEntry {}
     impl PartialOrd for MinEntry {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -317,7 +323,7 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
 
     // Drain into a vec and sort descending (best first).
     let mut scored: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.1, e.0)).collect();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Ok(scored)
 }
 
@@ -763,9 +769,39 @@ mod tests {
             .unwrap();
         }
         let hits = search_vectors(&conn, &[1.0, 0.0], 5).unwrap();
-        assert_eq!(hits.len(), 5);
+        // Finite rows are the odd ids; cosine falls as id grows, so the exact
+        // top 5 are 1,3,5,7,9 and no NaN row (even id) may appear or lead.
+        let ids: Vec<i64> = hits.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 3, 5, 7, 9]);
         assert!(hits.iter().all(|(_, s)| !s.is_nan()));
-        assert!(hits.windows(2).all(|w| w[0].1 >= w[1].1));
+    }
+
+    #[test]
+    fn search_vectors_ties_break_by_file_id() {
+        let conn = mem_db();
+        // Identical vectors => identical scores; insert in scrambled order.
+        for id in [7i64, 3, 9, 1, 5, 8, 2, 6, 4, 10] {
+            conn.execute(
+                "INSERT INTO embeddings (file_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![id, vec_to_blob(&[1.0, 0.0])],
+            )
+            .unwrap();
+        }
+        for _ in 0..20 {
+            let all: Vec<i64> = search_vectors(&conn, &[1.0, 0.0], 10)
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(all, (1..=10).collect::<Vec<i64>>());
+            // The cut at top_n keeps the lowest ids among ties.
+            let cut: Vec<i64> = search_vectors(&conn, &[1.0, 0.0], 4)
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(cut, vec![1, 2, 3, 4]);
+        }
     }
 
     #[test]
