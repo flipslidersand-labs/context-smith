@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ctx-select.sh` now exits 2 (usage error) when `--budget` or `--top` is given without a value, matching the documented exit codes; it used to exit 1 (#451).
 - Go grouped `type ( ... )` declarations now record each spec's own line (and include `X = Y` aliases) instead of the `type (` line; `EXTRACT_VERSION` is now 6, so existing indexes are rebuilt (#436).
 - `index` time no longer grows with the square of the file count: `symbols(file_id)` and `deps(to_file)` are now indexed and FTS rows are deleted by rowid; `EXTRACT_VERSION` is now 7, so existing indexes are rebuilt (#283).
+- Ruby `Bundler.require(:default)`, `Kernel.require 'x'` and other receiver-qualified `require` / `require_relative` calls are no longer recorded as imports; `EXTRACT_VERSION` is now 8, so existing indexes are rebuilt (#467).
 - `select` now rejects `seed_count = 0` with an error instead of reporting no matches, and clamps huge `seed_count`/`top_n` values (max 1000) so BM25 limits no longer overflow (#443).
 - Go module detection now reads only `go.mod` files tracked in git; untracked or ignored `go.mod` files are no longer used (#441).
 - `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).

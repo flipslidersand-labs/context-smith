@@ -407,7 +407,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 7;
+pub const EXTRACT_VERSION: u32 = 8;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 

@@ -868,7 +868,10 @@ fn collect_ruby_node(
         "call" => {
             if let Some(method) = node.child_by_field_name("method") {
                 let m = node_text(method, src);
-                if m == "require" || m == "require_relative" {
+                // Receiver-less only: `Bundler.require(:default)` / `Kernel.require 'x'` are not imports.
+                if (m == "require" || m == "require_relative")
+                    && node.child_by_field_name("receiver").is_none()
+                {
                     out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
                 }
             }
@@ -1620,6 +1623,34 @@ mod tests {
         assert_eq!(names(&out, SymbolKind::Class), vec!["C"]);
         assert_eq!(names(&out, SymbolKind::Function), vec!["run", "build"]);
         assert_eq!(names(&out, SymbolKind::Import).len(), 2);
+    }
+
+    #[test]
+    fn extract_ruby_require_with_parens() {
+        let out =
+            SymbolExtractor::extract(Path::new("a.rb"), "require('a')\n", Language::Ruby).unwrap();
+        assert_eq!(names(&out, SymbolKind::Import), vec!["require('a')"]);
+    }
+
+    #[test]
+    fn extract_ruby_receiver_require_is_not_import() {
+        let src = "Bundler.require(:default)\nKernel.require 'x'\nobj.require_relative 'y'\n";
+        let out = SymbolExtractor::extract(Path::new("a.rb"), src, Language::Ruby).unwrap();
+        assert!(names(&out, SymbolKind::Import).is_empty());
+    }
+
+    #[test]
+    fn extract_ruby_singleton_class_has_no_class_name() {
+        let src = "class << self\n  def x; end\nend\n";
+        let out = SymbolExtractor::extract(Path::new("a.rb"), src, Language::Ruby).unwrap();
+        assert!(names(&out, SymbolKind::Class).is_empty());
+        assert_eq!(names(&out, SymbolKind::Function), vec!["x"]);
+    }
+
+    #[test]
+    fn extract_ruby_bare_require_does_not_panic() {
+        let out = SymbolExtractor::extract(Path::new("a.rb"), "require\n", Language::Ruby);
+        assert!(out.is_ok());
     }
 
     #[test]
