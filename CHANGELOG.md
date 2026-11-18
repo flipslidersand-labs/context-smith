@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `index` time no longer grows with the square of the file count: `symbols(file_id)` and `deps(to_file)` are now indexed and FTS rows are deleted by rowid; `EXTRACT_VERSION` is now 7, so existing indexes are rebuilt (#283).
+- `select` now rejects `seed_count = 0` with an error instead of reporting no matches, and clamps huge `seed_count`/`top_n` values (max 1000) so BM25 limits no longer overflow (#443).
 - Go module detection now reads only `go.mod` files tracked in git; untracked or ignored `go.mod` files are no longer used (#441).
 - `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
 - Go imports now resolve against every `go.mod` in the repo (longest module path wins), so nested modules and `go.work`-style layouts without a root `go.mod` no longer fall back to suffix matching (#429).
