@@ -97,12 +97,9 @@ pub fn rrf_fuse(rankings: &[&[(i64, f32)]], k: f64, top_n: usize) -> Vec<(i64, f
     // Sort on the f64 sums with the file id as tie-break: HashMap iteration order is
     // random per run, so without it equal scores (common in RRF) would reorder and
     // the `top_n` cut would change between runs.
-    let mut fused: Vec<(i64, f64)> = acc.into_iter().collect();
-    fused.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
+    // NaN sums (e.g. a NaN `k`) have no rank, so drop them before the total-order sort.
+    let mut fused: Vec<(i64, f64)> = acc.into_iter().filter(|(_, s)| !s.is_nan()).collect();
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     fused.truncate(top_n);
     fused.into_iter().map(|(id, s)| (id, s as f32)).collect()
 }
@@ -289,11 +286,7 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
     impl Ord for MinEntry {
         fn cmp(&self, other: &Self) -> Ordering {
             // Reverse: smaller score → higher priority in BinaryHeap (min-heap).
-            other
-                .0
-                .partial_cmp(&self.0)
-                .unwrap_or(Ordering::Equal)
-                .then(self.1.cmp(&other.1))
+            other.0.total_cmp(&self.0).then(self.1.cmp(&other.1))
         }
     }
 
@@ -312,6 +305,10 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
             continue;
         }
         let score = cosine(query, &blob_to_vec(&blob));
+        // A NaN score has no rank and would break the heap's total order; skip it.
+        if score.is_nan() {
+            continue;
+        }
         heap.push(MinEntry(score, fid));
         if heap.len() > effective_n {
             heap.pop(); // evict the lowest-score entry
@@ -320,7 +317,7 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
 
     // Drain into a vec and sort descending (best first).
     let mut scored: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.1, e.0)).collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     Ok(scored)
 }
 
@@ -747,6 +744,35 @@ mod tests {
         .unwrap();
         let hits = search_vectors(&conn, &[1.0, 0.1], 10).unwrap();
         assert_eq!(hits[0].0, 1, "closest vector should rank first");
+    }
+
+    #[test]
+    fn search_vectors_nan_vector_does_not_panic_or_lead() {
+        let conn = mem_db();
+        // Many NaN rows plus finite rows: NaN scores must be dropped, not ranked.
+        for id in 1..=40i64 {
+            let v = if id % 2 == 0 {
+                [f32::NAN, f32::NAN]
+            } else {
+                [1.0, id as f32 / 100.0]
+            };
+            conn.execute(
+                "INSERT INTO embeddings (file_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![id, vec_to_blob(&v)],
+            )
+            .unwrap();
+        }
+        let hits = search_vectors(&conn, &[1.0, 0.0], 5).unwrap();
+        assert_eq!(hits.len(), 5);
+        assert!(hits.iter().all(|(_, s)| !s.is_nan()));
+        assert!(hits.windows(2).all(|w| w[0].1 >= w[1].1));
+    }
+
+    #[test]
+    fn rrf_fuse_nan_k_does_not_panic() {
+        let r: Vec<(i64, f32)> = (1..=30).map(|i| (i, 1.0)).collect();
+        let out = rrf_fuse(&[&r], f64::NAN, 10);
+        assert!(out.is_empty(), "NaN-scored entries are dropped");
     }
 
     #[test]
