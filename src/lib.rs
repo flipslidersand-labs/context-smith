@@ -257,7 +257,9 @@ impl GitRepo {
     /// within the token budget.
     ///
     /// When `n_commits` reaches past the root commit the diff is computed
-    /// against the empty tree so the initial commit's files are included.
+    /// against the empty tree so the initial commit's files are included. In a
+    /// shallow clone the oldest reachable commit is not a real root, so the diff
+    /// is taken against that commit's tree instead (older history is unavailable).
     /// Non-UTF-8 lines are converted lossily (U+FFFD), not dropped.
     pub fn recent_diff(&self, n_commits: usize) -> Result<String> {
         const DIFF_MAX_BYTES: usize = 512 * 1024; // 512 KiB
