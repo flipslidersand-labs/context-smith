@@ -1539,22 +1539,26 @@ mod tests {
 
     #[test]
     fn extract_python_decorated_async_nested() {
-        let src = "# def commented():\n\
-x = \"def in_string(): pass\"\n\
-@deco\n\
-def decorated():\n\
-    def inner():\n\
-        pass\n\
-    class InnerCls:\n\
-        pass\n\
-\n\
-@deco2\n\
-class Decorated:\n\
-    async def am(self):\n\
-        pass\n\
-\n\
-async def top_async():\n\
-    pass\n";
+        // One literal per line: a `\` line continuation would strip the indentation that the
+        // nested definitions depend on.
+        let src = concat!(
+            "# def commented():\n",
+            "x = \"def in_string(): pass\"\n",
+            "@deco\n",
+            "def decorated():\n",
+            "    def inner():\n",
+            "        pass\n",
+            "    class InnerCls:\n",
+            "        pass\n",
+            "\n",
+            "@deco2\n",
+            "class Decorated:\n",
+            "    async def am(self):\n",
+            "        pass\n",
+            "\n",
+            "async def top_async():\n",
+            "    pass\n",
+        );
         let out = SymbolExtractor::extract(Path::new("a.py"), src, Language::Python).unwrap();
         let got: Vec<(&str, SymbolKind, u32)> = out
             .iter()
