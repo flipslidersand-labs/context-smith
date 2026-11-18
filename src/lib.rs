@@ -257,7 +257,9 @@ impl GitRepo {
     /// within the token budget.
     ///
     /// When `n_commits` reaches past the root commit the diff is computed
-    /// against the empty tree so the initial commit's files are included.
+    /// against the empty tree so the initial commit's files are included. In a
+    /// shallow clone the oldest reachable commit is not a real root, so the diff
+    /// is taken against that commit's tree instead (older history is unavailable).
     /// Non-UTF-8 lines are converted lossily (U+FFFD), not dropped.
     pub fn recent_diff(&self, n_commits: usize) -> Result<String> {
         const DIFF_MAX_BYTES: usize = 512 * 1024; // 512 KiB
@@ -285,7 +287,10 @@ impl GitRepo {
             ancestor = ancestor.parent(0)?;
         }
         let head_tree = head_commit.tree()?;
-        if reached {
+        // A shallow clone's boundary commit has no parent in the object store but
+        // is not the true root: diff against its tree (the oldest commit we can
+        // see) instead of the empty tree, or the whole repo shows up (#465).
+        if reached || repo.is_shallow() {
             anc_tree_opt = Some(ancestor.tree()?);
         }
         let diff = repo.diff_tree_to_tree(anc_tree_opt.as_ref(), Some(&head_tree), None)?;
@@ -868,7 +873,10 @@ fn collect_ruby_node(
         "call" => {
             if let Some(method) = node.child_by_field_name("method") {
                 let m = node_text(method, src);
-                if m == "require" || m == "require_relative" {
+                // Receiver-less only: `Bundler.require(:default)` / `Kernel.require 'x'` are not imports.
+                if (m == "require" || m == "require_relative")
+                    && node.child_by_field_name("receiver").is_none()
+                {
                     out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
                 }
             }
@@ -1228,6 +1236,35 @@ mod tests {
         let diff2 = repo.recent_diff(2).unwrap();
         assert!(diff2.contains("three") && diff2.contains("two"));
         assert!(!diff2.contains("one"));
+    }
+
+    /// #465: in a shallow clone the boundary commit is not the true root, so
+    /// the diff must not fall back to the empty tree (whole repo).
+    #[test]
+    fn recent_diff_shallow_clone_does_not_include_whole_repo() {
+        let src = TempDir::new().unwrap();
+        for (f, c) in [
+            ("a.rs", "one"),
+            ("b.rs", "two"),
+            ("c.rs", "three"),
+            ("d.rs", "four"),
+        ] {
+            commit_files(src.path(), &[(f, &format!("{c}\n"))], &[]);
+        }
+        let dst = TempDir::new().unwrap();
+        let clone = dst.path().join("clone");
+        let url = format!("file://{}", src.path().display());
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "2", &url])
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let repo = GitRepo::new(&clone).unwrap();
+        let diff = repo.recent_diff(3).unwrap();
+        assert!(diff.contains("+four"), "{diff}");
+        assert!(!diff.contains("+one") && !diff.contains("+two"), "{diff}");
+        assert!(!diff.contains("+three"), "{diff}");
     }
 
     #[test]
@@ -1680,6 +1717,34 @@ mod tests {
         assert_eq!(names(&out, SymbolKind::Class), vec!["C"]);
         assert_eq!(names(&out, SymbolKind::Function), vec!["run", "build"]);
         assert_eq!(names(&out, SymbolKind::Import).len(), 2);
+    }
+
+    #[test]
+    fn extract_ruby_require_with_parens() {
+        let out =
+            SymbolExtractor::extract(Path::new("a.rb"), "require('a')\n", Language::Ruby).unwrap();
+        assert_eq!(names(&out, SymbolKind::Import), vec!["require('a')"]);
+    }
+
+    #[test]
+    fn extract_ruby_receiver_require_is_not_import() {
+        let src = "Bundler.require(:default)\nKernel.require 'x'\nobj.require_relative 'y'\n";
+        let out = SymbolExtractor::extract(Path::new("a.rb"), src, Language::Ruby).unwrap();
+        assert!(names(&out, SymbolKind::Import).is_empty());
+    }
+
+    #[test]
+    fn extract_ruby_singleton_class_has_no_class_name() {
+        let src = "class << self\n  def x; end\nend\n";
+        let out = SymbolExtractor::extract(Path::new("a.rb"), src, Language::Ruby).unwrap();
+        assert!(names(&out, SymbolKind::Class).is_empty());
+        assert_eq!(names(&out, SymbolKind::Function), vec!["x"]);
+    }
+
+    #[test]
+    fn extract_ruby_bare_require_does_not_panic() {
+        let out = SymbolExtractor::extract(Path::new("a.rb"), "require\n", Language::Ruby);
+        assert!(out.is_ok());
     }
 
     #[test]

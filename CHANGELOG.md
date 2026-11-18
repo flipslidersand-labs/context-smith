@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- `open_for_read` follow-ups (#462): the immutable fallback now builds on non-Unix targets and also triggers on `SQLITE_CANTOPEN` for existing files; a write lock during the schema probe is reported as a lock error again; read-only permission tests skip when permissions are not enforced (root).
+- `allocate` now sorts scores with a total order and drops NaN-scored candidates, so a NaN score can no longer panic the sort or take first place (#469).
+- `recent_diff` in a shallow clone (e.g. `actions/checkout` default) now diffs against the oldest reachable commit instead of the empty tree, so the whole repository no longer lands in the bundle's diff (#465).
+- A file extension containing a backtick or newline can no longer break the code fence in `relevant-code/*.md`; only `[A-Za-z0-9_+#-]` is kept in the info string (#328).
+- The "index is locked" message no longer prints an empty path (`Index DB  is locked`) for a temporary or in-memory DB (#354).
 - `query`/`select` now open the index read-only (no `journal_mode` PRAGMA), so an index shipped on a read-only file or directory can be searched (#312).
 - `recent_diff` (the bundle's diff) now includes only files still tracked in git with a known language, so a commit that deletes a secret no longer puts the removed lines into the bundle; `embed_index` now reads file bodies only for git-tracked paths, so an untracked `.env` listed in a shipped `index.db` is never sent to the embedding service (#447).
 - Restoring a file that had become non-UTF-8 now re-indexes its symbols, FTS body and deps instead of leaving them empty until `--force` (#448).
@@ -21,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ctx-select.sh` now exits 2 (usage error) when `--budget` or `--top` is given without a value, matching the documented exit codes; it used to exit 1 (#451).
 - Go grouped `type ( ... )` declarations now record each spec's own line (and include `X = Y` aliases) instead of the `type (` line; `EXTRACT_VERSION` is now 6, so existing indexes are rebuilt (#436).
 - `index` time no longer grows with the square of the file count: `symbols(file_id)` and `deps(to_file)` are now indexed and FTS rows are deleted by rowid; `EXTRACT_VERSION` is now 7, so existing indexes are rebuilt (#283).
+- Ruby `Bundler.require(:default)`, `Kernel.require 'x'` and other receiver-qualified `require` / `require_relative` calls are no longer recorded as imports; `EXTRACT_VERSION` is now 8, so existing indexes are rebuilt (#467).
 - `select` now rejects `seed_count = 0` with an error instead of reporting no matches, and clamps huge `seed_count`/`top_n` values (max 1000) so BM25 limits no longer overflow (#443).
 - Go module detection now reads only `go.mod` files tracked in git; untracked or ignored `go.mod` files are no longer used (#441).
 - `mod x;` in `src/tests/<name>/main.rs` (and `src/examples/`, `src/benches/`) now resolves as a normal module instead of a crate root; only `src/bin/<name>/main.rs` and package-level `tests|examples|benches/<name>/main.rs` are roots (#440).
