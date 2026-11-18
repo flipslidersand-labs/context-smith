@@ -8,10 +8,15 @@ use crate::{GitRepo, Language, Symbol, SymbolExtractor};
 
 /// Message shown when the index DB is locked by another process.
 pub(crate) fn locked_message(path: &Path, detail: &str) -> String {
+    // A temporary or in-memory DB has no path; don't print "Index DB  is locked".
+    let name = if path.as_os_str().is_empty() {
+        String::new()
+    } else {
+        format!(" {}", path.display())
+    };
     format!(
-        "Index DB {} is locked by another process (an 'index' may be running). \
-         Wait for it to finish and retry. ({detail})",
-        path.display()
+        "Index DB{name} is locked by another process (an 'index' may be running). \
+         Wait for it to finish and retry. ({detail})"
     )
 }
 
@@ -1306,6 +1311,18 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn locked_message_omits_an_empty_path() {
+        let named = locked_message(Path::new("/x/index.db"), "busy");
+        assert!(
+            named.starts_with("Index DB /x/index.db is locked"),
+            "{named}"
+        );
+        let unnamed = locked_message(Path::new(""), "busy");
+        assert!(unnamed.starts_with("Index DB is locked"), "{unnamed}");
+        assert!(!unnamed.contains("  "), "{unnamed}");
     }
 
     #[test]

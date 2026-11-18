@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A file extension containing a backtick or newline can no longer break the code fence in `relevant-code/*.md`; only `[A-Za-z0-9_+#-]` is kept in the info string (#328).
+- The "index is locked" message no longer prints an empty path (`Index DB  is locked`) for a temporary or in-memory DB (#354).
 - `query`/`select` now open the index read-only (no `journal_mode` PRAGMA), so an index shipped on a read-only file or directory can be searched (#312).
 - `recent_diff` (the bundle's diff) now includes only files still tracked in git with a known language, so a commit that deletes a secret no longer puts the removed lines into the bundle; `embed_index` now reads file bodies only for git-tracked paths, so an untracked `.env` listed in a shipped `index.db` is never sent to the embedding service (#447).
 - Restoring a file that had become non-UTF-8 now re-indexes its symbols, FTS body and deps instead of leaving them empty until `--force` (#448).
