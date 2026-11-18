@@ -133,7 +133,12 @@ pub fn render_task_md(
     diff_summary: &str,
     explain: bool,
 ) -> String {
-    render_task_md_parts(task, budget, selected, diff_summary, explain).0
+    let files_used: usize = selected.iter().map(|c| c.tokens()).sum();
+    let diff = fit_diff(diff_summary, budget.saturating_sub(files_used));
+    let used = files_used + diff.tokens;
+    let mut task_md = render_head(task, budget, used, selected, explain);
+    task_md.push_str(&diff.text);
+    task_md
 }
 
 /// Header + selected-file list of `task.md` (everything except the diff section).
@@ -169,21 +174,6 @@ fn render_head(
         ));
     }
     task_md
-}
-
-fn render_task_md_parts(
-    task: &str,
-    budget: usize,
-    selected: &[Candidate],
-    diff_summary: &str,
-    explain: bool,
-) -> (String, DiffPart) {
-    let files_used: usize = selected.iter().map(|c| c.tokens()).sum();
-    let diff = fit_diff(diff_summary, budget.saturating_sub(files_used));
-    let used = files_used + diff.tokens;
-    let mut task_md = render_head(task, budget, used, selected, explain);
-    task_md.push_str(&diff.text);
-    (task_md, diff)
 }
 
 /// Markdown of one `relevant-code/*.md` file.
@@ -381,17 +371,7 @@ fn base_slug(path: &str) -> String {
 /// than the longest consecutive run of backticks found in the content we
 /// guarantee the fence cannot be prematurely closed by content.
 pub(crate) fn safe_fence(content: &str) -> String {
-    let max_run = content
-        .chars()
-        .fold((0usize, 0usize), |(max, cur), ch| {
-            if ch == '`' {
-                let next = cur + 1;
-                (max.max(next), next)
-            } else {
-                (max, 0)
-            }
-        })
-        .0;
+    let max_run = longest_backtick_run(content);
     let len = max_run.max(2) + 1; // at least 3 backticks
     "`".repeat(len)
 }
