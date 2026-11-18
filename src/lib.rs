@@ -1538,6 +1538,62 @@ mod tests {
     }
 
     #[test]
+    fn extract_python_decorated_async_nested() {
+        let src = "# def commented():\n\
+x = \"def in_string(): pass\"\n\
+@deco\n\
+def decorated():\n\
+    def inner():\n\
+        pass\n\
+    class InnerCls:\n\
+        pass\n\
+\n\
+@deco2\n\
+class Decorated:\n\
+    async def am(self):\n\
+        pass\n\
+\n\
+async def top_async():\n\
+    pass\n";
+        let out = SymbolExtractor::extract(Path::new("a.py"), src, Language::Python).unwrap();
+        let got: Vec<(&str, SymbolKind, u32)> = out
+            .iter()
+            .map(|(n, k, l)| (n.as_str(), k.clone(), *l))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("decorated", SymbolKind::Function, 4),
+                ("inner", SymbolKind::Function, 5),
+                ("InnerCls", SymbolKind::Class, 7),
+                ("Decorated", SymbolKind::Class, 11),
+                ("am", SymbolKind::Function, 12),
+                ("top_async", SymbolKind::Function, 15),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_python_import_forms() {
+        let src = "import a.b as c\nfrom . import x\nfrom .. import y\nfrom a import (b,\n    c)\n\"\"\"\nimport in_doc\n\"\"\"\n# import in_comment\n";
+        let out = SymbolExtractor::extract(Path::new("a.py"), src, Language::Python).unwrap();
+        let got: Vec<(&str, u32)> = out
+            .iter()
+            .filter(|(_, k, _)| *k == SymbolKind::Import)
+            .map(|(n, _, l)| (n.as_str(), *l))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("import a.b as c", 1),
+                ("from . import x", 2),
+                ("from .. import y", 3),
+                ("from a import (b,\n    c)", 4),
+            ]
+        );
+    }
+
+    #[test]
     fn extract_go_symbols() {
         let src = "package main\n\nimport \"fmt\"\n\ntype Server struct{}\n\nfunc (s *Server) Run() {}\n\nfunc main() { fmt.Println() }\n";
         let out = SymbolExtractor::extract(Path::new("a.go"), src, Language::Go).unwrap();
