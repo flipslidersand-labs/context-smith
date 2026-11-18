@@ -171,7 +171,10 @@ fn populate_embeddings_inner(
     if stale_files.is_empty() {
         return Ok(0);
     }
-    let canonical_root = repo_root.canonicalize()?;
+    // Paths come from index.db, which may be untrusted (e.g. shipped in the
+    // repo): only tracked files may be read and sent out (#447, #395).
+    let git_repo = crate::GitRepo::new(repo_root)?;
+    let git_index = git_repo.open_index()?;
 
     let mut written = 0usize;
 
@@ -185,7 +188,7 @@ fn populate_embeddings_inner(
 
         for (id, rel, sha) in chunk {
             let abs_path = repo_root.join(rel);
-            let content = match crate::read_within_root(&canonical_root, &abs_path) {
+            let content = match git_repo.read_indexed(&git_index, std::path::Path::new(rel)) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
@@ -866,6 +869,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
         std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
+        track_all(dir.path());
         let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
         let r = populate_embeddings(db.connection(), dir.path(), &ShortEmbedder, &db);
         assert!(r.is_err(), "count mismatch must be an error");
@@ -878,6 +882,7 @@ mod tests {
     fn populate_embeddings_rolls_back_when_commit_fails() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        track_all(dir.path());
         let db = index_db_with_files(&[("a.rs", "sha-a")]);
         db.connection()
             .execute_batch(
@@ -899,6 +904,7 @@ mod tests {
     fn populate_embeddings_reports_lock_when_another_connection_writes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        track_all(dir.path());
         let dbdir = tempfile::tempdir().unwrap();
         let path = dbdir.path().join("idx.db");
         {
@@ -925,6 +931,42 @@ mod tests {
         drop(writer);
     }
 
+    /// `git init` `dir` and stage every file currently in it (no commit needed:
+    /// embedding only requires a stage-0 index entry).
+    fn track_all(dir: &std::path::Path) {
+        let repo = git2::Repository::init(dir).unwrap();
+        let mut idx = repo.index().unwrap();
+        idx.add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        idx.write().unwrap();
+    }
+
+    /// Records every text it is asked to embed.
+    struct RecordingEmbedder(std::sync::Mutex<Vec<String>>);
+    impl Embedder for RecordingEmbedder {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            self.0.lock().unwrap().extend(texts.iter().cloned());
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+        }
+    }
+
+    /// #447: a path listed in index.db but not tracked by git (e.g. `.env`) must
+    /// never be read and sent to the embedding service.
+    #[test]
+    fn populate_embeddings_skips_untracked_files_listed_in_db() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        track_all(dir.path());
+        std::fs::write(dir.path().join(".env"), "TOKEN=fake-secret-value").unwrap();
+        let db = index_db_with_files(&[("a.rs", "sha-a"), (".env", "sha-env")]);
+        let rec = RecordingEmbedder(Default::default());
+        let n = populate_embeddings(db.connection(), dir.path(), &rec, &db).unwrap();
+        assert_eq!(n, 1);
+        let sent = rec.0.lock().unwrap().join("\n");
+        assert!(sent.contains("fn a()"), "{sent}");
+        assert!(!sent.contains("fake-secret-value"), "{sent}");
+    }
+
     /// Build an in-memory [`crate::index_builder::IndexDb`] and populate it
     /// with `files` rows so `files_needing_embed` has something to return.
     fn index_db_with_files(file_rows: &[(&str, &str)]) -> crate::index_builder::IndexDb {
@@ -949,6 +991,7 @@ mod tests {
         let path_b = dir.path().join("b.rs");
         std::fs::write(&path_a, "fn a() {}").unwrap();
         std::fs::write(&path_b, "fn bb() {}").unwrap();
+        track_all(dir.path());
 
         let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
 
@@ -985,6 +1028,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
         std::fs::write(dir.path().join("b.rs"), "fn bb() {}").unwrap();
+        track_all(dir.path());
         let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
         (dir, db)
     }
@@ -1575,6 +1619,7 @@ mod tests {
     fn populate_embeddings_propagates_embedder_error_and_stores_nothing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        track_all(dir.path());
         let db = index_db_with_files(&[("a.rs", "sha-a")]);
         let r = populate_embeddings(db.connection(), dir.path(), &FailingEmbedder, &db);
         assert!(r.is_err());
@@ -1599,6 +1644,7 @@ mod tests {
         for n in &names {
             std::fs::write(dir.path().join(n), "fn f() {}").unwrap();
         }
+        track_all(dir.path());
         let rows: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "sha")).collect();
         let db = index_db_with_files(&rows);
         let embedder = FailOnSecondCall(std::sync::atomic::AtomicUsize::new(0));
