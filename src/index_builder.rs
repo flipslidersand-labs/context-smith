@@ -532,10 +532,15 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                     // Content is not UTF-8: drop stale symbol/body/dep/embedding
                     // rows (#286) but keep the files row and a path FTS row so
-                    // the file stays findable by name (#308). indexed_sha stays
-                    // unset so it is retried next run.
+                    // the file stays findable by name (#308). indexed_sha is
+                    // reset to NULL so a later restore to the same blob is
+                    // re-indexed instead of skipped (#448).
                     eprintln!("warn: unreadable content {:?}: {e}", abs_path);
                     db.delete_content_records(file_id)?;
+                    db.connection().execute(
+                        "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
+                        params![file_id],
+                    )?;
                     db.connection()
                         .execute("DELETE FROM fts_path WHERE rowid = ?1", params![file_id])?;
                     db.connection().execute(
@@ -1658,6 +1663,33 @@ mod tests {
         );
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM files WHERE path='ok.rs'"),
+            1
+        );
+    }
+
+    #[test]
+    fn build_index_reindexes_file_restored_from_non_utf8() {
+        let (tmp, repo) = repo_with(&[("a.rs", "pub fn restored_marker() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        std::fs::write(tmp.path().join("a.rs"), [0xff, 0xfe, 0xfd, b'\n']).unwrap();
+        commit_existing(tmp.path(), &["a.rs"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name='restored_marker'"
+            ),
+            0
+        );
+        std::fs::write(tmp.path().join("a.rs"), "pub fn restored_marker() {}\n").unwrap();
+        commit_existing(tmp.path(), &["a.rs"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name='restored_marker'"
+            ),
             1
         );
     }

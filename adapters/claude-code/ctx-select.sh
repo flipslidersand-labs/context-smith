@@ -16,8 +16,8 @@ die() { echo "ctx-select: $2" >&2; exit "$1"; }
 
 while [ $# -gt 0 ]; do
   case $1 in
-    --budget) budget=${2:?--budget needs a number}; shift 2 ;;
-    --top) top=${2:?--top needs a number}; shift 2 ;;
+    --budget) [ $# -ge 2 ] || die 2 "--budget needs a number"; budget=$2; shift 2 ;;
+    --top) [ $# -ge 2 ] || die 2 "--top needs a number"; top=$2; shift 2 ;;
     -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; break ;;
     *) break ;;
