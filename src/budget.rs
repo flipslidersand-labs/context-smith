@@ -4,8 +4,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Candidate {
-    // Internal row id; not part of the public API (no reader inside the crate yet).
-    #[allow(dead_code)]
     pub(crate) file_id: i64,
     pub path: PathBuf,
     pub score: f32,
