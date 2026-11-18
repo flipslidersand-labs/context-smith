@@ -29,15 +29,46 @@ pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
     })
 }
 
-/// True if any error in the chain is SQLITE_READONLY (any extended code).
+/// True if any error in the chain is SQLITE_READONLY (any extended code), or
+/// SQLITE_CANTOPEN (some SQLite builds report that when -shm/-wal cannot be
+/// created in a read-only directory). Callers must rule out a missing file.
 fn is_readonly_error(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
         matches!(
             e.downcast_ref::<rusqlite::Error>(),
             Some(rusqlite::Error::SqliteFailure(f, _))
-                if f.code == rusqlite::ErrorCode::ReadOnly
+                if matches!(
+                    f.code,
+                    rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen
+                )
         )
     })
+}
+
+/// Percent-escape bytes for a SQLite `file:` URI path (keeps `/ . - _` and alphanumerics).
+fn escape_uri_bytes(bytes: &[u8]) -> String {
+    let mut uri = String::new();
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_') {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+/// Build the `file:...?immutable=1` URI for `path`. `None` if the path cannot
+/// be represented (non-UTF-8 on non-Unix).
+fn immutable_uri(path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    let escaped = {
+        use std::os::unix::ffi::OsStrExt;
+        escape_uri_bytes(path.as_os_str().as_bytes())
+    };
+    #[cfg(not(unix))]
+    let escaped = escape_uri_bytes(path.to_str()?.as_bytes());
+    Some(format!("file:{escaped}?immutable=1"))
 }
 
 #[non_exhaustive]
@@ -73,7 +104,11 @@ impl IndexDb {
             // A WAL-mode DB in a read-only directory needs -shm/-wal that cannot
             // be created (SQLITE_READONLY). Nobody can be writing through this
             // directory, so fall back to an immutable (no-locking) read.
-            Err(e) if is_readonly_error(&e) => Self::open_read_only(path, true).or(Err(e)),
+            // A missing file also yields CANTOPEN; retrying immutable would be
+            // pointless, so only retry when the file exists.
+            Err(e) if is_readonly_error(&e) && path.exists() => {
+                Self::open_read_only(path, true).or(Err(e))
+            }
             Err(e) => Err(e),
         }
     }
@@ -82,17 +117,13 @@ impl IndexDb {
         use rusqlite::OpenFlags;
         let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn = if immutable {
-            use std::os::unix::ffi::OsStrExt;
-            let mut uri = String::from("file:");
-            for &b in path.as_os_str().as_bytes() {
-                if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_') {
-                    uri.push(b as char);
-                } else {
-                    uri.push_str(&format!("%{b:02X}"));
+            match immutable_uri(path) {
+                Some(uri) => {
+                    flags |= OpenFlags::SQLITE_OPEN_URI;
+                    Connection::open_with_flags(uri, flags)
                 }
+                None => Err(rusqlite::Error::InvalidPath(path.to_path_buf())),
             }
-            flags |= OpenFlags::SQLITE_OPEN_URI;
-            Connection::open_with_flags(format!("{uri}?immutable=1"), flags)
         } else {
             Connection::open_with_flags(path, flags)
         }
@@ -106,7 +137,14 @@ impl IndexDb {
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
             r.get::<_, i64>(0)
         })
-        .with_context(|| format!("Failed to read SQLite schema at {:?}", path))?;
+        .map_err(|e| {
+            let e = anyhow::Error::new(e);
+            if is_lock_error(&e) {
+                anyhow::anyhow!(locked_message(path, &format!("{e:#}")))
+            } else {
+                e.context(format!("Failed to read SQLite schema at {:?}", path))
+            }
+        })?;
         Ok(IndexDb { conn })
     }
 
@@ -1044,8 +1082,57 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// True if chmod restrictions are not enforced (e.g. uid 0): a file can be
+    /// created inside a 0555 directory.
+    fn permissions_not_enforced() -> bool {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("probe");
+        std::fs::create_dir(&dir).unwrap();
+        chmod(&dir, 0o555);
+        let writable = std::fs::write(dir.join("x"), b"x").is_ok();
+        chmod(&dir, 0o755);
+        writable
+    }
+
+    fn skip_if_perms_not_enforced() -> bool {
+        let skip = permissions_not_enforced();
+        if skip {
+            eprintln!("skipping: file permissions are not enforced (running as root?)");
+        }
+        skip
+    }
+
+    #[test]
+    fn immutable_uri_escapes_special_chars() {
+        let uri = immutable_uri(Path::new("/tmp/a b/i#d?x%.db")).unwrap();
+        assert_eq!(uri, "file:/tmp/a%20b/i%23d%3Fx%25.db?immutable=1");
+    }
+
+    #[test]
+    fn open_for_read_reports_lock_not_raw_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("idx.db");
+        // rollback-journal DB; EXCLUSIVE blocks readers.
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE t(a); BEGIN EXCLUSIVE; INSERT INTO t VALUES (1);")
+            .unwrap();
+        let err = IndexDb::open_for_read(&path).err().expect("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("locked by another process"), "{msg}");
+        drop(c);
+    }
+
+    #[test]
+    fn open_for_read_missing_file_errors() {
+        let tmp = TempDir::new().unwrap();
+        assert!(IndexDb::open_for_read(&tmp.path().join("nope.db")).is_err());
+    }
+
     #[test]
     fn open_for_read_works_on_read_only_file() {
+        if skip_if_perms_not_enforced() {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("idx.db");
         build_wal_index(&path);
@@ -1055,6 +1142,9 @@ mod tests {
 
     #[test]
     fn open_for_read_works_on_read_only_dir_and_file() {
+        if skip_if_perms_not_enforced() {
+            return;
+        }
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("ro");
         std::fs::create_dir(&dir).unwrap();
