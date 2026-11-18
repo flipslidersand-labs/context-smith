@@ -1075,6 +1075,7 @@ mod tests {
         build_index(&repo, &db, false).unwrap();
     }
 
+    #[cfg(unix)]
     fn query_marker(path: &Path) -> anyhow::Result<usize> {
         let (_tmp, repo) = repo_with(&[("a.rs", "pub fn readonly_marker() {}\n")]);
         let db = IndexDb::open_for_read(path)?;
@@ -1082,6 +1083,7 @@ mod tests {
         Ok(crate::select_candidates(&repo, &db, "readonly_marker", &opts)?.len())
     }
 
+    #[cfg(unix)]
     fn chmod(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -1089,6 +1091,7 @@ mod tests {
 
     /// True if chmod restrictions are not enforced (e.g. uid 0): a file can be
     /// created inside a 0555 directory.
+    #[cfg(unix)]
     fn permissions_not_enforced() -> bool {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("probe");
@@ -1099,12 +1102,40 @@ mod tests {
         writable
     }
 
+    #[cfg(unix)]
     fn skip_if_perms_not_enforced() -> bool {
         let skip = permissions_not_enforced();
         if skip {
             eprintln!("skipping: file permissions are not enforced (running as root?)");
         }
         skip
+    }
+
+    #[test]
+    fn is_readonly_error_matches_readonly_and_cantopen_only() {
+        let mk = |code| {
+            anyhow::Error::new(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        assert!(is_readonly_error(&mk(rusqlite::ffi::SQLITE_READONLY)));
+        assert!(is_readonly_error(&mk(
+            rusqlite::ffi::SQLITE_READONLY_DBMOVED
+        )));
+        assert!(is_readonly_error(&mk(rusqlite::ffi::SQLITE_CANTOPEN)));
+        assert!(!is_readonly_error(&mk(rusqlite::ffi::SQLITE_BUSY)));
+        // found through the context chain too
+        let wrapped = mk(rusqlite::ffi::SQLITE_CANTOPEN).context("open failed");
+        assert!(is_readonly_error(&wrapped));
+        assert!(!is_readonly_error(&anyhow::anyhow!("other")));
+    }
+
+    #[test]
+    fn escape_uri_bytes_windows_path_rule() {
+        // Non-Unix builds feed the path bytes through this; pin the rule here
+        // since the Windows branch cannot run in Linux CI.
+        assert_eq!(escape_uri_bytes(br"C:\a b\x.db"), "C%3A%5Ca%20b%5Cx.db");
     }
 
     #[test]
@@ -1133,6 +1164,7 @@ mod tests {
         assert!(IndexDb::open_for_read(&tmp.path().join("nope.db")).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_for_read_works_on_read_only_file() {
         if skip_if_perms_not_enforced() {
@@ -1145,6 +1177,7 @@ mod tests {
         assert_eq!(query_marker(&path).unwrap(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_for_read_works_on_read_only_dir_and_file() {
         if skip_if_perms_not_enforced() {
