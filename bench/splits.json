@@ -1,0 +1,4 @@
+{
+  "tuning": ["axum", "clap", "bat", "scrapy", "poetry"],
+  "eval": ["ripgrep", "fd", "hono", "zod"]
+}

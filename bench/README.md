@@ -73,6 +73,29 @@ Where the Python gap comes from, from a one-off measurement made before #162 (th
 
 Speed on these repositories (about 390-510 indexed files): index 0.9-1.6 s median (2.1 s max), query 0.04-0.07 s.
 
+## F1 and budget coverage, tuning/eval split ([#292](https://github.com/flipslidersand-labs/context-smith/issues/292))
+
+Recall alone does not show how well the budget is used: a bundle that lists every file scores high recall at a large budget. `bench.py` now prints a second line per budget, `budget=B (new): ...`, with two more metrics (recall and cost lines are unchanged). Both are pure functions in `bench/metrics.py`, tested with `cd bench && python3 -m unittest test_metrics` (no clone needed).
+
+| metric | definition |
+|---|---|
+| `f1` | file F1 = harmonic mean of precision and recall of the returned file set against the gold files, averaged over tasks. For `cs` the set is the one left after the `METRIC` filter. Penalises padding the bundle with non-gold files. |
+| `cov` | budget coverage = share of the gold files' tokens that are inside the bundle (a half-truncated gold file counts half), averaged over tasks. For `cs` it uses the per-file tokens the bundle reports; `kw`/`rnd` include whole files. |
+
+### Tuning / eval split
+
+`bench/splits.json` marks which candidate repositories were used while choosing parameters (`tuning`: axum, clap, bat, scrapy, poetry, as stated in the Status section) and which were not (`eval`: ripgrep, fd, hono, zod). Rule: report both groups separately, and judge a change by the `eval` group only; a repository that is used to choose a parameter moves to `tuning` in the same PR. This does not add repositories. Still open: the `eval` group is only four repositories and some have been looked at in analysis; fresh repositories (or a public dataset such as LocBench, availability not checked: needs network access) would be a cleaner held-out set.
+
+### Recomputing #166 and #174 with the new metrics: NOT RUN
+
+The recomputation needs the nine clones and a release build, and about 2 minutes per repository, so it was not run in this PR and no table of new numbers is given here (the #166 / #174 result tables are not reproduced, to avoid inventing values). To produce it, per issue: check out the master commit of that result, `cargo build --release`, then for each repository
+
+```bash
+REPO=/tmp/bench/<name> TASKMODE=title python3 bench/bench.py | tee out-<name>.txt   # read the "(new)" lines
+```
+
+and put `f1` / `cov` for `cs` and `kw` at 4k / 8k / 16k into a table here, grouped by `splits.json`.
+
 ## Targets and current status ([#147](https://github.com/flipslidersand-labs/context-smith/issues/147))
 
 Provisional targets, in terms of the `strict`, title-only recall above. Review date: 2026-11-15. A PR that changes accuracy updates the table below.
