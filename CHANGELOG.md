@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `recent_diff` (the bundle's diff) now includes only files still tracked in git with a known language, so a commit that deletes a secret no longer puts the removed lines into the bundle; `embed_index` now reads file bodies only for git-tracked paths, so an untracked `.env` listed in a shipped `index.db` is never sent to the embedding service (#447).
+- `ctx-select.sh` now exits 2 (usage error) when `--budget` or `--top` is given without a value, matching the documented exit codes; it used to exit 1 (#451).
 - Go grouped `type ( ... )` declarations now record each spec's own line (and include `X = Y` aliases) instead of the `type (` line; `EXTRACT_VERSION` is now 6, so existing indexes are rebuilt (#436).
 - `index` time no longer grows with the square of the file count: `symbols(file_id)` and `deps(to_file)` are now indexed and FTS rows are deleted by rowid; `EXTRACT_VERSION` is now 7, so existing indexes are rebuilt (#283).
 - `select` now rejects `seed_count = 0` with an error instead of reporting no matches, and clamps huge `seed_count`/`top_n` values (max 1000) so BM25 limits no longer overflow (#443).
