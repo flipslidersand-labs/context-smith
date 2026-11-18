@@ -178,7 +178,7 @@ fn render_head(
 
 /// Markdown of one `relevant-code/*.md` file.
 fn render_file_md(c: &Candidate) -> String {
-    let ext = c.path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+    let ext = fence_info(&c.path);
     let fence = safe_fence(&c.content);
     let mut file_md = format!(
         "<!-- {} -->\n{fence}{ext}\n{}\n{fence}\n",
@@ -189,6 +189,24 @@ fn render_file_md(c: &Candidate) -> String {
         file_md.push_str(&format!("\n{note}\n"));
     }
     file_md
+}
+
+/// The fence info string for a file: its extension limited to `[A-Za-z0-9_+#-]`. A tracked file
+/// name may contain a backtick (which would end a backtick fence's info string) or a newline,
+/// so anything else is dropped; an empty result falls back to `txt`.
+fn fence_info(path: &std::path::Path) -> String {
+    let ext: String = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '#' | '-'))
+        .collect();
+    if ext.is_empty() {
+        "txt".to_string()
+    } else {
+        ext
+    }
 }
 
 /// Shrink `selected` so its file bodies total at most `eff` tokens, keeping the
@@ -535,6 +553,17 @@ mod tests {
             truncated: false,
             original_tokens: 0,
         }
+    }
+
+    #[test]
+    fn fence_info_keeps_plain_extensions_and_drops_unsafe_characters() {
+        use std::path::Path;
+        assert_eq!(fence_info(Path::new("a/b.rs")), "rs");
+        assert_eq!(fence_info(Path::new("a/b.c++")), "c++");
+        assert_eq!(fence_info(Path::new("a/b.r`s")), "rs");
+        assert_eq!(fence_info(Path::new("a/b.r\ns")), "rs");
+        assert_eq!(fence_info(Path::new("a/b.`")), "txt");
+        assert_eq!(fence_info(Path::new("Makefile")), "txt");
     }
 
     #[test]
