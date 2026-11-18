@@ -315,11 +315,15 @@ fn normalize_path(path: &Path) -> Option<PathBuf> {
 
 /// Expand grouped Rust use paths: "crate::{a, b}" → ["crate::a", "crate::b"]
 fn expand_rust_use(s: &str) -> Vec<String> {
+    if s.contains("//") || s.contains("/*") {
+        return expand_rust_use(&strip_rust_comments(s));
+    }
     if let Some(brace) = s.find('{') {
         let prefix = &s[..brace];
         let inner_end = s.rfind('}').unwrap_or(s.len());
         let inner = &s[brace + 1..inner_end];
         split_brace_aware(inner)
+            .filter(|part| !part.trim().is_empty())
             .flat_map(|part| expand_rust_use(&format!("{}{}", prefix, part.trim())))
             .collect()
     } else {
@@ -327,6 +331,27 @@ fn expand_rust_use(s: &str) -> Vec<String> {
         let clean = clean.trim_end_matches("::*");
         vec![clean.to_string()]
     }
+}
+
+/// Remove `// ...` line comments and `/* ... */` block comments from a use path.
+fn strip_rust_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('/') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if tail.starts_with("//") {
+            rest = tail.find('\n').map_or("", |n| &tail[n..]);
+        } else if let Some(body) = tail.strip_prefix("/*") {
+            rest = body.find("*/").map_or("", |n| &body[n + 2..]);
+            out.push(' ');
+        } else {
+            out.push('/');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Split `s` on ',' but ignore commas inside nested `{...}`.
@@ -1278,6 +1303,18 @@ mod tests {
         );
         assert_eq!(normalize_path(Path::new("../x")), None);
         assert_eq!(normalize_path(Path::new("a/../../b")), None);
+    }
+
+    #[test]
+    fn expand_rust_use_ignores_comments_in_groups() {
+        assert_eq!(
+            expand_rust_use("crate::{\n a, // note\n b,\n}"),
+            vec!["crate::a", "crate::b"]
+        );
+        assert_eq!(
+            expand_rust_use("crate::{a, /* x, y */ b}"),
+            vec!["crate::a", "crate::b"]
+        );
     }
 
     #[test]
