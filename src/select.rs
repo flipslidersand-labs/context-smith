@@ -124,7 +124,13 @@ pub fn select_candidates(
         // is restricted to this set so we read at most len(scored) rows.
         let scored_ids: Vec<i64> = scored
             .iter()
-            .filter_map(|(&id, &s)| if s > 0.0 { Some(id) } else { None })
+            .filter_map(|(&id, &s)| {
+                if s.is_finite() && s > 0.0 {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for file_id in scored_ids {
