@@ -29,6 +29,17 @@ pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
     })
 }
 
+/// True if any error in the chain is SQLITE_READONLY (any extended code).
+fn is_readonly_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        matches!(
+            e.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _))
+                if f.code == rusqlite::ErrorCode::ReadOnly
+        )
+    })
+}
+
 #[non_exhaustive]
 pub struct IndexDb {
     conn: Connection,
@@ -50,10 +61,59 @@ pub(crate) fn truncate_fts_body(content: &str) -> &str {
 }
 
 impl IndexDb {
-    /// Open for read-only use (query/build). Skips the integrity check, which
-    /// can misreport corruption while another process holds a write
-    /// transaction. Use [`IndexDb::open`] before writing.
+    /// Open for read-only use (query/select). Uses `SQLITE_OPEN_READ_ONLY` and
+    /// does not run `journal_mode`/`synchronous` PRAGMAs, so an index shipped
+    /// on a read-only file or directory can still be searched. Skips the
+    /// integrity check, which can misreport corruption while another process
+    /// holds a write transaction. Writes through this handle fail; use
+    /// [`IndexDb::open`] before writing.
     pub fn open_for_read(path: &Path) -> Result<Self> {
+        match Self::open_read_only(path, false) {
+            Ok(db) => Ok(db),
+            // A WAL-mode DB in a read-only directory needs -shm/-wal that cannot
+            // be created (SQLITE_READONLY). Nobody can be writing through this
+            // directory, so fall back to an immutable (no-locking) read.
+            Err(e) if is_readonly_error(&e) => Self::open_read_only(path, true).or(Err(e)),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn open_read_only(path: &Path, immutable: bool) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = if immutable {
+            use std::os::unix::ffi::OsStrExt;
+            let mut uri = String::from("file:");
+            for &b in path.as_os_str().as_bytes() {
+                if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_') {
+                    uri.push(b as char);
+                } else {
+                    uri.push_str(&format!("%{b:02X}"));
+                }
+            }
+            flags |= OpenFlags::SQLITE_OPEN_URI;
+            Connection::open_with_flags(format!("{uri}?immutable=1"), flags)
+        } else {
+            Connection::open_with_flags(path, flags)
+        }
+        .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             PRAGMA busy_timeout=5000;",
+        )
+        .with_context(|| "Failed to apply SQLite PRAGMAs")?;
+        // Opening read-only is lazy; touch the schema so a non-SQLite file fails here.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .with_context(|| format!("Failed to read SQLite schema at {:?}", path))?;
+        Ok(IndexDb { conn })
+    }
+
+    /// Read-write open without the integrity check; tests only (to exercise
+    /// lock handling while another connection holds a write transaction).
+    #[cfg(test)]
+    pub(crate) fn open_unchecked_for_test(path: &Path) -> Result<Self> {
         Self::open_inner(path, false)
     }
 
@@ -963,6 +1023,59 @@ mod tests {
         assert!(mem_db().files_needing_embed().unwrap().is_empty());
     }
 
+    // ---- read-only open ----
+
+    /// Build a WAL index for `a.rs` at `path`, then drop the connection.
+    fn build_wal_index(path: &Path) {
+        let (_tmp, repo) = repo_with(&[("a.rs", "pub fn readonly_marker() {}\n")]);
+        let db = IndexDb::open(path).unwrap();
+        build_index(&repo, &db, false).unwrap();
+    }
+
+    fn query_marker(path: &Path) -> anyhow::Result<usize> {
+        let (_tmp, repo) = repo_with(&[("a.rs", "pub fn readonly_marker() {}\n")]);
+        let db = IndexDb::open_for_read(path)?;
+        let opts = crate::SelectOptions::new(10_000);
+        Ok(crate::select_candidates(&repo, &db, "readonly_marker", &opts)?.len())
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn open_for_read_works_on_read_only_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("idx.db");
+        build_wal_index(&path);
+        chmod(&path, 0o444);
+        assert_eq!(query_marker(&path).unwrap(), 1);
+    }
+
+    #[test]
+    fn open_for_read_works_on_read_only_dir_and_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("ro");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("idx.db");
+        build_wal_index(&path);
+        chmod(&path, 0o444);
+        chmod(&dir, 0o555);
+        let res = query_marker(&path);
+        chmod(&dir, 0o755); // let TempDir clean up
+        assert_eq!(res.unwrap(), 1);
+    }
+
+    #[test]
+    fn open_for_read_rejects_writes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("idx.db");
+        build_wal_index(&path);
+        let db = IndexDb::open_for_read(&path).unwrap();
+        assert!(db.upsert_meta("k", "v").is_err());
+    }
+
     // ---- build_index ----
 
     fn repo_with(files: &[(&str, &str)]) -> (TempDir, GitRepo) {
@@ -1202,7 +1315,7 @@ mod tests {
         let path = dbdir.path().join("idx.db");
         seeded_db(&path);
         let _writer = hold_write_txn(&path);
-        let db = IndexDb::open_for_read(&path).unwrap();
+        let db = IndexDb::open_unchecked_for_test(&path).unwrap();
         db.connection()
             .busy_timeout(std::time::Duration::from_millis(50))
             .unwrap();
@@ -1220,7 +1333,7 @@ mod tests {
         let path = dbdir.path().join("idx.db");
         seeded_db(&path);
         let _writer = hold_write_txn(&path);
-        let db = IndexDb::open_for_read(&path).unwrap();
+        let db = IndexDb::open_unchecked_for_test(&path).unwrap();
         db.connection()
             .busy_timeout(std::time::Duration::from_millis(50))
             .unwrap();

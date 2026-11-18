@@ -919,7 +919,7 @@ mod tests {
         }
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let db = crate::index_builder::IndexDb::open_for_read(&path).unwrap();
+        let db = crate::index_builder::IndexDb::open_unchecked_for_test(&path).unwrap();
         db.connection()
             .busy_timeout(std::time::Duration::from_millis(50))
             .unwrap();
