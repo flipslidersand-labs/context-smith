@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 
 ### Fixed
+- `recent_diff` (the bundle's diff) now includes only files still tracked in git with a known language, so a commit that deletes a secret no longer puts the removed lines into the bundle; `embed_index` now reads file bodies only for git-tracked paths, so an untracked `.env` listed in a shipped `index.db` is never sent to the embedding service (#447).
 - Restoring a file that had become non-UTF-8 now re-indexes its symbols, FTS body and deps instead of leaving them empty until `--force` (#448).
 - Rust grouped `use` with `//` or `/* */` comments no longer drops the item after the comment from the dependency graph (#448).
 - `ctx-select.sh` now exits 2 (usage error) when `--budget` or `--top` is given without a value, matching the documented exit codes; it used to exit 1 (#451).

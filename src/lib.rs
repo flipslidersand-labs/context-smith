@@ -290,10 +290,33 @@ impl GitRepo {
         }
         let diff = repo.diff_tree_to_tree(anc_tree_opt.as_ref(), Some(&head_tree), None)?;
 
+        // Only files still tracked in the index with a known language are
+        // shown. A deleted file (e.g. a removed `.env`) is not in the index, so
+        // its `-` lines cannot leak a secret into the bundle (#447).
+        let index = repo.index()?;
+        let mut cached: Option<(Vec<u8>, bool)> = None;
         let mut patch = String::new();
         let mut truncated = false;
-        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
             if truncated {
+                return true;
+            }
+            let allowed = match delta.new_file().path() {
+                Some(path) if delta.status() != git2::Delta::Deleted => {
+                    let key = path.as_os_str().as_encoded_bytes();
+                    match &cached {
+                        Some((k, ok)) if k == key => *ok,
+                        _ => {
+                            let ok = Language::from_path(path) != Language::Unknown
+                                && index.get_path(path, 0).is_some();
+                            cached = Some((key.to_vec(), ok));
+                            ok
+                        }
+                    }
+                }
+                _ => false,
+            };
+            if !allowed {
                 return true;
             }
             // Invalid UTF-8 bytes become U+FFFD instead of dropping the line.
@@ -1106,17 +1129,46 @@ mod tests {
     // recent_diff re-adds it from line.origin().
     fn recent_diff_root_commit_shows_initial_files() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
         assert!(diff.contains("\n+first\n"), "{diff}");
     }
 
+    /// #447: a commit that deletes a secret must not leak its `-` lines, and
+    /// files of unknown language are left out of the diff.
+    #[test]
+    fn recent_diff_omits_deleted_files_and_unknown_language() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(
+            tmp.path(),
+            &[
+                ("keep.rs", "fn a() {}\n"),
+                ("secret.rs", "const K: &str = \"fake-removed-secret\";\n"),
+            ],
+            &[],
+        );
+        commit_files(
+            tmp.path(),
+            &[
+                ("notes.txt", "fake-unknown-lang\n"),
+                ("keep.rs", "fn b() {}\n"),
+            ],
+            &["secret.rs"],
+        );
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let diff = repo.recent_diff(1).unwrap();
+        assert!(diff.contains("+fn b() {}"), "{diff}");
+        assert!(!diff.contains("fake-removed-secret"), "{diff}");
+        assert!(!diff.contains("secret.rs"), "{diff}");
+        assert!(!diff.contains("fake-unknown-lang"), "{diff}");
+    }
+
     #[test]
     fn recent_diff_prefixes_added_removed_and_context_lines() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "keep\nold\ntail\n")], &[]);
-        commit_files(tmp.path(), &[("a.txt", "keep\nnew\ntail\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "keep\nold\ntail\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "keep\nnew\ntail\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
         assert!(diff.contains("\n-old\n"), "{diff}");
@@ -1131,8 +1183,8 @@ mod tests {
     #[test]
     fn recent_diff_keeps_no_newline_marker_unprefixed() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "old")], &[]);
-        commit_files(tmp.path(), &[("a.txt", "new")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "old")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "new")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
         assert!(
@@ -1155,7 +1207,7 @@ mod tests {
         for pad in ["", "y", "yy"] {
             let tmp = TempDir::new().unwrap();
             let big = format!("{pad}\n{}", "x\n".repeat(300_000));
-            commit_files(tmp.path(), &[("n", big.as_str())], &[]);
+            commit_files(tmp.path(), &[("n.rs", big.as_str())], &[]);
             let repo = GitRepo::new(tmp.path()).unwrap();
             let diff = repo.recent_diff(1).unwrap();
             let body = diff.strip_suffix("\n[diff truncated]\n").expect("marker");
@@ -1166,9 +1218,9 @@ mod tests {
     #[test]
     fn recent_diff_covers_last_n_commits_only() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
-        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
-        commit_files(tmp.path(), &[("c.txt", "three\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.rs", "two\n")], &[]);
+        commit_files(tmp.path(), &[("c.rs", "three\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
         assert!(diff.contains("three"));
@@ -1181,8 +1233,8 @@ mod tests {
     #[test]
     fn recent_diff_n_larger_than_history_clamps_to_root() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
-        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.rs", "two\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(100).unwrap();
         assert!(diff.contains("two"), "{diff}");
@@ -1192,9 +1244,9 @@ mod tests {
     #[test]
     fn recent_diff_n_larger_than_three_commit_history_includes_root_files() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
-        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
-        commit_files(tmp.path(), &[("c.txt", "three\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.rs", "two\n")], &[]);
+        commit_files(tmp.path(), &[("c.rs", "three\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(5).unwrap();
         assert!(
@@ -1212,7 +1264,7 @@ mod tests {
     #[test]
     fn recent_diff_single_commit_with_large_n_shows_files() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert!(repo.recent_diff(5).unwrap().contains("+first"));
     }
@@ -1220,8 +1272,8 @@ mod tests {
     #[test]
     fn recent_diff_zero_commits_is_empty() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "one\n")], &[]);
-        commit_files(tmp.path(), &[("b.txt", "two\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "one\n")], &[]);
+        commit_files(tmp.path(), &[("b.rs", "two\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert_eq!(repo.recent_diff(0).unwrap(), "");
     }
@@ -1229,7 +1281,7 @@ mod tests {
     #[test]
     fn recent_diff_zero_commits_is_empty_for_root_only_history() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "first\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert_eq!(repo.recent_diff(0).unwrap(), "");
     }
@@ -1246,7 +1298,7 @@ mod tests {
     fn recent_diff_truncates_large_patch_with_marker() {
         let tmp = TempDir::new().unwrap();
         let big = "0123456789abcdef\n".repeat(40_000); // ~680 KB > 512 KiB cap
-        commit_files(tmp.path(), &[("big.txt", big.as_str())], &[]);
+        commit_files(tmp.path(), &[("big.rs", big.as_str())], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         let diff = repo.recent_diff(1).unwrap();
         assert!(diff.ends_with("[diff truncated]\n"));
@@ -1258,9 +1310,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo_git = git2::Repository::init(tmp.path()).unwrap();
         // No NUL byte, so git treats the file as text; line 2 is invalid UTF-8.
-        std::fs::write(tmp.path().join("m.txt"), b"good1\nbad\xff\xfe\ngood2\n").unwrap();
+        std::fs::write(tmp.path().join("m.rs"), b"good1\nbad\xff\xfe\ngood2\n").unwrap();
         let mut index = repo_git.index().unwrap();
-        index.add_path(Path::new("m.txt")).unwrap();
+        index.add_path(Path::new("m.rs")).unwrap();
         index.write().unwrap();
         let tree = repo_git.find_tree(index.write_tree().unwrap()).unwrap();
         let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
@@ -1279,7 +1331,7 @@ mod tests {
     #[test]
     fn recent_diff_under_cap_has_no_truncation_marker() {
         let tmp = TempDir::new().unwrap();
-        commit_files(tmp.path(), &[("a.txt", "small\n")], &[]);
+        commit_files(tmp.path(), &[("a.rs", "small\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert!(!repo.recent_diff(1).unwrap().contains("[diff truncated]"));
     }
