@@ -10,6 +10,10 @@ Methods = cs  : `contextsmith query` at the given token budget
                 (words = [a-z_][a-z0-9_]{2,}, lowercased) + 3 x the number of those words in its path;
                 take files in score order and skip any that no longer fit the budget. Untuned.
           rnd : random files that fit the budget (seed 0)
+New metrics (pure functions in metrics.py, tests: python3 -m unittest test_metrics, run from bench/):
+          f1  : file F1 of the returned file set vs gold (cs: after the strict/lenient filter)
+          cov : share of gold tokens inside the bundle (cs: tokens reported per file, unfiltered; kw/rnd: whole files)
+          recall (above) is unchanged.
 Cost    = bytes/4 estimated tokens for every method, so all are charged the same way.
 
 Two metrics for `cs` (kw/rnd only ever include whole files, so they are unaffected):
@@ -19,6 +23,9 @@ Two metrics for `cs` (kw/rnd only ever include whole files, so they are unaffect
           This inflates cs against kw, which can only include files whole.
 """
 import json, os, random, re, shutil, sqlite3, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from metrics import budget_coverage, file_prf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ["REPO"]  # a dedicated clone: this script runs `git checkout -f` and writes .contextsmith/ in it
@@ -44,6 +51,8 @@ if not MODE.endswith("title") and not all("body" in c for c in cands):
     sys.exit("this candidate file has no issue bodies: use TASKMODE=title, or refetch with fetch_cands.py --with-body")
 res = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
 cost = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
+f1s = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}  # file F1: returned set vs gold
+cov = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}  # share of gold tokens inside the bundle
 errs, skipped, t0, corpus = 0, 0, time.time(), []
 
 for c in cands:
@@ -88,13 +97,15 @@ for c in cands:
     for b in BUDGETS:
         q = run(CS, "query", "--repo", REPO, "--task", task, "--format", "json", "--budget", str(b), *(["--top", os.environ["CSTOP"]] if os.environ.get("CSTOP") else []))
         try:
-            _fs = json.loads(q.stdout)["files"]
+            _fs = _all = json.loads(q.stdout)["files"]
             if METRIC == "strict":  # a file counts only if >=50% of its content is included
                 _fs = [f for f in _fs if f["tokens"] >= 0.5 * est(files.get(f["path"], 0))]
             sel = [f["path"] for f in _fs]
+            cs_tok = {f["path"]: f["tokens"] for f in _all}
         except Exception:
             errs += 1
             sel = []
+            cs_tok = {}
         picks = {"cs": sel}
         for m, order in (("kw", sorted(files, key=lambda p: -score[p])), ("rnd", random.sample(sorted(files), len(files)))):
             acc, pk = 0, []
@@ -106,6 +117,9 @@ for c in cands:
         for m, pk in picks.items():
             res[b][m].append(len(gt & set(pk)) / len(gt))
             cost[b][m].append(sum(est(files[p]) for p in pk if p in files))
+            f1s[b][m].append(file_prf(pk, gt)[2])
+            inc = cs_tok if m == "cs" else {p: est(files[p]) for p in pk}  # kw/rnd include whole files
+            cov[b][m].append(budget_coverage(inc, {g: est(files[g]) for g in gt}))
 
 n = len(res[BUDGETS[0]]["cs"])
 print(f"repo={os.path.basename(os.path.normpath(REPO))} task={MODE} metric={METRIC}")
@@ -114,3 +128,5 @@ print(f"searchable corpus (avg est tokens): {sum(corpus)//max(1,len(corpus))}")
 for b in BUDGETS:
     row = " | ".join(f"{m}: recall={sum(res[b][m])/n:.2f} cost={sum(cost[b][m])//n}" for m in ("cs", "kw", "rnd"))
     print(f"budget={b}: {row}")
+    row = " | ".join(f"{m}: f1={sum(f1s[b][m])/n:.2f} cov={sum(cov[b][m])/n:.2f}" for m in ("cs", "kw", "rnd"))
+    print(f"budget={b} (new): {row}")
