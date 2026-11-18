@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
 - `SelectOptions` gains `seed_count` (default 20) and `bfs_depth` (default 2), replacing hard-coded values in the select pipeline; default behavior is unchanged (#401).
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
