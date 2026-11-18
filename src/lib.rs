@@ -1052,6 +1052,53 @@ mod tests {
         assert!(repo.scan().is_err());
     }
 
+    #[test]
+    fn scan_ignores_gitlink_entries() {
+        let tmp = TempDir::new().unwrap();
+        commit_files(tmp.path(), &[("a.rs", "fn a() {}\n")], &[]);
+        // Add a gitlink (submodule, mode 160000) pointing at an arbitrary oid.
+        let git = git2::Repository::open(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        let entry = git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o160000,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: git2::Oid::from_str("1234567890123456789012345678901234567890").unwrap(),
+            flags: 0,
+            flags_extended: 0,
+            path: b"sub".to_vec(),
+        };
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        assert!(
+            tree.iter().any(|e| e.name_bytes() == b"sub"),
+            "gitlink must be in HEAD tree"
+        );
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "add gitlink", &tree, &[&parent])
+            .unwrap();
+
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let names: Vec<String> = repo
+            .scan()
+            .unwrap()
+            .into_iter()
+            .map(|(p, ..)| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.rs".to_string()]);
+
+        let db = crate::index_builder::IndexDb::open_in_memory().unwrap();
+        let stats = crate::index_builder::build_index(&repo, &db, false).unwrap();
+        assert_eq!(stats.files_total, 1);
+    }
+
     // ---- GitRepo::recent_diff ----
 
     #[test]

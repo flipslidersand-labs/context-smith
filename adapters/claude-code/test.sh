@@ -50,6 +50,56 @@ printf '#!/bin/sh\necho "contextsmith 0.4.0"\n' > "$tmp/old"; chmod +x "$tmp/old
 CONTEXTSMITH_BIN=$tmp/old "$sel" "$repo" invoice >/dev/null 2>&1; check "old version -> exit 3" "$?" 3
 CONTEXTSMITH_BIN=$tmp/absent "$sel" "$repo" invoice >/dev/null 2>&1; check "missing binary -> exit 2" "$?" 2
 
+# Option parsing.
+out=$("$sel" --help 2>&1); code=$?
+check "--help -> exit 0" "$code" 0
+check "--help prints usage" "$(printf '%s\n' "$out" | grep -c '^usage: ctx-select.sh')" "1"
+"$sel" -h >/dev/null 2>&1; check "-h -> exit 0" "$?" 0
+"$sel" "$repo" invoice --budget >/dev/null 2>&1; check "task words with trailing --budget are taken as task, not option" "$?" 0
+# `${2:?}` aborts the shell with status 1 (not the documented 2); pinned as current behaviour.
+"$sel" --budget >/dev/null 2>&1; check "--budget without a value -> exit 1 (shell parameter error)" "$?" 1
+"$sel" --top >/dev/null 2>&1; check "--top without a value -> exit 1 (shell parameter error)" "$?" 1
+out=$("$sel" --top 0 "$repo" invoice tax total 2>&1); code=$?
+check "--top 0 -> exit 0" "$code" 0
+check "--top 0 prints the header only" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "1"
+check "--top 0 header says showing 0" "$(printf '%s\n' "$out" | grep -c 'showing 0\.')" "1"
+"$sel" -- "$repo" invoice tax >/dev/null 2>&1; check "-- ends option parsing -> exit 0" "$?" 0
+"$sel" --top 1 -- "$repo" invoice tax >/dev/null 2>&1; check "option then -- -> exit 0" "$?" 0
+
+# Stub contextsmith: version from $1, behaviour of index/query from $2/$3 (ok|fail).
+mkstub() { # path version index_mode query_mode
+  cat > "$1" <<STUB
+#!/bin/sh
+case \$1 in
+  --version) echo "contextsmith $2" ;;
+  index) [ "$3" = ok ] || { echo "stub index boom" >&2; exit 1; } ;;
+  query) [ "$4" = ok ] || { echo "stub query boom" >&2; exit 1; }
+         echo '{"budget":100,"files":[]}' ;;
+esac
+STUB
+  chmod +x "$1"
+}
+mkstub "$tmp/idxfail" 0.4.1 fail ok
+out=$(CONTEXTSMITH_BIN=$tmp/idxfail "$sel" "$repo" invoice 2>&1); code=$?
+check "index failure -> exit 2" "$code" 2
+check "index failure reports 'indexing failed'" "$(printf '%s\n' "$out" | grep -c 'indexing failed')" "1"
+mkstub "$tmp/qfail" 0.4.1 ok fail
+out=$(CONTEXTSMITH_BIN=$tmp/qfail "$sel" "$repo" invoice 2>&1); code=$?
+check "other query failure -> exit 2" "$code" 2
+check "query failure reports 'query failed'" "$(printf '%s\n' "$out" | grep -c 'query failed')" "1"
+check "query failure shows the query's stderr" "$(printf '%s\n' "$out" | grep -c 'stub query boom')" "1"
+
+# Version boundaries (compared with sort -V).
+# Pre-release suffixes sort after the bare version under sort -V, so 0.4.1-rc1 is accepted (pinned, not endorsed).
+for v in 0.4.1 0.10.0 1.0.0 0.5.0-rc1 0.4.1-rc1; do
+  mkstub "$tmp/ver" "$v" ok ok
+  CONTEXTSMITH_BIN=$tmp/ver "$sel" "$repo" invoice >/dev/null 2>&1; check "version $v is accepted" "$?" 0
+done
+for v in 0.4.0 0.3.9; do
+  mkstub "$tmp/ver" "$v" ok ok
+  CONTEXTSMITH_BIN=$tmp/ver "$sel" "$repo" invoice >/dev/null 2>&1; check "version $v -> exit 3" "$?" 3
+done
+
 # The cache holds a copy of the repository's text, so it must not be readable by other users,
 # whatever the caller's umask is.
 perm() { stat -c %a "$1"; }
