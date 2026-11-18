@@ -92,10 +92,11 @@ pub fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
 /// Only when nothing was taken is the best-ranked skipped file truncated to the budget, so a
 /// non-empty match never yields an empty bundle. Returns selected candidates in score order.
 pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate> {
+    // Drop NaN: it has no rank, and total_cmp would put positive NaN first in a descending sort.
+    candidates.retain(|c| !c.score.is_nan());
     candidates.sort_by(|a, b| {
         b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.score) // total order, so sort_by cannot panic on inconsistent input
             .then_with(|| a.path.cmp(&b.path)) // deterministic on ties (HashMap input order is random)
     });
 
@@ -162,6 +163,22 @@ mod tests {
             truncated: false,
             original_tokens: 0,
         }
+    }
+
+    #[test]
+    fn nan_score_does_not_panic_or_take_first_place() {
+        // Many NaNs mixed in so the sort sees an inconsistent order if NaN is treated as Equal.
+        let mut cs = Vec::new();
+        for i in 0..64 {
+            let mut c = make(if i % 2 == 0 { f32::NAN } else { i as f32 }, 40);
+            c.path = PathBuf::from(format!("f{i:02}.rs"));
+            cs.push(c);
+        }
+        cs.push(make(-f32::NAN, 40));
+        let out = allocate(cs, 10_000);
+        assert_eq!(out.len(), 32, "NaN candidates are dropped");
+        assert!(out.iter().all(|c| !c.score.is_nan()));
+        assert!(out.windows(2).all(|w| w[0].score >= w[1].score));
     }
 
     #[test]
