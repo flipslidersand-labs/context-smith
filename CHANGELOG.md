@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `open_for_read` follow-ups (#462): the immutable fallback now builds on non-Unix targets and also triggers on `SQLITE_CANTOPEN` for existing files; a write lock during the schema probe is reported as a lock error again; read-only permission tests skip when permissions are not enforced (root).
 - `allocate` now sorts scores with a total order and drops NaN-scored candidates, so a NaN score can no longer panic the sort or take first place (#469).
 - `search_vectors` and `rrf_fuse` now sort scores with a total order and drop NaN-scored entries, so a NaN score can no longer panic the sort or corrupt the top-N heap (#473).
+- A failed rebuild after an extractor-version change no longer leaves the FTS tables empty: the FTS wipe now runs inside the rebuild transaction and is rolled back on failure (#480).
 - `recent_diff` in a shallow clone (e.g. `actions/checkout` default) now diffs against the oldest reachable commit instead of the empty tree, so the whole repository no longer lands in the bundle's diff (#465).
 - A file extension containing a backtick or newline can no longer break the code fence in `relevant-code/*.md`; only `[A-Za-z0-9_+#-]` is kept in the info string (#328).
 - The "index is locked" message no longer prints an empty path (`Index DB  is locked`) for a temporary or in-memory DB (#354).
