@@ -483,6 +483,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     // An index built by a different extractor version (or a pre-versioning
     // one with no record) is rebuilt through the same path as `--force`.
     let mut force = force;
+    let mut wipe_fts = false;
     if force {
         // `--force` also recomputes embeddings: mark them stale (vectors stay
         // usable until a new embedding pass replaces them).
@@ -500,10 +501,9 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             }
             force = true;
             // Older indexes keyed FTS rows by auto rowid; rowid-based deletes
-            // would miss them, so drop them (they are rebuilt below).
-            db.connection().execute_batch(
-                "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
-            )?;
+            // would miss them, so drop them inside the rebuild transaction
+            // (#480: a failed rebuild must keep the old FTS rows).
+            wipe_fts = true;
         }
     }
 
@@ -538,6 +538,11 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     // by the ROLLBACK below (covers cleanup + upserts to avoid N+1 fsync and
     // SQLITE_BUSY risk).
     let pass1_result = (|| -> Result<()> {
+        if wipe_fts {
+            db.connection().execute_batch(
+                "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
+            )?;
+        }
         // --- Cleanup: remove DB entries for files no longer in git ---
         let db_files = db.all_file_ids_and_paths()?;
         for (file_id, path) in &db_files {
@@ -1540,6 +1545,44 @@ mod tests {
         let stats = build_index(&repo, &db, false).unwrap();
         assert_eq!(stats.files_deleted, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 1);
+    }
+
+    /// #480: a failed migration rebuild must not leave the FTS tables wiped.
+    #[test]
+    fn build_index_failed_version_rebuild_keeps_old_fts() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "fn alpha() {}\n"), ("b.rs", "fn beta() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        let fts = ["fts_path", "fts_symbols", "fts_body"];
+        let before: Vec<i64> = fts
+            .iter()
+            .map(|t| count(&db, &format!("SELECT COUNT(*) FROM {t}")))
+            .collect();
+        assert!(before.iter().all(|n| *n > 0));
+        db.upsert_meta(EXTRACT_VERSION_KEY, "7").unwrap();
+        db.connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_sym_insert BEFORE INSERT ON symbols
+                 BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
+            )
+            .unwrap();
+        assert!(build_index(&repo, &db, false).is_err());
+        assert!(db.connection().is_autocommit());
+        let after: Vec<i64> = fts
+            .iter()
+            .map(|t| count(&db, &format!("SELECT COUNT(*) FROM {t}")))
+            .collect();
+        assert_eq!(before, after, "old FTS rows must survive: {fts:?}");
+        // Recovery: next run rebuilds and stamps the current version.
+        db.connection()
+            .execute_batch("DROP TRIGGER fail_sym_insert")
+            .unwrap();
+        build_index(&repo, &db, false).unwrap();
+        let rebuilt: Vec<i64> = fts
+            .iter()
+            .map(|t| count(&db, &format!("SELECT COUNT(*) FROM {t}")))
+            .collect();
+        assert_eq!(before, rebuilt);
     }
 
     #[test]
