@@ -27,7 +27,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@main
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@ea9ddf743bd492a13ceb4aa7c1c54cc33e49f72d # qa-workflows main @ 2026-11-19 (SHA 固定。更新は手動 PR)
     with:
       coverage-threshold: 75
       # pkg-config は libz-sys / libsqlite3-sys (system SQLite) が参照する。OpenSSL は git2 0.21 以降依存に無く不要 (#229)
@@ -89,4 +89,4 @@ jobs:
       contents: read
       pull-requests: write
       checks: write
-    uses: flipslidersand-labs/qa-workflows/.github/workflows/reviewdog-rust.yml@main
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/reviewdog-rust.yml@ea9ddf743bd492a13ceb4aa7c1c54cc33e49f72d # qa-workflows main @ 2026-11-19 (SHA 固定。更新は手動 PR)
