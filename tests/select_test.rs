@@ -289,3 +289,25 @@ fn unreadable_seed_is_refilled_to_seed_count() {
         .count();
     assert_eq!(n, 1, "unreadable file reported once: {:?}", sel.skipped);
 }
+
+/// #536: empty files must not occupy seed slots; a file with a body further down the BM25 ranking
+/// still becomes a seed.
+#[test]
+fn empty_files_do_not_fill_seed_slots() {
+    let (_tmp, repo, db, _) = setup(&[
+        ("parser/a.rs", ""),
+        ("parser/b.rs", "  \n"),
+        ("src/lib.rs", "pub fn parser() { parser(); }\n"),
+    ]);
+    let mut o = opts();
+    o.seed_count = 2;
+    o.bfs_depth = 0;
+    let sel = select_candidates(&repo, &db, "parser", &o).unwrap();
+    assert!(
+        sel.candidates
+            .iter()
+            .any(|c| c.path.ends_with("src/lib.rs")),
+        "{:?}",
+        sel.candidates
+    );
+}
