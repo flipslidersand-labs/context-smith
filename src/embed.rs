@@ -174,6 +174,7 @@ fn populate_embeddings_inner(
     let git_index = git_repo.open_index()?;
 
     let mut written = 0usize;
+    let mut run_dim: Option<usize> = None;
 
     // Stream through stale files in chunks so we never allocate more than
     // EMBED_BATCH file contents at once.
@@ -215,8 +216,21 @@ fn populate_embeddings_inner(
         // A different vector dimension than the stored one means the existing
         // vectors are unusable: drop them and start over with the new dimension.
         let dim = vecs.first().map_or(0, |v| v.len());
+        if vecs.iter().any(|v| v.len() != dim) {
+            anyhow::bail!("embedder returned vectors of differing dimensions within one batch");
+        }
+        match run_dim {
+            Some(d) if d != dim => anyhow::bail!(
+                "embedding dimension changed mid-run ({d} -> {dim}); \
+                 re-run to rebuild embeddings"
+            ),
+            _ => run_dim = Some(dim),
+        }
         let stored_dim = get_meta(conn, EMBED_DIM_KEY)?;
-        if stored_dim.as_deref() != Some(dim.to_string().as_str()) && has_embeddings(conn)? {
+        if written == 0
+            && stored_dim.as_deref() != Some(dim.to_string().as_str())
+            && has_embeddings(conn)?
+        {
             conn.execute("DELETE FROM embeddings", [])?;
             db.upsert_meta(EMBED_DIM_KEY, &dim.to_string())?;
             return populate_embeddings_inner(conn, repo_root, embedder, db);
@@ -380,6 +394,18 @@ pub fn fuse_seeds_with_status(
 ) -> Result<(Vec<(i64, f32)>, bool)> {
     if !has_embeddings(conn)? {
         return Ok((bm25.to_vec(), false));
+    }
+    // Same dimension but a different model means a different vector space; the
+    // stored id is absent in older indexes, which keeps the previous behaviour.
+    if let Some(stored) = get_meta(conn, EMBED_MODEL_KEY)? {
+        let current = embedder.model_id();
+        if stored != current {
+            eprintln!(
+                "warn: embeddings were built with model {stored:?} but the current model is \
+                 {current:?}; using BM25 seeds only (re-run `contextsmith index`)"
+            );
+            return Ok((bm25.to_vec(), false));
+        }
     }
     let query_vec = embedder
         .embed(&[task.to_string()], EmbedMode::Search)?
@@ -734,7 +760,8 @@ mod tests {
                  file_id INTEGER PRIMARY KEY,
                  vector  BLOB NOT NULL,
                  content_sha TEXT
-             );",
+             );
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .unwrap();
         conn
@@ -1150,6 +1177,95 @@ mod tests {
         assert_eq!(
             populate_embeddings(c, dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
             0
+        );
+    }
+
+    /// Returns `dims[i]`-long vectors for call `i` (last entry repeats); with `mixed`, the
+    /// first vector of every batch gets the first dim and the rest the second.
+    struct DimsEmbedder {
+        dims: Vec<usize>,
+        mixed: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Embedder for DimsEmbedder {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(n < 10, "embedder called {n} times: unbounded recursion?");
+            let d = self.dims[n.min(self.dims.len() - 1)];
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(i, _)| vec![1.0; if self.mixed && i > 0 { d + 4 } else { d }])
+                .collect())
+        }
+    }
+
+    #[test]
+    fn populate_embeddings_rejects_mixed_dims_within_batch() {
+        let (dir, db) = two_file_db();
+        let e = DimsEmbedder {
+            dims: vec![4],
+            mixed: true,
+            calls: Default::default(),
+        };
+        let err = populate_embeddings(db.connection(), dir.path(), &e, &db).unwrap_err();
+        assert!(err.to_string().contains("dimension"), "{err}");
+        assert!(!has_embeddings(db.connection()).unwrap());
+    }
+
+    #[test]
+    fn populate_embeddings_rejects_dim_change_between_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..EMBED_BATCH + 1)
+            .map(|i| format!("f{i:03}.rs"))
+            .collect();
+        for n in &names {
+            std::fs::write(dir.path().join(n), "fn a() {}").unwrap();
+        }
+        track_all(dir.path());
+        let rows: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "sha")).collect();
+        let db = index_db_with_files(&rows);
+        let e = DimsEmbedder {
+            dims: vec![4, 8],
+            mixed: false,
+            calls: Default::default(),
+        };
+        let err = populate_embeddings(db.connection(), dir.path(), &e, &db).unwrap_err();
+        assert!(err.to_string().contains("dimension"), "{err}");
+        // The committed first batch is kept, not deleted.
+        let n: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n as usize, EMBED_BATCH);
+    }
+
+    #[test]
+    fn fuse_seeds_falls_back_when_stored_model_differs() {
+        let conn = conn_with_two_dim_vectors();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, 'old-model')",
+            [EMBED_MODEL_KEY],
+        )
+        .unwrap();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let other = IdEmbedder("new-model", 2);
+        let (out, fused) = fuse_seeds_with_status(&conn, &other, "task", &bm25, 10).unwrap();
+        assert_eq!(out, bm25);
+        assert!(!fused);
+        // Same model id (and no stored id) keep fusing.
+        let same = IdEmbedder("old-model", 2);
+        assert!(
+            fuse_seeds_with_status(&conn, &same, "task", &bm25, 10)
+                .unwrap()
+                .1
+        );
+        conn.execute("DELETE FROM meta WHERE key = ?1", [EMBED_MODEL_KEY])
+            .unwrap();
+        assert!(
+            fuse_seeds_with_status(&conn, &other, "task", &bm25, 10)
+                .unwrap()
+                .1
         );
     }
 

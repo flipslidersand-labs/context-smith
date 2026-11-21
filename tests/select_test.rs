@@ -248,3 +248,44 @@ fn bm25_only_selection_reports_seed_mode_and_no_skips() {
     assert!(sel.skipped.is_empty());
     assert_eq!(sel.candidates.len(), 1);
 }
+
+/// #465: a non-UTF-8 file of a known language is indexed by path but cannot be read; it must not
+/// occupy one of the `seed_count` seed slots.
+#[test]
+fn unreadable_seed_is_refilled_to_seed_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = git2::Repository::init(&dir).unwrap();
+    let names = ["parser.py", "parser/a.rs", "parser/b.rs", "parser/c.rs"];
+    std::fs::write(dir.join("parser.py"), b"# caf\xe9 latin-1\nx = 1\n").unwrap();
+    for n in &names[1..] {
+        std::fs::create_dir_all(dir.join(n).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(n), "pub fn unrelated() {}\n").unwrap();
+    }
+    let mut index = git.index().unwrap();
+    for n in names {
+        index.add_path(Path::new(n)).unwrap();
+    }
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("test", "test@test.com").unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+    let repo = GitRepo::new(&dir).unwrap();
+    let db = IndexDb::open(&tmp.path().join("index.db")).unwrap();
+    build_index(&repo, &db, false).unwrap();
+
+    let mut o = opts();
+    o.seed_count = 2;
+    o.bfs_depth = 0;
+    let sel = select_candidates(&repo, &db, "parser", &o).unwrap();
+    assert_eq!(sel.candidates.len(), 2, "{:?}", sel.candidates);
+    assert!(sel.candidates.iter().all(|c| !c.content.is_empty()));
+    let n = sel
+        .skipped
+        .iter()
+        .filter(|(p, _)| p.ends_with("parser.py"))
+        .count();
+    assert_eq!(n, 1, "unreadable file reported once: {:?}", sel.skipped);
+}
