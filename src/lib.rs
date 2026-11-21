@@ -14,7 +14,7 @@ pub use bundle_writer::{render_task_md, write_bundle};
 #[cfg(feature = "remote-embed")]
 pub use embed::embed_index;
 pub use index_builder::{build_index, IndexDb, IndexStats};
-pub use select::{select_candidates, SeedMode, SelectOptions, Selection};
+pub use select::{select_candidates, SeedMode, SelectError, SelectOptions, Selection};
 
 #[cfg(test)]
 #[path = "tests/mod.rs"]

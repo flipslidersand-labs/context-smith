@@ -24,7 +24,7 @@ fn positive_usize(s: &str) -> Result<usize, String> {
 
 use context_smith::{
     build_index, render_task_md, select_candidates, write_bundle, Candidate, GitRepo, IndexDb,
-    SeedMode, SelectOptions, Selection,
+    SeedMode, SelectOptions,
 };
 
 #[derive(Parser)]
@@ -117,8 +117,8 @@ fn opts(budget: usize, no_embed: bool) -> SelectOptions {
 }
 
 /// Print the selection diagnostics to stderr (same wording as before they were returned).
-fn report_selection(sel: &Selection) {
-    match &sel.seed_mode {
+fn report_selection(seed_mode: &SeedMode, skipped: &[(PathBuf, String)]) {
+    match seed_mode {
         SeedMode::Bm25 => {}
         SeedMode::Fused => eprintln!("semantic: RRF-fused BM25 with embedding seeds"),
         SeedMode::NoUsableEmbeddings => {
@@ -129,7 +129,7 @@ fn report_selection(sel: &Selection) {
         }
         _ => {}
     }
-    for (abs, e) in &sel.skipped {
+    for (abs, e) in skipped {
         eprintln!("warn: skip {:?}: {e}", abs);
     }
 }
@@ -140,9 +140,17 @@ fn select_and_report(
     task: &str,
     o: &SelectOptions,
 ) -> anyhow::Result<Vec<Candidate>> {
-    let sel = select_candidates(repo, db, task, o)?;
-    report_selection(&sel);
-    Ok(sel.candidates)
+    match select_candidates(repo, db, task, o) {
+        Ok(sel) => {
+            report_selection(&sel.seed_mode, &sel.skipped);
+            Ok(sel.candidates)
+        }
+        Err(e) => {
+            // Same stderr order as before diagnostics were returned: seed message, skips, error.
+            report_selection(&e.seed_mode, &e.skipped);
+            Err(e.into())
+        }
+    }
 }
 
 /// Resolve the index db path for a repo, erroring if it does not exist.
@@ -522,6 +530,10 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("could not be read"), "msg: {msg}");
         assert!(msg.contains("a.rs"), "msg: {msg}");
+        // Diagnostics gathered before the bail still reach the caller.
+        assert_eq!(err.seed_mode, SeedMode::Bm25);
+        assert_eq!(err.skipped.len(), 1);
+        assert_eq!(err.skipped[0].0, repo.root().join("a.rs"));
     }
 
     #[test]

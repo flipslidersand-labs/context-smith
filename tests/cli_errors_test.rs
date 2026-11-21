@@ -281,3 +281,28 @@ fn query_format_md_prints_summary_without_diff() {
     assert!(out.status.success());
     assert!(stdout(&out).contains("score="), "{}", stdout(&out));
 }
+
+#[test]
+fn unreadable_matches_print_skip_warning_before_error() {
+    let (repo, work) = indexed();
+    let db = work.path().join("idx.db");
+    // Vanishes after indexing: the only match cannot be read.
+    std::fs::remove_file(repo.path().join("a.rs")).unwrap();
+    let out = bin(&[
+        "query",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--task",
+        "alpha_widget",
+        "--index",
+        db.to_str().unwrap(),
+        "--no-embed",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    let warn = err.find("warn: skip").unwrap_or_else(|| panic!("{err}"));
+    let fail = err
+        .find("could not be read")
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(warn < fail, "skip warning must precede the error: {err}");
+}

@@ -65,6 +65,33 @@ pub struct Selection {
     pub skipped: Vec<(PathBuf, String)>,
 }
 
+/// Error from [`select_candidates`]. Carries the diagnostics gathered before the failure so the
+/// caller can still show them. `Display` and the error chain are those of the underlying error.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct SelectError {
+    /// The underlying failure.
+    pub error: anyhow::Error,
+    /// How the seeds were chosen before the failure (`Bm25` if it failed earlier).
+    pub seed_mode: SeedMode,
+    /// Files skipped as unreadable before the failure: (absolute path, error).
+    pub skipped: Vec<(PathBuf, String)>,
+}
+
+impl std::fmt::Display for SelectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for SelectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // Skip the wrapped error itself (already shown by `Display`); continue its chain.
+        let inner: &(dyn std::error::Error + Send + Sync + 'static) = self.error.as_ref();
+        inner.source()
+    }
+}
+
 /// Compute seed files for a task. With the `remote-embed` feature and a
 /// configured embedder, RRF-fuse BM25 with semantic (vector) seeds; otherwise
 /// return the BM25 seeds unchanged (backward compatible).
@@ -108,7 +135,31 @@ pub fn select_candidates(
     db: &IndexDb,
     task: &str,
     opts: &SelectOptions,
-) -> anyhow::Result<Selection> {
+) -> Result<Selection, SelectError> {
+    let mut seed_mode = SeedMode::Bm25;
+    let mut skipped = Vec::new();
+    match select_inner(repo, db, task, opts, &mut seed_mode, &mut skipped) {
+        Ok(candidates) => Ok(Selection {
+            candidates,
+            seed_mode,
+            skipped,
+        }),
+        Err(error) => Err(SelectError {
+            error,
+            seed_mode,
+            skipped,
+        }),
+    }
+}
+
+fn select_inner(
+    repo: &GitRepo,
+    db: &IndexDb,
+    task: &str,
+    opts: &SelectOptions,
+    seed_mode_out: &mut SeedMode,
+    skipped: &mut Vec<(PathBuf, String)>,
+) -> anyhow::Result<Vec<Candidate>> {
     if opts.seed_count == 0 {
         anyhow::bail!("seed_count must be >= 1");
     }
@@ -119,6 +170,7 @@ pub fn select_candidates(
     // check happens after fusion (semantic may rescue an empty BM25).
     let bm25 = search_bm25(db.connection(), task, seed_count)?;
     let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
+    *seed_mode_out = seed_mode;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
     }
@@ -141,7 +193,6 @@ pub fn select_candidates(
     // avoiding the O(all-files) read_to_string that wastes RAM (#80).
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    let mut skipped: Vec<(PathBuf, String)> = Vec::new();
     let git_index = repo.open_index()?;
     {
         let conn = db.connection();
@@ -226,11 +277,7 @@ pub fn select_candidates(
     let candidates = dedup_by_real_path(repo, candidates);
 
     // Step 4: Greedy budget allocation
-    Ok(Selection {
-        candidates: allocate(candidates, opts.budget),
-        seed_mode,
-        skipped,
-    })
+    Ok(allocate(candidates, opts.budget))
 }
 
 /// Collapse candidates whose paths resolve to the same file inside the repo. The candidate at the
