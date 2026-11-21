@@ -112,7 +112,7 @@ pub fn populate_fts_with_paths(
     use crate::tokenizer::{tokenize_code, tokenize_path};
 
     let canonical_root = repo_root.canonicalize()?;
-    conn.execute_batch("BEGIN")?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
     let result = (|| -> Result<()> {
         conn.execute_batch("DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;")?;
 
@@ -160,13 +160,10 @@ pub fn populate_fts_with_paths(
         Ok(())
     })();
 
-    match result {
-        Ok(()) => crate::commit_or_rollback(conn).map_err(Into::into),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
+    // Early return drops `tx`, which rolls back.
+    result?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Upper bound applied to `top_n` in [`search_bm25`].
