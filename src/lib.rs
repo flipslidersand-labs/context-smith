@@ -192,6 +192,13 @@ pub(crate) fn read_bytes_within_root(
     if is_link && !is_tracked_in_index(canonical_root, &real) {
         return Err(std::io::Error::other(PathEscape));
     }
+    // Never open FIFOs / devices / sockets: open(2)/read would block (#494).
+    if !std::fs::metadata(&real)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
     std::fs::read(real)
 }
 
@@ -965,6 +972,28 @@ mod tests {
             .filter(|(_, k, _)| *k == kind)
             .map(|(n, _, _)| n.as_str())
             .collect()
+    }
+
+    /// #494: a FIFO must be refused without blocking on open/read.
+    #[cfg(unix)]
+    #[test]
+    fn read_bytes_within_root_skips_fifo_without_blocking() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let fifo = root.join("pipe.py");
+        match std::process::Command::new("mkfifo").arg(&fifo).status() {
+            Ok(st) if st.success() => {}
+            _ => return, // mkfifo unavailable: skip
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let r = root.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_bytes_within_root(&r, &r.join("pipe.py")));
+        });
+        let res = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("read blocked on FIFO");
+        assert!(res.is_err());
     }
 
     // ---- Language ----
