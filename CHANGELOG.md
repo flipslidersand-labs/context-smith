@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
 
 ### Changed
+- Bump `ureq` to 3 for the opt-in `remote-embed` feature (RemoteEmbedder behavior unchanged: no redirects, retries, 10MB cap) (#356).
 - `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
@@ -23,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
 
 ### Fixed
+- Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
+- A query embedding containing NaN/inf now prints a one-time warning before falling back to BM25-only ranking (#481).
 - Embedding writes now check that every vector in a batch, and every batch of a run, has the same dimension; a mid-run change is an error instead of deleting committed batches and restarting (#465).
 - Selection no longer lets non-UTF-8 files (indexed by path only) occupy BM25 seed slots: more rows are fetched until `seed_count` readable seeds are found (#465).
 - With `remote-embed`, a query-time embedder whose model id differs from the one that wrote the stored vectors falls back to BM25 seeds with a warning, instead of comparing different vector spaces (#465).

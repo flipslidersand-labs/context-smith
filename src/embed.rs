@@ -382,6 +382,11 @@ pub fn fuse_seeds(
     fuse_seeds_with_status(conn, embedder, task, bm25, top_n).map(|(seeds, _)| seeds)
 }
 
+/// True if any component is NaN or infinite.
+fn has_non_finite(v: &[f32]) -> bool {
+    v.iter().any(|x| !x.is_finite())
+}
+
 /// Like [`fuse_seeds`], but also reports whether vector fusion actually ran
 /// (`true`) or the BM25 seeds were returned unchanged (`false`: no stored
 /// embeddings, empty query vector, or dimension mismatch / mixed dimensions).
@@ -425,6 +430,13 @@ pub fn fuse_seeds_with_status(
         distinct_lens == 1 && min_len % 4 == 0 && min_len / 4 == query_vec.len() as i64;
     if query_vec.is_empty() || !consistent {
         eprintln!("warn: query embedding empty or dimension mismatch; using BM25 seeds only");
+        return Ok((bm25.to_vec(), false));
+    }
+    // A NaN/inf query makes every cosine score NaN, and `search_vectors` drops
+    // those rows, so fusion would be BM25 only anyway. Say so, and report the
+    // mode as BM25 instead of Fused.
+    if has_non_finite(&query_vec) {
+        eprintln!("warn: query embedding contains non-finite values; using BM25 seeds only");
         return Ok((bm25.to_vec(), false));
     }
     // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
@@ -479,10 +491,13 @@ const MAX_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Read the response body with a hard size cap, then parse it as JSON.
 #[cfg(feature = "remote-embed")]
-fn read_json_limited<T: serde::de::DeserializeOwned>(resp: ureq::Response) -> Result<T> {
+fn read_json_limited<T: serde::de::DeserializeOwned>(
+    resp: ureq::http::Response<ureq::Body>,
+) -> Result<T> {
     use std::io::Read;
     let mut buf = Vec::new();
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut buf)?;
     if buf.len() as u64 > MAX_RESPONSE_BYTES {
@@ -581,13 +596,18 @@ impl RemoteEmbedder {
 
     /// Build a ureq agent with the configured timeouts.
     fn agent(&self) -> ureq::Agent {
-        ureq::AgentBuilder::new()
-            .timeout_connect(CONNECT_TIMEOUT)
-            .timeout_read(self.timeout)
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(self.timeout))
+            .timeout_recv_body(Some(self.timeout))
             // Never follow redirects: a 3xx would replay the request (and X-API-Key)
             // to an arbitrary host, possibly over plain http.
-            .redirects(0)
+            .max_redirects(0)
+            // ureq 3 reads ALL_PROXY/HTTPS_PROXY by default; ureq 2 did not. Keep the old
+            // behavior so X-API-Key is not routed through an environment-chosen proxy.
+            .proxy(None)
             .build()
+            .into()
     }
 }
 
@@ -606,7 +626,7 @@ impl Embedder for RemoteEmbedder {
         let agent = self.agent();
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(EMBED_BATCH) {
-            let body = ureq::json!({
+            let body = serde_json::json!({
                 "collection": self.collection,
                 "texts": chunk,
                 "mode": mode.as_str(),
@@ -618,19 +638,21 @@ impl Embedder for RemoteEmbedder {
             let resp: EmbedResponse = loop {
                 let mut req = agent.post(&format!("{}/embed/batch", self.url));
                 if let Some(key) = &self.api_key {
-                    req = req.set("X-API-Key", key.as_str());
+                    req = req.header("X-API-Key", key.as_str());
                 }
                 match req.send_json(body.clone()) {
-                    // `.redirects(0)` makes ureq return 3xx as Ok: fail fast with a clear cause.
-                    Ok(r) if (300..400).contains(&r.status()) => {
+                    // `.max_redirects(0)` makes ureq return 3xx as Ok: fail fast with a clear cause.
+                    Ok(r) if r.status().is_redirection() => {
                         let loc = r
-                            .header("Location")
+                            .headers()
+                            .get("Location")
+                            .and_then(|l| l.to_str().ok())
                             .map(|l| format!(" (Location: {})", redact_url_userinfo(l)))
                             .unwrap_or_default();
                         return Err(anyhow::anyhow!(
                             "embedding request failed: HTTP {} redirect not followed{loc}; \
                              point EMBEDDING_SVC_URL at the final URL",
-                            r.status()
+                            r.status().as_u16()
                         ));
                     }
                     Ok(r) => match read_json_limited::<EmbedResponse>(r) {
@@ -645,7 +667,7 @@ impl Embedder for RemoteEmbedder {
                     },
                     Err(e) => {
                         // Non-retryable client errors (4xx except 408/425/429): fail fast.
-                        if let ureq::Error::Status(code, _) = &e {
+                        if let ureq::Error::StatusCode(code) = &e {
                             if *code < 500 && !matches!(*code, 408 | 425 | 429) {
                                 return Err(anyhow::anyhow!(
                                     "embedding request failed: {}",
@@ -928,6 +950,34 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn has_non_finite_detects_nan_and_inf() {
+        assert!(has_non_finite(&[1.0, f32::NAN]));
+        assert!(has_non_finite(&[f32::INFINITY, 0.0]));
+        assert!(has_non_finite(&[f32::NEG_INFINITY]));
+        assert!(!has_non_finite(&[1.0, -2.0, 0.0]));
+        assert!(!has_non_finite(&[]));
+    }
+
+    #[test]
+    fn fuse_seeds_nan_query_keeps_bm25_only_ranking() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 2.0f32), (8, 1.0)];
+        let (out, fused) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![f32::NAN, 0.0]),
+            "task",
+            &bm25,
+            10,
+        )
+        .unwrap();
+        assert_eq!(out, bm25);
+        assert!(
+            !fused,
+            "a non-finite query must report BM25 mode, not Fused"
+        );
     }
 
     #[test]
