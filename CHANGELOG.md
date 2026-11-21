@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 - `select_candidates` now returns `Result<Selection, SelectError>` instead of `Result<Vec<Candidate>>`; use `.candidates` for the old value (#400).
 
+### Security
+- libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
+
 ### Changed
 - `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
