@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
 - Hand-written `BEGIN`/`COMMIT`/`ROLLBACK` in the index, dependency, embedding and FTS builders is replaced by rusqlite's `Transaction`; BEGIN mode and failure behavior are unchanged (#422).
 - `populate_embeddings` no longer takes a redundant connection argument (it uses `db.connection()`), and `build_seeds` no longer returns an always-`Ok` `Result`; the redundant seed re-insert after `bfs_expand` is removed. Behavior is unchanged (#352).
+- Internal duplication in the extractors, index builder and embedding `meta` access is removed: the six `extract_*` wrappers share one parser setup, `fts_path` rewrites and column migrations use one helper each, `delete_file_records` reuses `delete_content_records`, inserted symbol ids are reused instead of re-read, and `meta` reads/writes use one SQL path. Behavior is unchanged (#422).
 
 ### Fixed
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
