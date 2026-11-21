@@ -363,7 +363,8 @@ impl IndexDb {
         Ok(())
     }
 
-    pub(crate) fn insert_symbol(&self, sym: &Symbol) -> Result<()> {
+    /// Insert a symbol and return its new rowid.
+    pub(crate) fn insert_symbol(&self, sym: &Symbol) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -374,7 +375,7 @@ impl IndexDb {
                 sym.snippet
             ],
         )?;
-        Ok(())
+        Ok(self.conn.last_insert_rowid())
     }
 
     #[cfg(test)]
@@ -621,10 +622,13 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             // (b) Extract and insert new symbols.
             let raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
             let lines: Vec<&str> = source.lines().collect();
+            // (id, name) of non-import symbols, in insertion order, for fts_symbols.
+            let mut fts_syms: Vec<(i64, String)> = Vec::new();
             for (name, kind, line) in raw_syms {
                 let lo = line.saturating_sub(3) as usize;
                 let hi = (line as usize + 2).min(lines.len());
                 let snippet = lines[lo..hi].join("\n");
+                let is_import = kind.as_str() == "import";
                 let sym = Symbol {
                     file_id,
                     name,
@@ -632,26 +636,21 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                     line,
                     snippet,
                 };
-                db.insert_symbol(&sym)?;
+                let sym_id = db.insert_symbol(&sym)?;
+                if !is_import {
+                    fts_syms.push((sym_id, sym.name));
+                }
                 stats.symbols_total += 1;
             }
 
             // (c) Replace FTS rows for this file.
             db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
 
-            {
-                let mut sym_stmt = db.connection().prepare(
-                    "SELECT id, name FROM symbols WHERE file_id = ?1 AND kind != 'import'",
+            for (sym_id, name) in fts_syms {
+                db.connection().execute(
+                    "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
+                    params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
                 )?;
-                let sym_names: Vec<(i64, String)> = sym_stmt
-                    .query_map(params![file_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (sym_id, name) in sym_names {
-                    db.connection().execute(
-                        "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
-                        params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
-                    )?;
-                }
             }
 
             db.connection()
