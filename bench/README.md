@@ -42,7 +42,7 @@ Options: `CSBIN` (binary path), `CANDS` (candidate file), `METRIC=lenient`, opti
 
 ## Expected (README table, `strict`, title only; recall averaged over tasks)
 
-Current values: measured 2026-11-03 on master `038eadc` (after #164); they are the same numbers as in the Status table below. Earlier measurements are kept after the table as history.
+Values: measured 2026-11-03 on master `038eadc` (after #164), with the plain `bfs` expansion that was the default then. The current default is `bfs-capped` (#293); the Status table below has its numbers, and the Expected and Other languages tables are not re-measured. Earlier measurements are kept after the table as history.
 
 | repo (tasks) | budget | context-smith | naive keyword match |
 |---|---|---|---|
@@ -98,7 +98,7 @@ and put `f1` / `cov` for `cs` and `kw` at 4k / 8k / 16k into a table here, group
 
 ## Dependency expansion: BFS vs capped BFS vs PageRank ([#293](https://github.com/flipslidersand-labs/context-smith/issues/293))
 
-Measured 2026-11-21 with one release binary built from the #508 branch (`2879e60`, based on master `dd51442`), switching the expansion with `CONTEXTSMITH_EXPAND` (added in #508; the default is `bfs`). `strict`, title only, `eval` repositories only, one run each. Command per arm and repository:
+Measured 2026-11-21 with one release binary built from the #508 branch (`2879e60`, based on master `dd51442`), switching the expansion with `CONTEXTSMITH_EXPAND` (added in #508; the default was `bfs` at the time). `strict`, title only, `eval` repositories only, one run each. Command per arm and repository:
 
 ```bash
 REPO=<clone> TASKMODE=title CONTEXTSMITH_EXPAND=<arm> python3 bench/bench.py
@@ -124,9 +124,33 @@ The bar, set before the run: the `eval` mean improves by +0.02 or more, no cell 
 - **`bfs-capped`: meets the bar, but only just.** Mean +0.021; worst cell fd 8k -0.03.
   - The gain comes from the two TypeScript repositories (hono 8k +0.09, 16k +0.07; zod 8k +0.05, 16k +0.08). The two Rust repositories are flat or slightly down.
   - Each run was done once, and one task moves a cell by 0.01-0.04, so +0.021 is close to noise.
-  - The default stays `bfs` in this PR. Changing the default needs a second run and a `tuning`-group check first.
+  - The default stayed `bfs` in #509 until a second run and a `tuning`-group check were done (below).
 - **Speed.** Total wall time per repository, which includes indexing every task, was within about 10% across the three arms (ripgrep 10-12 s, fd 7-8 s, hono 53-59 s, zod 60-62 s). Query time was not measured on its own.
 - Raw outputs: `out-<arm>-<repo>.txt`, kept outside the repository. `bfs-capped` was re-run after the review fix in `2879e60`; the numbers above are from the re-run.
+
+### Second run and the tuning group: `bfs-capped` becomes the default
+
+Measured 2026-11-21 with a release binary from master `53e4db1` (#508 merged). `bfs` and `bfs-capped` were each run once on all nine repositories.
+
+- **The second `eval` run matched the first in every cell** (two decimals).
+  - The bench is deterministic, so a repeat run adds no information.
+  - What remains uncertain is the small task count: one task moves a cell by 0.01-0.04.
+- **Results:**
+
+  | group | cells | `bfs` mean | `bfs-capped` mean | difference | worst cell |
+  |---|---|---|---|---|---|
+  | `eval` | 12 | 0.457 | 0.477 | +0.020 | fd 8k -0.03 |
+  | `tuning` | 15 | 0.393 | 0.417 | +0.024 | bat 4k -0.02 |
+
+  - No cell in either group drops by more than 0.04.
+  - `tuning` gains: axum +0.03 to +0.06, bat 8k/16k +0.05/+0.07, scrapy 8k/16k +0.04/+0.07.
+  - clap and poetry are unchanged in every cell.
+- **Effect on the targets:**
+  - T1 is unchanged: poetry 8k and 16k are below `kw` with both modes.
+  - T2 gains scrapy, which goes from 0.47 to 0.54 at 16k against `kw` 0.47.
+- **Speed:** total wall time per repository was the same or slightly lower with `bfs-capped`.
+- **Decision:** `bfs-capped` is now the default. The decision rests on the `eval` result, +0.020, which is exactly the bar. The `tuning` group was tuned on and does not count as evidence for the gain; it was used only to check that no cell drops. `CONTEXTSMITH_EXPAND=bfs` restores the previous behaviour.
+- **Raw outputs:** kept outside the repository, as before.
 
 ## Targets and current status ([#147](https://github.com/flipslidersand-labs/context-smith/issues/147))
 
@@ -136,24 +160,24 @@ Provisional targets, in terms of the `strict`, title-only recall above. Review d
 - **T2 (value)**: at 16k, context-smith beats the naive keyword match by 0.05 or more.
 - **T3 (reference)**: at 16k, 70% of the ceiling (the whole true files that fit). Revisit after T1 and T2.
 
-Status, measured 2026-11-03 on master `038eadc` (after #164), binary from `cargo build --release`, 9 repositories, one run each (`cs` / `kw`, difference in brackets; one task is worth 0.02-0.04):
+Status, measured 2026-11-21 on master `53e4db1` with `CONTEXTSMITH_EXPAND=bfs-capped` (the default after #293; see the expansion section above), binary from `cargo build --release`, 9 repositories, one run each (`cs` / `kw`, difference in brackets; one task is worth 0.02-0.04):
 
 | repo (tasks) | 4k | 8k | 16k |
 |---|---|---|---|
-| axum (54) | 0.46 / 0.17 (+0.29) | 0.56 / 0.49 (+0.07) | 0.69 / 0.56 (+0.13) |
+| axum (54) | 0.47 / 0.17 (+0.30) | 0.58 / 0.49 (+0.09) | 0.70 / 0.56 (+0.14) |
 | clap (60) | 0.26 / 0.16 (+0.10) | 0.35 / 0.27 (+0.08) | 0.53 / 0.38 (+0.15) |
-| bat (56) | 0.28 / 0.18 (+0.10) | 0.40 / 0.24 (+0.16) | 0.59 / 0.42 (+0.17) |
+| bat (56) | 0.28 / 0.18 (+0.10) | 0.40 / 0.24 (+0.16) | 0.63 / 0.42 (+0.21) |
 | ripgrep (26) | 0.15 / 0.08 (+0.07) | 0.22 / 0.19 (+0.03) | 0.49 / 0.27 (+0.22) |
-| fd (74) | 0.40 / 0.25 (+0.15) | 0.57 / 0.37 (+0.20) | 0.75 / 0.69 (+0.06) |
-| scrapy (59) | 0.29 / 0.19 (+0.10) | 0.42 / 0.29 (+0.13) | 0.48 / 0.47 (+0.01) |
-| poetry (60) | 0.23 / 0.19 (+0.04) | 0.26 / 0.31 (**-0.05**) | 0.30 / 0.40 (**-0.10**) |
-| hono (60) | 0.60 / 0.35 (+0.25) | 0.72 / 0.56 (+0.16) | 0.83 / 0.66 (+0.17) |
-| zod (60) | 0.20 / 0.04 (+0.16) | 0.28 / 0.07 (+0.21) | 0.39 / 0.18 (+0.21) |
+| fd (74) | 0.38 / 0.25 (+0.13) | 0.57 / 0.37 (+0.20) | 0.76 / 0.69 (+0.07) |
+| scrapy (59) | 0.29 / 0.19 (+0.10) | 0.45 / 0.29 (+0.16) | 0.54 / 0.47 (+0.07) |
+| poetry (60) | 0.23 / 0.19 (+0.04) | 0.25 / 0.31 (**-0.06**) | 0.29 / 0.40 (**-0.11**) |
+| hono (60) | 0.59 / 0.35 (+0.24) | 0.81 / 0.56 (+0.25) | 0.86 / 0.66 (+0.20) |
+| zod (60) | 0.21 / 0.04 (+0.17) | 0.31 / 0.07 (+0.24) | 0.38 / 0.18 (+0.20) |
 
 - **T1: not met.** 25 of 27 cells hold; poetry at 8k and 16k do not. Tuning `rarest_terms` by path frequency did not close it (tried 2026-11-03, rejected: net zero across eight repositories, scrapy fell below `kw`).
-- **T2: 7 of 9 repositories.** The misses are scrapy (+0.01) and poetry (-0.10). Both are Python; see the ranking paragraph above.
+- **T2: 8 of 9 repositories.** The miss is poetry (-0.11). scrapy moved from +0.01 to +0.07 with `bfs-capped` (#293). The 2026-11-03 table (master `038eadc`, plain `bfs`) had scrapy +0.01 and poetry -0.10.
 - axum, clap, bat, scrapy and poetry were used while tuning; ripgrep, fd, hono and zod were not used to choose a parameter. Gains on the tuned repositories alone do not count as evidence.
-- The Expected and Other languages tables above carry the same context-smith values as this table (updated from `aa4ef89`, before #164: test and fixture files scored x0.5); their earlier values are kept there as history. `bench.py` was not changed.
+- The Expected and Other languages tables above carry the 2026-11-03 values (plain `bfs`, master `038eadc`), not the values in this table. Their earlier values are kept there as history. `bench.py` was not changed.
 
 ### Speed (must not get worse)
 

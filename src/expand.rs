@@ -1,7 +1,7 @@
 //! Dependency-graph expansion strategies, selected by `CONTEXTSMITH_EXPAND` (#293).
 //!
-//! `bfs` (default) is the existing [`bfs_expand`]. `bfs-capped` and `ppr` are experimental ways
-//! to stop hub files from collecting score.
+//! `bfs-capped` (default since the #293 bench) caps each file's neighbours so hub files do not
+//! collect score. `bfs` is the earlier plain [`bfs_expand`]; `ppr` is experimental.
 
 use crate::dep_builder::bfs_expand;
 use anyhow::Result;
@@ -24,11 +24,11 @@ pub enum ExpandMode {
     Ppr,
 }
 
-/// Parse a mode name; `None` (unset) means the default `bfs`.
+/// Parse a mode name; `None` (unset) means the default `bfs-capped`.
 pub fn parse_mode(v: Option<&str>) -> Result<ExpandMode> {
     match v {
-        None | Some("bfs") => Ok(ExpandMode::Bfs),
-        Some("bfs-capped") => Ok(ExpandMode::BfsCapped),
+        Some("bfs") => Ok(ExpandMode::Bfs),
+        None | Some("bfs-capped") => Ok(ExpandMode::BfsCapped),
         Some("ppr") => Ok(ExpandMode::Ppr),
         Some(other) => {
             anyhow::bail!("unknown {EXPAND_ENV} value '{other}' (expected bfs, bfs-capped or ppr)")
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn parse_mode_values() {
-        assert_eq!(parse_mode(None).unwrap(), ExpandMode::Bfs);
+        assert_eq!(parse_mode(None).unwrap(), ExpandMode::BfsCapped);
         assert_eq!(parse_mode(Some("bfs")).unwrap(), ExpandMode::Bfs);
         assert_eq!(
             parse_mode(Some("bfs-capped")).unwrap(),
@@ -302,12 +302,17 @@ mod tests {
     }
 
     #[test]
-    fn unset_default_equals_bfs() {
+    fn unset_default_equals_bfs_capped() {
         let conn = graph(&[(1, 2), (2, 3), (4, 1), (5, 5)]);
         let seeds = [(1, 10.0), (3, 2.0)];
         let mode = parse_mode(None).unwrap();
         assert_eq!(
             expand(&conn, mode, &seeds, 2).unwrap(),
+            bfs_capped(&conn, &seeds, 2).unwrap()
+        );
+        // `bfs` stays selectable and is the plain BFS.
+        assert_eq!(
+            expand(&conn, parse_mode(Some("bfs")).unwrap(), &seeds, 2).unwrap(),
             bfs_expand(&conn, &seeds, 2).unwrap()
         );
     }
