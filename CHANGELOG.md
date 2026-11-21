@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
 
 ### Added
-- `CONTEXTSMITH_EXPAND` env var (`bfs` default, `bfs-capped`, `ppr`) selects the dependency expansion method; unset keeps current BFS behavior (#293).
+- `CONTEXTSMITH_EXPAND` env var (`bfs-capped` default, `bfs`, `ppr`) selects the dependency expansion method (#293).
 
 ### Changed
 - The default dependency expansion is now `bfs-capped`: each file spreads score to at most 10 neighbours, lowest degree first, so hub files collect less. On the bench it improved mean recall by +0.020 on the eval repositories and +0.024 on the tuning repositories, and no cell dropped by more than 0.04. `CONTEXTSMITH_EXPAND=bfs` restores the previous behavior (#293).
