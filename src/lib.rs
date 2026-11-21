@@ -16,6 +16,18 @@ pub use embed::embed_index;
 pub use index_builder::{build_index, IndexDb, IndexStats};
 pub use select::{select_candidates, SeedMode, SelectError, SelectOptions, Selection};
 
+/// True if the commit's raw object records a parent, even when libgit2 hides it
+/// (shallow boundary). A true root has no `parent ` header line.
+fn has_raw_parent(repo: &git2::Repository, commit: &git2::Commit) -> Result<bool> {
+    let odb = repo.odb()?;
+    let obj = odb.read(commit.id())?;
+    let header = obj
+        .data()
+        .split(|&b| b == b'\n')
+        .take_while(|l| !l.is_empty());
+    Ok(header.into_iter().any(|l| l.starts_with(b"parent ")))
+}
+
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod moved;
@@ -290,8 +302,17 @@ impl GitRepo {
         // A shallow clone's boundary commit has no parent in the object store but
         // is not the true root: diff against its tree (the oldest commit we can
         // see) instead of the empty tree, or the whole repo shows up (#465).
-        if reached || repo.is_shallow() {
+        // `is_shallow()` is repo-wide: a shallow second-parent side must not turn a
+        // true first-parent root into a boundary, so inspect the commit itself (#494).
+        let at_boundary = !reached && repo.is_shallow() && has_raw_parent(&repo, &ancestor)?;
+        if reached || at_boundary {
             anc_tree_opt = Some(ancestor.tree()?);
+            if !reached {
+                eprintln!(
+                    "note: shallow clone: diffing against the oldest available commit {} (older history is unavailable; the diff may be partial or empty)",
+                    ancestor.id()
+                );
+            }
         }
         let diff = repo.diff_tree_to_tree(anc_tree_opt.as_ref(), Some(&head_tree), None)?;
 
@@ -1265,6 +1286,74 @@ mod tests {
         assert!(diff.contains("+four"), "{diff}");
         assert!(!diff.contains("+one") && !diff.contains("+two"), "{diff}");
         assert!(!diff.contains("+three"), "{diff}");
+    }
+
+    /// Runs `git` in `dir` (test helper for the shallow-merge fixtures).
+    fn git_cli(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// R -> M1 -> Merge(second parent: S1..S5 forked from R), cloned with depth 3.
+    /// First-parent reaches the true root R while the second-parent side ends at a
+    /// shallow boundary, so the repo is shallow but R is a real root.
+    fn shallow_merge_clone(dst: &Path) -> std::path::PathBuf {
+        let src = dst.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        git_cli(&src, &["init", "-q", "-b", "main"]);
+        commit_files(&src, &[("root.rs", "root_line\n")], &[]);
+        git_cli(&src, &["checkout", "-q", "-b", "side"]);
+        for i in 1..=5 {
+            commit_files(&src, &[(&format!("s{i}.rs"), "side\n")], &[]);
+        }
+        git_cli(&src, &["checkout", "-q", "main"]);
+        commit_files(&src, &[("m1.rs", "m1_line\n")], &[]);
+        git_cli(&src, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+        let clone = dst.join("clone");
+        let url = format!("file://{}", src.display());
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "3", &url])
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        clone
+    }
+
+    /// #494: a shallow second-parent side must not make a true first-parent root
+    /// look like a shallow boundary (its files would drop out of the diff).
+    #[test]
+    fn recent_diff_true_root_in_shallow_merge_clone_includes_root_files() {
+        let dst = TempDir::new().unwrap();
+        let clone = shallow_merge_clone(dst.path());
+        assert!(git2::Repository::open(&clone).unwrap().is_shallow());
+        let diff = GitRepo::new(&clone).unwrap().recent_diff(3).unwrap();
+        assert!(diff.contains("+root_line"), "{diff}");
+    }
+
+    /// #494: depth 1 makes HEAD itself the boundary; the empty diff is explained on stderr
+    /// by the code path, and must still be empty rather than the whole repo.
+    #[test]
+    fn recent_diff_depth_one_clone_is_empty() {
+        let src = TempDir::new().unwrap();
+        commit_files(src.path(), &[("a.rs", "one\n")], &[]);
+        commit_files(src.path(), &[("b.rs", "two\n")], &[]);
+        let dst = TempDir::new().unwrap();
+        let clone = dst.path().join("clone");
+        let url = format!("file://{}", src.path().display());
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--depth", "1", &url])
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let diff = GitRepo::new(&clone).unwrap().recent_diff(3).unwrap();
+        assert!(!diff.contains("+one"), "{diff}");
     }
 
     #[test]

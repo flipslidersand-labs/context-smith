@@ -153,6 +153,21 @@ fn select_and_report(
     }
 }
 
+/// Warn when the index was built for a different repository than `repo`
+/// (`meta.repo_root`, written by `index`). Only a warning: a shipped or moved
+/// index is a supported use, and the git-tracked check still gates every path.
+fn warn_if_foreign_index(repo: &GitRepo, db: &IndexDb) {
+    let stored = db.recorded_repo_root();
+    let Some(stored) = stored else { return };
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    if canon(std::path::Path::new(&stored)) != canon(repo.root()) {
+        eprintln!(
+            "warn: index was built for {stored}, not {}; results may not match this repository",
+            repo.root().display()
+        );
+    }
+}
+
 /// Resolve the index db path for a repo, erroring if it does not exist.
 fn resolve_index_path(repo: &GitRepo, index: Option<String>) -> anyhow::Result<PathBuf> {
     let db_path = match index {
@@ -261,6 +276,7 @@ fn main() -> anyhow::Result<()> {
             let repo = GitRepo::new(&repo)?;
             let db_path = resolve_index_path(&repo, index)?;
             let db = IndexDb::open_for_read(&db_path)?;
+            warn_if_foreign_index(&repo, &db);
 
             let selected = select_and_report(&repo, &db, &task, &opts(budget, no_embed))?;
 
@@ -296,6 +312,7 @@ fn main() -> anyhow::Result<()> {
             let repo = GitRepo::new(&repo)?;
             let db_path = resolve_index_path(&repo, index)?;
             let db = IndexDb::open_for_read(&db_path)?;
+            warn_if_foreign_index(&repo, &db);
 
             let selected = select_and_report(&repo, &db, &task, &opts(budget, no_embed))?;
             let used: usize = selected.iter().map(|c| c.tokens()).sum();

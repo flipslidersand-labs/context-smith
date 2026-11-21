@@ -206,6 +206,16 @@ impl IndexDb {
         Ok(IndexDb { conn })
     }
 
+    /// The repository root recorded when the index was built (`meta.repo_root`),
+    /// or `None` if absent (older or hand-made index).
+    pub fn recorded_repo_root(&self) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key='repo_root'", [], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
     pub(crate) fn connection(&self) -> &Connection {
         &self.conn
     }

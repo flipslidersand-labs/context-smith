@@ -92,3 +92,44 @@ fn empty_out_is_rejected() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("must not be empty"), "stderr: {err}");
 }
+
+/// #494: `query --index` with an index built for another repository warns on stderr
+/// (and still runs); the matching repository stays silent.
+#[test]
+fn query_warns_when_index_was_built_for_another_repo() {
+    let a = committed_repo();
+    let b = committed_repo();
+    let cache = tempfile::tempdir().unwrap();
+    let db = cache.path().join("index.db");
+    let out = bin(&[
+        "index",
+        "--repo",
+        a.path().to_str().unwrap(),
+        "--out",
+        db.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let query = |repo: &Path| {
+        bin(&[
+            "query",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--index",
+            db.to_str().unwrap(),
+            "--task",
+            "answer",
+        ])
+    };
+    let same = query(a.path());
+    assert!(
+        !String::from_utf8_lossy(&same.stderr).contains("index was built for"),
+        "{}",
+        String::from_utf8_lossy(&same.stderr)
+    );
+    let other = query(b.path());
+    assert!(
+        String::from_utf8_lossy(&other.stderr).contains("index was built for"),
+        "{}",
+        String::from_utf8_lossy(&other.stderr)
+    );
+}
