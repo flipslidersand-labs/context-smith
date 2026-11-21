@@ -152,6 +152,56 @@ pub fn select_candidates(
     }
 }
 
+/// BM25 top-`seed_count` among files that can actually be read. Unreadable files (e.g. non-UTF-8
+/// ones that are indexed by path only, #308) would otherwise occupy seed slots and push real
+/// candidates out (#465), so fetch more rows until enough readable ones are found. When none is
+/// readable the unfiltered hits are returned, so the caller still reports "could not be read".
+fn readable_bm25(
+    repo: &GitRepo,
+    git_index: &git2::Index,
+    db: &IndexDb,
+    task: &str,
+    seed_count: usize,
+    skipped: &mut Vec<(PathBuf, String)>,
+) -> anyhow::Result<Vec<(i64, f32)>> {
+    let conn = db.connection();
+    let first = search_bm25(conn, task, seed_count)?;
+    let mut fetch = seed_count;
+    let mut hits = first.clone();
+    loop {
+        let mut readable = Vec::with_capacity(seed_count);
+        let mut dropped: Vec<(PathBuf, String)> = Vec::new();
+        for &(id, score) in &hits {
+            let rel: Option<String> = conn
+                .query_row("SELECT path FROM files WHERE id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            let Some(rel) = rel else { continue };
+            match repo.read_indexed(git_index, Path::new(&rel)) {
+                Ok(_) => {
+                    if readable.len() < seed_count {
+                        readable.push((id, score));
+                    }
+                }
+                Err(e) => dropped.push((repo.root().join(&rel), e.to_string())),
+            }
+        }
+        // `hits.len() < fetch` means BM25 has no more rows to give.
+        if readable.len() >= seed_count || hits.len() < fetch || fetch >= MAX_SEED_COUNT {
+            if readable.is_empty() {
+                return Ok(first);
+            }
+            for d in dropped {
+                if !skipped.iter().any(|(p, _)| *p == d.0) {
+                    skipped.push(d);
+                }
+            }
+            return Ok(readable);
+        }
+        fetch = (fetch * 2).min(MAX_SEED_COUNT);
+        hits = search_bm25(conn, task, fetch)?;
+    }
+}
+
 fn select_inner(
     repo: &GitRepo,
     db: &IndexDb,
@@ -168,7 +218,8 @@ fn select_inner(
     // Step 1: BM25 search → top-`seed_count` seeds, optionally RRF-fused with semantic
     // vectors. Fusion can surface files with zero lexical overlap, so the empty
     // check happens after fusion (semantic may rescue an empty BM25).
-    let bm25 = search_bm25(db.connection(), task, seed_count)?;
+    let git_index = repo.open_index()?;
+    let bm25 = readable_bm25(repo, &git_index, db, task, seed_count, skipped)?;
     let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
     *seed_mode_out = seed_mode;
     if seeds.is_empty() {
@@ -193,7 +244,6 @@ fn select_inner(
     // avoiding the O(all-files) read_to_string that wastes RAM (#80).
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    let git_index = repo.open_index()?;
     {
         let conn = db.connection();
         // Collect only the file IDs that have a positive score; the DB query
@@ -233,7 +283,9 @@ fn select_inner(
             let content = match repo.read_indexed(&git_index, Path::new(&rel_path)) {
                 Ok(s) => s,
                 Err(e) => {
-                    skipped.push((abs, e.to_string()));
+                    if !skipped.iter().any(|(p, _)| *p == abs) {
+                        skipped.push((abs, e.to_string()));
+                    }
                     unreadable.push(rel_path);
                     continue;
                 }
