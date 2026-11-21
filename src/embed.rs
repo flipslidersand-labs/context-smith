@@ -368,6 +368,11 @@ pub fn fuse_seeds(
     fuse_seeds_with_status(conn, embedder, task, bm25, top_n).map(|(seeds, _)| seeds)
 }
 
+/// True if any component is NaN or infinite.
+fn has_non_finite(v: &[f32]) -> bool {
+    v.iter().any(|x| !x.is_finite())
+}
+
 /// Like [`fuse_seeds`], but also reports whether vector fusion actually ran
 /// (`true`) or the BM25 seeds were returned unchanged (`false`: no stored
 /// embeddings, empty query vector, or dimension mismatch / mixed dimensions).
@@ -399,6 +404,13 @@ pub fn fuse_seeds_with_status(
         distinct_lens == 1 && min_len % 4 == 0 && min_len / 4 == query_vec.len() as i64;
     if query_vec.is_empty() || !consistent {
         eprintln!("warn: query embedding empty or dimension mismatch; using BM25 seeds only");
+        return Ok((bm25.to_vec(), false));
+    }
+    // A NaN/inf query makes every cosine score NaN, and `search_vectors` drops
+    // those rows, so fusion would be BM25 only anyway. Say so, and report the
+    // mode as BM25 instead of Fused.
+    if has_non_finite(&query_vec) {
+        eprintln!("warn: query embedding contains non-finite values; using BM25 seeds only");
         return Ok((bm25.to_vec(), false));
     }
     // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
@@ -911,6 +923,34 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn has_non_finite_detects_nan_and_inf() {
+        assert!(has_non_finite(&[1.0, f32::NAN]));
+        assert!(has_non_finite(&[f32::INFINITY, 0.0]));
+        assert!(has_non_finite(&[f32::NEG_INFINITY]));
+        assert!(!has_non_finite(&[1.0, -2.0, 0.0]));
+        assert!(!has_non_finite(&[]));
+    }
+
+    #[test]
+    fn fuse_seeds_nan_query_keeps_bm25_only_ranking() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 2.0f32), (8, 1.0)];
+        let (out, fused) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![f32::NAN, 0.0]),
+            "task",
+            &bm25,
+            10,
+        )
+        .unwrap();
+        assert_eq!(out, bm25);
+        assert!(
+            !fused,
+            "a non-finite query must report BM25 mode, not Fused"
+        );
     }
 
     #[test]

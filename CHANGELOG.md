@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
+- A query embedding containing NaN/inf now prints a one-time warning before falling back to BM25-only ranking (#481).
 - `recent_diff` no longer drops the root commit's files when the repository is shallow only on a merge's second-parent side; a real root is told apart from a shallow boundary by its raw parent header, and a shallow boundary now prints a note on stderr (#494).
 - `query`/`build` warn when `--index` points at an index built for a different repository (`meta.repo_root`) (#494).
 - `adapters/claude-code/ctx-select.sh` now exits 2 with a message when `contextsmith --version` fails, instead of exiting silently with an undocumented code (#494).
