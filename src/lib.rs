@@ -141,17 +141,27 @@ pub(crate) fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::R
 
 /// True if `real` (canonical, inside `canonical_root`) is a stage-0 entry in the
 /// repo's index. Fails closed on any error.
-fn is_tracked_in_index(canonical_root: &Path, real: &Path) -> bool {
+fn is_tracked_in_index(
+    canonical_root: &Path,
+    real: &Path,
+    index: &std::cell::OnceCell<Option<git2::Index>>,
+) -> bool {
     let Ok(rel) = real.strip_prefix(canonical_root) else {
         return false;
     };
     let Some(rel) = rel.to_str() else {
         return false;
     };
-    git2::Repository::open(canonical_root)
-        .and_then(|r| r.index())
-        .map(|idx| idx.get_path(Path::new(rel), 0).is_some())
-        .unwrap_or(false)
+    // Opened at most once per cell; an open/read error is cached as `None`
+    // (fail closed: nothing counts as tracked).
+    index
+        .get_or_init(|| {
+            git2::Repository::open(canonical_root)
+                .and_then(|r| r.index())
+                .ok()
+        })
+        .as_ref()
+        .is_some_and(|idx| idx.get_path(Path::new(rel), 0).is_some())
 }
 
 /// True if `path` or any ancestor below the repo root is a symlink. Walks up,
@@ -176,6 +186,16 @@ pub(crate) fn read_bytes_within_root(
     canonical_root: &Path,
     path: &Path,
 ) -> std::io::Result<Vec<u8>> {
+    read_bytes_within_root_with(canonical_root, path, &std::cell::OnceCell::new())
+}
+
+/// Like [`read_bytes_within_root`], but reuses a lazily opened git index across
+/// calls (one open per scan instead of one per tracked symlink).
+fn read_bytes_within_root_with(
+    canonical_root: &Path,
+    path: &Path,
+    index: &std::cell::OnceCell<Option<git2::Index>>,
+) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
         Err(_) => true,
@@ -189,7 +209,7 @@ pub(crate) fn read_bytes_within_root(
     // Any path component (not just the last) may be a symlink, e.g. a tracked
     // `docs -> ignored_dir` directory link.
     let is_link = path_has_symlink_component(canonical_root, path);
-    if is_link && !is_tracked_in_index(canonical_root, &real) {
+    if is_link && !is_tracked_in_index(canonical_root, &real, index) {
         return Err(std::io::Error::other(PathEscape));
     }
     // Never open FIFOs / devices / sockets: open(2)/read would block (#494).
@@ -398,7 +418,8 @@ impl GitRepo {
         let head = repo.head()?.peel_to_tree()?;
         let mut results = Vec::new();
         let mut skipped = 0usize;
-        self.scan_tree(&repo, &head, Vec::new(), &mut results, &mut skipped)?;
+        let index = std::cell::OnceCell::new();
+        self.scan_tree(&repo, &head, Vec::new(), &mut results, &mut skipped, &index)?;
         Ok((results, skipped))
     }
 
@@ -411,6 +432,7 @@ impl GitRepo {
         prefix: Vec<u8>,
         results: &mut Vec<(PathBuf, Language, String, i64)>,
         skipped: &mut usize,
+        index: &std::cell::OnceCell<Option<git2::Index>>,
     ) -> Result<()> {
         for entry in tree.iter() {
             let mut full = prefix.clone();
@@ -419,7 +441,7 @@ impl GitRepo {
                 Some(git2::ObjectType::Tree) => {
                     full.push(b'/');
                     let sub = entry.to_object(repo)?.peel_to_tree()?;
-                    self.scan_tree(repo, &sub, full, results, skipped)?;
+                    self.scan_tree(repo, &sub, full, results, skipped, index)?;
                 }
                 Some(git2::ObjectType::Blob) => {
                     let Ok(name) = String::from_utf8(full) else {
@@ -440,7 +462,11 @@ impl GitRepo {
                         .map(|(size, _)| size as i64)
                         .unwrap_or(0);
                     if lang != Language::Unknown {
-                        match read_bytes_within_root(&self.canonical_root, &self.root.join(&rel)) {
+                        match read_bytes_within_root_with(
+                            &self.canonical_root,
+                            &self.root.join(&rel),
+                            index,
+                        ) {
                             Ok(bytes) => {
                                 if let Ok(oid) =
                                     git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
@@ -1530,6 +1556,36 @@ mod tests {
             repo.read_tracked(Path::new("b.py")).unwrap(),
             "def real(): pass\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_resolves_many_tracked_symlinks() {
+        let tmp = symlink_repo();
+        let git = git2::Repository::open(tmp.path()).unwrap();
+        let mut index = git.index().unwrap();
+        for i in 0..50 {
+            let name = format!("link{i}.py");
+            std::os::unix::fs::symlink("real.py", tmp.path().join(&name)).unwrap();
+            index.add_path(Path::new(&name)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "links", &tree, &[&parent])
+            .unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let names: Vec<String> = repo
+            .scan()
+            .unwrap()
+            .into_iter()
+            .map(|(p, ..)| p.to_string_lossy().into_owned())
+            .collect();
+        for i in 0..50 {
+            assert!(names.contains(&format!("link{i}.py")), "{names:?}");
+        }
+        assert!(!names.contains(&"a.py".to_string()), "{names:?}");
     }
 
     #[cfg(unix)]
