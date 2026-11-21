@@ -112,6 +112,10 @@ impl IndexDb {
             // A missing file also yields CANTOPEN; retrying immutable would be
             // pointless, so only retry when the file exists.
             Err(e) if is_readonly_error(&e) && path.exists() => {
+                eprintln!(
+                    "warning: could not open {} normally ({e:#}); reopening read-only with immutable=1 (no locking)",
+                    path.display()
+                );
                 Self::open_read_only(path, true).or(Err(e))
             }
             Err(e) => Err(e),
@@ -686,6 +690,10 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             db.mark_indexed(file_id)?;
             stats.files_indexed += 1;
         }
+        // --- Pass 2: resolve imports → deps table, in the same transaction so
+        // a failure never leaves new symbols with stale deps (#494). ---
+        let go_modules = dep_builder::read_go_modules(repo.root(), &file_paths, &git_paths);
+        dep_builder::build_deps_in_tx(db.connection(), &file_paths, &go_modules)?;
         Ok(())
     })();
     match pass1_result {
@@ -699,9 +707,6 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         }
     }
 
-    // --- Pass 2: resolve imports → deps table (has its own transaction) ---
-    let go_modules = dep_builder::read_go_modules(repo.root(), &file_paths, &git_paths);
-    dep_builder::build_deps(db.connection(), &file_paths, &go_modules)?;
     stats.deps_total = db
         .connection()
         .query_row("SELECT COUNT(*) FROM deps", [], |row| row.get::<_, i64>(0))?
