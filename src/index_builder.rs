@@ -266,36 +266,30 @@ impl IndexDb {
         )?;
         // Migration: add indexed_sha column to existing databases (idempotent).
         // SQLite does not support IF NOT EXISTS on ADD COLUMN, so we check first.
-        let has_indexed_sha: bool = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'indexed_sha'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            > 0;
-        if !has_indexed_sha {
-            self.conn
-                .execute_batch("ALTER TABLE files ADD COLUMN indexed_sha TEXT;")?;
-        }
+        self.add_column_if_missing("files", "indexed_sha")?;
 
         // Migration: add content_sha column to embeddings table (idempotent).
         // Tracks the blob_sha at embed time so we can skip re-embedding unchanged files.
-        let has_content_sha: bool = self
+        self.add_column_if_missing("embeddings", "content_sha")?;
+
+        Ok(())
+    }
+
+    /// Add a nullable TEXT column to `table` unless it already exists.
+    fn add_column_if_missing(&self, table: &str, column: &str) -> Result<()> {
+        let exists: bool = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('embeddings') WHERE name = 'content_sha'",
-                [],
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0)
             > 0;
-        if !has_content_sha {
+        if !exists {
             self.conn
-                .execute_batch("ALTER TABLE embeddings ADD COLUMN content_sha TEXT;")?;
+                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;"))?;
         }
-
         Ok(())
     }
 
@@ -415,28 +409,22 @@ impl IndexDb {
         Ok(())
     }
 
+    /// Replace the path FTS row for a file with the tokenized `rel_path`.
+    fn replace_fts_path(&self, file_id: i64, rel_path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM fts_path WHERE rowid = ?1", params![file_id])?;
+        self.conn.execute(
+            "INSERT INTO fts_path (rowid, file_id, path) VALUES (?1, ?1, ?2)",
+            params![file_id, crate::tokenizer::tokenize_path(rel_path)],
+        )?;
+        Ok(())
+    }
+
     /// Delete all index records for a file (FTS, symbols, deps, files row).
     fn delete_file_records(&self, file_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM fts_path    WHERE rowid = ?1", params![file_id])?;
-        self.conn.execute(
-            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
-            params![file_id],
-        )?;
-        self.conn
-            .execute("DELETE FROM fts_body    WHERE rowid = ?1", params![file_id])?;
-        self.conn.execute(
-            "DELETE FROM symbols     WHERE file_id = ?1",
-            params![file_id],
-        )?;
-        self.conn.execute(
-            "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
-            params![file_id],
-        )?;
-        self.conn.execute(
-            "DELETE FROM embeddings WHERE file_id = ?1",
-            params![file_id],
-        )?;
+        self.delete_content_records(file_id)?;
         self.conn
             .execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
         Ok(())
@@ -606,15 +594,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                         "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
                         params![file_id],
                     )?;
-                    db.connection()
-                        .execute("DELETE FROM fts_path WHERE rowid = ?1", params![file_id])?;
-                    db.connection().execute(
-                        "INSERT INTO fts_path (rowid, file_id, path) VALUES (?1, ?1, ?2)",
-                        params![
-                            file_id,
-                            crate::tokenizer::tokenize_path(&rel_path.to_string_lossy())
-                        ],
-                    )?;
+                    db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
                     file_paths.remove(&file_id);
                     stats.files_skipped += 1;
                     continue;
@@ -664,13 +644,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             }
 
             // (c) Replace FTS rows for this file.
-            db.connection()
-                .execute("DELETE FROM fts_path WHERE rowid = ?1", params![file_id])?;
-            let tokenized_path = crate::tokenizer::tokenize_path(&rel_path.to_string_lossy());
-            db.connection().execute(
-                "INSERT INTO fts_path (rowid, file_id, path) VALUES (?1, ?1, ?2)",
-                params![file_id, tokenized_path],
-            )?;
+            db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
 
             for (sym_id, name) in fts_syms {
                 db.connection().execute(
