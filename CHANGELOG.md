@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
 
 ### Changed
+- Bump `ureq` to 3 for the opt-in `remote-embed` feature (RemoteEmbedder behavior unchanged: no redirects, retries, 10MB cap) (#356).
 - `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
