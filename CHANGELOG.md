@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
 - `SelectOptions` gains `seed_count` (default 20) and `bfs_depth` (default 2), replacing hard-coded values in the select pipeline; default behavior is unchanged (#401).

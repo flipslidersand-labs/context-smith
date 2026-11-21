@@ -39,6 +39,32 @@ impl SelectOptions {
     }
 }
 
+/// How the seed files were chosen.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedMode {
+    /// BM25 only (embeddings disabled, not built in, or no embedder configured).
+    Bm25,
+    /// BM25 RRF-fused with embedding seeds.
+    Fused,
+    /// An embedder was configured but no usable embeddings were stored; BM25 seeds used.
+    NoUsableEmbeddings,
+    /// Embedding failed; fell back to BM25. Holds the failure reason.
+    FallbackBm25(String),
+}
+
+/// Result of [`select_candidates`]: the candidates plus diagnostics the caller may display.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct Selection {
+    /// Selected candidates in score order.
+    pub candidates: Vec<Candidate>,
+    /// How the seeds were chosen.
+    pub seed_mode: SeedMode,
+    /// Files skipped because they could not be read: (absolute path, error).
+    pub skipped: Vec<(PathBuf, String)>,
+}
+
 /// Compute seed files for a task. With the `remote-embed` feature and a
 /// configured embedder, RRF-fuse BM25 with semantic (vector) seeds; otherwise
 /// return the BM25 seeds unchanged (backward compatible).
@@ -48,7 +74,7 @@ fn build_seeds(
     bm25: Vec<(i64, f32)>,
     no_embed: bool,
     seed_count: usize,
-) -> anyhow::Result<Vec<(i64, f32)>> {
+) -> anyhow::Result<(Vec<(i64, f32)>, SeedMode)> {
     #[cfg(feature = "remote-embed")]
     {
         if !no_embed {
@@ -56,35 +82,33 @@ fn build_seeds(
                 match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, seed_count)
                 {
                     Ok((seeds, fused)) => {
-                        if fused {
-                            eprintln!("semantic: RRF-fused BM25 with embedding seeds");
+                        let mode = if fused {
+                            SeedMode::Fused
                         } else {
-                            eprintln!("semantic: no usable embeddings; using BM25 seeds only");
-                        }
-                        return Ok(seeds);
+                            SeedMode::NoUsableEmbeddings
+                        };
+                        return Ok((seeds, mode));
                     }
-                    Err(e) => {
-                        eprintln!("semantic: embedding failed ({e}); falling back to BM25")
-                    }
+                    Err(e) => return Ok((bm25, SeedMode::FallbackBm25(e.to_string()))),
                 }
             }
         }
     }
     #[cfg(not(feature = "remote-embed"))]
     let _ = (conn, task, no_embed, seed_count);
-    Ok(bm25)
+    Ok((bm25, SeedMode::Bm25))
 }
 
 /// Run the selection pipeline for a task: BM25 (optionally RRF-fused with
 /// semantic seeds) → dependency BFS → load content → greedy budget allocation.
-/// Returns the selected candidates in score order, or an error when no files
+/// Returns the selected candidates in score order plus diagnostics (seed mode, skipped files), or an error when no files
 /// match (so the caller decides how to exit, preserving RAII drop order).
 pub fn select_candidates(
     repo: &GitRepo,
     db: &IndexDb,
     task: &str,
     opts: &SelectOptions,
-) -> anyhow::Result<Vec<Candidate>> {
+) -> anyhow::Result<Selection> {
     if opts.seed_count == 0 {
         anyhow::bail!("seed_count must be >= 1");
     }
@@ -94,7 +118,7 @@ pub fn select_candidates(
     // vectors. Fusion can surface files with zero lexical overlap, so the empty
     // check happens after fusion (semantic may rescue an empty BM25).
     let bm25 = search_bm25(db.connection(), task, seed_count)?;
-    let seeds = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
+    let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
     }
@@ -117,6 +141,7 @@ pub fn select_candidates(
     // avoiding the O(all-files) read_to_string that wastes RAM (#80).
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
+    let mut skipped: Vec<(PathBuf, String)> = Vec::new();
     let git_index = repo.open_index()?;
     {
         let conn = db.connection();
@@ -157,7 +182,7 @@ pub fn select_candidates(
             let content = match repo.read_indexed(&git_index, Path::new(&rel_path)) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("warn: skip {:?}: {e}", abs);
+                    skipped.push((abs, e.to_string()));
                     unreadable.push(rel_path);
                     continue;
                 }
@@ -201,7 +226,11 @@ pub fn select_candidates(
     let candidates = dedup_by_real_path(repo, candidates);
 
     // Step 4: Greedy budget allocation
-    Ok(allocate(candidates, opts.budget))
+    Ok(Selection {
+        candidates: allocate(candidates, opts.budget),
+        seed_mode,
+        skipped,
+    })
 }
 
 /// Collapse candidates whose paths resolve to the same file inside the repo. The candidate at the

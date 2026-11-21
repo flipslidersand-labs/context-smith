@@ -23,7 +23,8 @@ fn positive_usize(s: &str) -> Result<usize, String> {
 }
 
 use context_smith::{
-    build_index, render_task_md, select_candidates, write_bundle, GitRepo, IndexDb, SelectOptions,
+    build_index, render_task_md, select_candidates, write_bundle, Candidate, GitRepo, IndexDb,
+    SeedMode, SelectOptions, Selection,
 };
 
 #[derive(Parser)]
@@ -113,6 +114,35 @@ fn opts(budget: usize, no_embed: bool) -> SelectOptions {
     let mut o = SelectOptions::new(budget);
     o.no_embed = no_embed;
     o
+}
+
+/// Print the selection diagnostics to stderr (same wording as before they were returned).
+fn report_selection(sel: &Selection) {
+    match &sel.seed_mode {
+        SeedMode::Bm25 => {}
+        SeedMode::Fused => eprintln!("semantic: RRF-fused BM25 with embedding seeds"),
+        SeedMode::NoUsableEmbeddings => {
+            eprintln!("semantic: no usable embeddings; using BM25 seeds only")
+        }
+        SeedMode::FallbackBm25(e) => {
+            eprintln!("semantic: embedding failed ({e}); falling back to BM25")
+        }
+        _ => {}
+    }
+    for (abs, e) in &sel.skipped {
+        eprintln!("warn: skip {:?}: {e}", abs);
+    }
+}
+
+fn select_and_report(
+    repo: &GitRepo,
+    db: &IndexDb,
+    task: &str,
+    o: &SelectOptions,
+) -> anyhow::Result<Vec<Candidate>> {
+    let sel = select_candidates(repo, db, task, o)?;
+    report_selection(&sel);
+    Ok(sel.candidates)
 }
 
 /// Resolve the index db path for a repo, erroring if it does not exist.
@@ -224,7 +254,7 @@ fn main() -> anyhow::Result<()> {
             let db_path = resolve_index_path(&repo, index)?;
             let db = IndexDb::open_for_read(&db_path)?;
 
-            let selected = select_candidates(&repo, &db, &task, &opts(budget, no_embed))?;
+            let selected = select_and_report(&repo, &db, &task, &opts(budget, no_embed))?;
 
             // Recent diff, then write the bundle to disk.
             let diff_summary = match repo.recent_diff(diff_commits) {
@@ -259,7 +289,7 @@ fn main() -> anyhow::Result<()> {
             let db_path = resolve_index_path(&repo, index)?;
             let db = IndexDb::open_for_read(&db_path)?;
 
-            let selected = select_candidates(&repo, &db, &task, &opts(budget, no_embed))?;
+            let selected = select_and_report(&repo, &db, &task, &opts(budget, no_embed))?;
             let used: usize = selected.iter().map(|c| c.tokens()).sum();
 
             match format {
@@ -396,7 +426,10 @@ mod tests {
         std::os::unix::fs::symlink(&ext, tmp.path().join("a.rs")).unwrap();
 
         if let Ok(sel) = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)) {
-            assert!(sel.iter().all(|c| !c.content.contains("EXTSECRET")));
+            assert!(sel
+                .candidates
+                .iter()
+                .all(|c| !c.content.contains("EXTSECRET")));
         }
     }
 
@@ -448,7 +481,9 @@ mod tests {
         let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
         let mut o = opts(10_000, true);
         o.seed_count = usize::MAX / 2;
-        let sel = select_candidates(&repo, &db, "alpha_widget", &o).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &o)
+            .unwrap()
+            .candidates;
         assert_eq!(sel.len(), 1);
     }
 
@@ -458,7 +493,9 @@ mod tests {
         conn_of(&d)
             .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM files WHERE path = 'b.rs'")
             .unwrap();
-        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true))
+            .unwrap()
+            .candidates;
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
@@ -470,7 +507,9 @@ mod tests {
             .execute("UPDATE files SET lang = 'unknown' WHERE path = 'b.rs'", [])
             .unwrap();
         assert_eq!(n, 1);
-        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true))
+            .unwrap()
+            .candidates;
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
     }
@@ -490,9 +529,22 @@ mod tests {
         let (t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
         // Vanishes after indexing: the read fails and only b.rs is skipped.
         std::fs::remove_file(t.path().join("b.rs")).unwrap();
-        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true))
+            .unwrap()
+            .candidates;
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn select_candidates_returns_skipped_files_and_bm25_seed_mode() {
+        let (t, repo, _d, db) = indexed_repo(&["a.rs", "b.rs"]);
+        std::fs::remove_file(t.path().join("b.rs")).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        assert_eq!(sel.seed_mode, SeedMode::Bm25);
+        assert_eq!(sel.skipped.len(), 1);
+        assert_eq!(sel.skipped[0].0, repo.root().join("b.rs"));
+        assert!(!sel.skipped[0].1.is_empty());
     }
 
     /// Commit `files` (path, content) plus `links` (path, target) as tracked symlinks.
@@ -540,7 +592,9 @@ mod tests {
             &[("zzqx_a.py", ""), ("zzqx_b.py", "def zzqx_b(): pass\n")],
             &[],
         );
-        let sel = select_candidates(&repo, &db, "zzqx", &opts(10_000, true)).unwrap();
+        let sel = select_candidates(&repo, &db, "zzqx", &opts(10_000, true))
+            .unwrap()
+            .candidates;
         assert_eq!(sel.len(), 1);
         assert_eq!(sel[0].path, PathBuf::from("zzqx_b.py"));
     }
@@ -552,7 +606,9 @@ mod tests {
             &[("real.rs", "pub fn alpha_widget() {}\n")],
             &[("a_link.rs", "real.rs")],
         );
-        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true))
+            .unwrap()
+            .candidates;
         let paths: Vec<_> = sel.iter().map(|c| c.path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("real.rs")]);
     }
@@ -563,7 +619,9 @@ mod tests {
             &[("zz_real.rs", "pub fn alpha_widget() {}\n")],
             &[("alpha_widget_link.rs", "zz_real.rs")],
         );
-        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap();
+        let sel = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true))
+            .unwrap()
+            .candidates;
         assert_eq!(sel.len(), 1);
     }
 }
