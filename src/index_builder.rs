@@ -551,7 +551,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
     // Cleanup + Pass 1 run inside this closure so that every `?` is followed
-    // by the ROLLBACK below (covers cleanup + upserts to avoid N+1 fsync and
+    // by a rollback when `tx` is dropped (covers cleanup + upserts to avoid N+1 fsync and
     // SQLITE_BUSY risk).
     let pass1_result = (|| -> Result<()> {
         if wipe_fts {
