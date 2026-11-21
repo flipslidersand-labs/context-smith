@@ -152,7 +152,7 @@ pub fn select_candidates(
     }
 }
 
-/// BM25 top-`seed_count` among files that can actually be read. Unreadable files (e.g. non-UTF-8
+/// BM25 top-`seed_count` among files that can actually be read and are non-empty (#536). Unreadable files (e.g. non-UTF-8
 /// ones that are indexed by path only, #308) would otherwise occupy seed slots and push real
 /// candidates out (#465), so fetch more rows until enough readable ones are found. When none is
 /// readable the unfiltered hits are returned, so the caller still reports "could not be read".
@@ -177,8 +177,9 @@ fn readable_bm25(
                 .optional()?;
             let Some(rel) = rel else { continue };
             match repo.read_indexed(git_index, Path::new(&rel)) {
-                Ok(_) => {
-                    if readable.len() < seed_count {
+                // Empty / whitespace-only files do not take a seed slot (#536).
+                Ok(content) => {
+                    if !content.trim().is_empty() && readable.len() < seed_count {
                         readable.push((id, score));
                     }
                 }

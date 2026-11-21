@@ -362,6 +362,72 @@ mod tests {
         assert_eq!(c[&2], 1.0);
     }
 
+    /// Hub 0 plus leaves 1..=n; edge directions alternate, and consecutive leaves are chained so
+    /// that neighbours straddle SQL chunk boundaries. A self-loop on 1 must be ignored.
+    fn star_chain(n: i64) -> Connection {
+        let mut e = vec![(1, 1)];
+        for i in 1..=n {
+            e.push(if i % 2 == 0 { (i, 0) } else { (0, i) });
+            if i < n {
+                e.push((i, i + 1));
+            }
+        }
+        graph(&e)
+    }
+
+    #[test]
+    fn neighbors_and_degrees_correct_across_chunk_boundaries() {
+        for n in [499i64, 500, 501, 1000, 1001] {
+            let conn = star_chain(n);
+            // Hub last, so it lands in the final chunk; leaves straddle every boundary.
+            let mut ids: Vec<i64> = (1..=n).collect();
+            ids.push(0);
+            let nb = neighbors(&conn, &ids).unwrap();
+            let deg = degrees(&conn, &ids).unwrap();
+            assert_eq!(nb.len(), ids.len(), "n={n}");
+            assert_eq!(nb[&0], (1..=n).collect::<Vec<_>>(), "n={n}");
+            assert_eq!(deg[&0], n as usize, "n={n}");
+            for i in 1..=n {
+                let mut want = vec![0];
+                if i > 1 {
+                    want.push(i - 1);
+                }
+                if i < n {
+                    want.push(i + 1);
+                }
+                want.sort_unstable();
+                assert_eq!(nb[&i], want, "n={n} leaf {i}");
+                assert_eq!(deg[&i], want.len(), "n={n} leaf {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn capped_depth_zero_returns_only_seeds() {
+        let conn = graph(&[(1, 2), (2, 3)]);
+        let s = bfs_capped(&conn, &[(1, 8.0), (3, 2.0), (1, 5.0)], 0).unwrap();
+        assert_eq!(keys(&s), vec![1, 3]);
+        assert_eq!(s[&1], 8.0);
+        assert_eq!(s[&3], 2.0);
+    }
+
+    #[test]
+    fn capped_keeps_max_over_paths_and_lower_rescore_does_not_enter_frontier() {
+        // Node 2 is reached from seed 1 (high) and seed 3 (low): the max must remain. On the
+        // next hop 2 offers lower scores back to both seeds, which must not overwrite them.
+        let conn = graph(&[(1, 2), (2, 3)]);
+        let seeds = [(1, 100.0), (3, 60.0)];
+        let d1 = bfs_capped(&conn, &seeds, 1).unwrap();
+        let want = 100.0 * 0.5 / 2f32.sqrt();
+        assert!((d1[&2] - want).abs() < 1e-4);
+        let d2 = bfs_capped(&conn, &seeds, 2).unwrap();
+        assert_eq!(d2[&1], 100.0);
+        assert_eq!(d2[&3], 60.0);
+        assert!((d2[&2] - want).abs() < 1e-4);
+        // Nothing improved on hop 2, so the frontier is empty and further depth changes nothing.
+        assert_eq!(bfs_capped(&conn, &seeds, 5).unwrap(), d2);
+    }
+
     #[test]
     fn ppr_candidate_set_matches_bfs_and_bounds_scores() {
         let conn = hub_graph();
