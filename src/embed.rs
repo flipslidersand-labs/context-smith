@@ -6,7 +6,7 @@
 //! default crates.io build stays lean and works offline (BM25 only).
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
 /// Embedding intent. e5-style models embed documents and queries differently;
 /// the embedding service applies the right prefix based on this mode, so callers
@@ -45,11 +45,7 @@ const EMBED_MODEL_KEY: &str = "embed_model";
 const EMBED_DIM_KEY: &str = "embed_dim";
 
 fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
-            r.get(0)
-        })
-        .optional()?)
+    crate::index_builder::IndexDb::get_meta_on(conn, key)
 }
 
 /// Serialize a vector as little-endian f32 bytes for BLOB storage.
@@ -240,11 +236,7 @@ fn populate_embeddings_inner(
         let tx =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
         let result = (|| -> Result<()> {
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![EMBED_DIM_KEY, dim.to_string()],
-            )?;
+            crate::index_builder::IndexDb::upsert_meta_on(conn, EMBED_DIM_KEY, &dim.to_string())?;
             for ((id, sha), v) in ids.iter().zip(shas.iter()).zip(vecs.iter()) {
                 conn.execute(
                     "INSERT INTO embeddings (file_id, vector, content_sha)
