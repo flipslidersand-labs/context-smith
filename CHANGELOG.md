@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 - `select_candidates` now returns `Result<Selection, SelectError>` instead of `Result<Vec<Candidate>>`; use `.candidates` for the old value (#400).
 
+### Security
+- libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
+
 ### Changed
 - `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
@@ -17,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SelectOptions` gains `seed_count` (default 20) and `bfs_depth` (default 2), replacing hard-coded values in the select pipeline; default behavior is unchanged (#401).
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
+- Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
 
 ### Fixed
 - `recent_diff` no longer drops the root commit's files when the repository is shallow only on a merge's second-parent side; a real root is told apart from a shallow boundary by its raw parent header, and a shallow boundary now prints a note on stderr (#494).
