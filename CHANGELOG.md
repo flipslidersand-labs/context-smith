@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal duplication in the extractors, index builder and embedding `meta` access is removed: the six `extract_*` wrappers share one parser setup, `fts_path` rewrites and column migrations use one helper each, `delete_file_records` reuses `delete_content_records`, inserted symbol ids are reused instead of re-read, and `meta` reads/writes use one SQL path. Behavior is unchanged (#422).
 
 ### Fixed
+- `ctx-select.sh` rejects `--budget 0` as a usage error (exit 2, "must be a positive integer") instead of passing it to the CLI and failing with "query failed" (#532).
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
 - A query embedding containing NaN/inf now prints a one-time warning before falling back to BM25-only ranking (#481).
 - Embedding writes now check that every vector in a batch, and every batch of a run, has the same dimension; a mid-run change is an error instead of deleting committed batches and restarting (#465).
