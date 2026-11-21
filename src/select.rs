@@ -101,7 +101,7 @@ fn build_seeds(
     bm25: Vec<(i64, f32)>,
     no_embed: bool,
     seed_count: usize,
-) -> anyhow::Result<(Vec<(i64, f32)>, SeedMode)> {
+) -> (Vec<(i64, f32)>, SeedMode) {
     #[cfg(feature = "remote-embed")]
     {
         if !no_embed {
@@ -114,16 +114,16 @@ fn build_seeds(
                         } else {
                             SeedMode::NoUsableEmbeddings
                         };
-                        return Ok((seeds, mode));
+                        return (seeds, mode);
                     }
-                    Err(e) => return Ok((bm25, SeedMode::FallbackBm25(e.to_string()))),
+                    Err(e) => return (bm25, SeedMode::FallbackBm25(e.to_string())),
                 }
             }
         }
     }
     #[cfg(not(feature = "remote-embed"))]
     let _ = (conn, task, no_embed, seed_count);
-    Ok((bm25, SeedMode::Bm25))
+    (bm25, SeedMode::Bm25)
 }
 
 /// Run the selection pipeline for a task: BM25 (optionally RRF-fused with
@@ -220,24 +220,15 @@ fn select_inner(
     // check happens after fusion (semantic may rescue an empty BM25).
     let git_index = repo.open_index()?;
     let bm25 = readable_bm25(repo, &git_index, db, task, seed_count, skipped)?;
-    let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
+    let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count);
     *seed_mode_out = seed_mode;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
     }
 
     // Step 2: BFS expand from seeds (depth=`bfs_depth`)
-    let mut scored = bfs_expand(db.connection(), &seeds, opts.bfs_depth)?;
-    for (fid, s) in &seeds {
-        scored
-            .entry(*fid)
-            .and_modify(|v| {
-                if *s > *v {
-                    *v = *s;
-                }
-            })
-            .or_insert(*s);
-    }
+    // `bfs_expand` already keeps every seed at its max score (never lowered by BFS).
+    let scored = bfs_expand(db.connection(), &seeds, opts.bfs_depth)?;
 
     // Step 3: Load paths for scored files only, then read content.
     // Filter in the SQL query so we never fetch rows for unscored files,
