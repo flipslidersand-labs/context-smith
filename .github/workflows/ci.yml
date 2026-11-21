@@ -22,7 +22,7 @@ env:
 
 jobs:
   # fmt / clippy / build / test / coverage は qa-workflows の reusable に集約 (#121)。
-  # runner は reusable 側で vars.GATE_RUNNER -> ubuntu-latest の順に解決される。
+  # runner は reusable 側で inputs.runner -> vars.GATE_RUNNER の順に解決される(既定値なし。変数が未設定だとジョブは起動しない)。
   rust:
     permissions:
       contents: read
