@@ -3,6 +3,7 @@ mod bundle_writer;
 mod dep_builder;
 #[cfg_attr(not(feature = "remote-embed"), allow(dead_code))]
 mod embed;
+mod expand;
 mod index_builder;
 mod path_kind;
 mod search_index;

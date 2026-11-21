@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
 
+### Added
+- `CONTEXTSMITH_EXPAND` env var (`bfs` default, `bfs-capped`, `ppr`) selects the dependency expansion method; unset keeps current BFS behavior (#293).
+
 ### Changed
 - Bump `ureq` to 3 for the opt-in `remote-embed` feature (RemoteEmbedder behavior unchanged: no redirects, retries, 10MB cap) (#356).
 - `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).

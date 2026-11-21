@@ -1,5 +1,5 @@
 use crate::budget::{allocate, Candidate};
-use crate::dep_builder::bfs_expand;
+use crate::expand::{expand, mode_from_env};
 use crate::index_builder::IndexDb;
 use crate::path_kind::path_score_factor;
 use crate::search_index::search_bm25;
@@ -227,8 +227,8 @@ fn select_inner(
     }
 
     // Step 2: BFS expand from seeds (depth=`bfs_depth`)
-    // `bfs_expand` already keeps every seed at its max score (never lowered by BFS).
-    let scored = bfs_expand(db.connection(), &seeds, opts.bfs_depth)?;
+    // Every expansion mode already keeps each seed at its max score (never lowered).
+    let scored = expand(db.connection(), mode_from_env()?, &seeds, opts.bfs_depth)?;
 
     // Step 3: Load paths for scored files only, then read content.
     // Filter in the SQL query so we never fetch rows for unscored files,
