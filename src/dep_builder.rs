@@ -40,7 +40,25 @@ fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Ve
 ///
 /// `go_modules` are the `(directory, module path)` pairs of every `go.mod` in the repo (see
 /// [`read_go_modules`]); when non-empty, Go imports resolve only inside those modules (#419, #429).
+#[cfg(test)]
 pub fn build_deps(
+    conn: &Connection,
+    file_paths: &HashMap<i64, PathBuf>,
+    go_module: &[GoModule],
+) -> Result<()> {
+    conn.execute_batch("BEGIN")?;
+    match build_deps_in_tx(conn, file_paths, go_module) {
+        Ok(()) => crate::commit_or_rollback(conn).map_err(Into::into),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Same as [`build_deps`] but writes inside the caller's already-open transaction
+/// (no BEGIN/COMMIT/ROLLBACK), so the caller can make it atomic with other writes.
+pub(crate) fn build_deps_in_tx(
     conn: &Connection,
     file_paths: &HashMap<i64, PathBuf>,
     go_module: &[GoModule],
@@ -60,8 +78,7 @@ pub fn build_deps(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    conn.execute_batch("BEGIN")?;
-    let result = (|| -> Result<()> {
+    {
         conn.execute_batch("DELETE FROM deps")?;
         for (from_id, import_str) in &imports {
             let from_path = match file_paths.get(from_id) {
@@ -80,14 +97,6 @@ pub fn build_deps(
             }
         }
         Ok(())
-    })();
-
-    match result {
-        Ok(()) => crate::commit_or_rollback(conn).map_err(Into::into),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
     }
 }
 
