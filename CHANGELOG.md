@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 - Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
+- Hand-written `BEGIN`/`COMMIT`/`ROLLBACK` in the index, dependency, embedding and FTS builders is replaced by rusqlite's `Transaction`; BEGIN mode and failure behavior are unchanged (#422).
 
 ### Fixed
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).

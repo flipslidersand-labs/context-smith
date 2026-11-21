@@ -542,9 +542,11 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
     // delete_file_records() and the Pass-1 upserts/FTS updates are atomic.
     // If the process crashes between cleanup and COMMIT the WAL is simply
     // rolled back on next open, leaving the DB in its previous consistent state.
-    db.connection()
-        .execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin cleanup+Pass-1 transaction")?;
+    let tx = rusqlite::Transaction::new_unchecked(
+        db.connection(),
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .context("Failed to begin cleanup+Pass-1 transaction")?;
 
     let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
@@ -696,16 +698,11 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         dep_builder::build_deps_in_tx(db.connection(), &file_paths, &go_modules)?;
         Ok(())
     })();
-    match pass1_result {
-        Ok(()) => crate::commit_or_rollback(db.connection())
-            .context("Failed to commit cleanup+Pass-1 transaction")?,
-        Err(e) => {
-            // Roll back both the stale-file deletions and any Pass-1 writes so
-            // the DB is never left in a half-cleaned state.
-            let _ = db.connection().execute_batch("ROLLBACK");
-            return Err(e);
-        }
-    }
+    // On error, returning drops `tx`, rolling back both the stale-file deletions
+    // and any Pass-1 writes so the DB is never left in a half-cleaned state.
+    pass1_result?;
+    tx.commit()
+        .context("Failed to commit cleanup+Pass-1 transaction")?;
 
     stats.deps_total = db
         .connection()

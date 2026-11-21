@@ -46,14 +46,11 @@ pub fn build_deps(
     file_paths: &HashMap<i64, PathBuf>,
     go_module: &[GoModule],
 ) -> Result<()> {
-    conn.execute_batch("BEGIN")?;
-    match build_deps_in_tx(conn, file_paths, go_module) {
-        Ok(()) => crate::commit_or_rollback(conn).map_err(Into::into),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
+    // Dropping `tx` on error rolls back; a failed COMMIT is rolled back by Drop too.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
+    build_deps_in_tx(&tx, file_paths, go_module)?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Same as [`build_deps`] but writes inside the caller's already-open transaction

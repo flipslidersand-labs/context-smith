@@ -237,7 +237,8 @@ fn populate_embeddings_inner(
         }
 
         // Persist each vector with its content_sha in a single transaction.
-        conn.execute_batch("BEGIN")?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
         let result = (|| -> Result<()> {
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -257,16 +258,10 @@ fn populate_embeddings_inner(
             Ok(())
         })();
 
-        match result {
-            Ok(()) => {
-                crate::commit_or_rollback(conn)?;
-                written += ids.len();
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        }
+        // Early return drops `tx`, which rolls back.
+        result?;
+        tx.commit()?;
+        written += ids.len();
     }
 
     Ok(written)
