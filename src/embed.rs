@@ -565,6 +565,9 @@ impl RemoteEmbedder {
             // Never follow redirects: a 3xx would replay the request (and X-API-Key)
             // to an arbitrary host, possibly over plain http.
             .max_redirects(0)
+            // ureq 3 reads ALL_PROXY/HTTPS_PROXY by default; ureq 2 did not. Keep the old
+            // behavior so X-API-Key is not routed through an environment-chosen proxy.
+            .proxy(None)
             .build()
             .into()
     }
