@@ -22,9 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
 - `SelectOptions` gains `seed_count` (default 20) and `bfs_depth` (default 2), replacing hard-coded values in the select pipeline; default behavior is unchanged (#401).
+- The scan reuses one lazily opened git index for all tracked-symlink checks instead of reopening the repo per symlink; fail-closed behavior is unchanged (#353).
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 - Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
+- `populate_embeddings` no longer takes a redundant connection argument (it uses `db.connection()`), and `build_seeds` no longer returns an always-`Ok` `Result`; the redundant seed re-insert after `bfs_expand` is removed. Behavior is unchanged (#352).
 
 ### Fixed
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
