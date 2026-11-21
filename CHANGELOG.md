@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
 - `index` now reads only the object header (not the full content) of each tracked blob to get its size, so binary files are no longer loaded on every scan; sizes are unchanged (#352).
 - Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
+- Hand-written `BEGIN`/`COMMIT`/`ROLLBACK` in the index, dependency, embedding and FTS builders is replaced by rusqlite's `Transaction`; BEGIN mode and failure behavior are unchanged (#422).
 - `populate_embeddings` no longer takes a redundant connection argument (it uses `db.connection()`), and `build_seeds` no longer returns an always-`Ok` `Result`; the redundant seed re-insert after `bfs_expand` is removed. Behavior is unchanged (#352).
 
 ### Fixed
