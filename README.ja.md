@@ -139,7 +139,7 @@ contextsmith index          contextsmith build
 | Go | ✅ 関数/型/import | ✅ パッケージパス解決 |
 | TypeScript | ✅ 関数/クラス/interface/type/enum/arrow/import | ✅ ES import 相対パス解決(拡張子・index.ts 補完) |
 | JavaScript | ✅ 関数/クラス/arrow/import/require | ✅ ES import + CommonJS `require()` 相対パス解決 |
-| Ruby | ✅ class/module/method/require (`.rb`) | ❌ 未対応 |
+| Ruby | ✅ class/module/method/require (`.rb`) | ✅ `require_relative` は呼び出し元のディレクトリから、`require 'x'` は `lib/x.rb` か `x.rb` に解決(gem は解決しない) |
 
 TypeScript は `.ts` / `.tsx` / `.mts` / `.cts`、JavaScript は `.js` / `.jsx` / `.mjs` / `.cjs` を対象とする。
 bare import(`react` など node_modules パッケージ)は依存グラフには含めない。
@@ -162,18 +162,18 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 
 出典: [bench/README.md](./bench/README.md#targets-and-current-status-147)。2026-11-03 に master `038eadc`([#164](https://github.com/flipslidersand-labs/context-smith/pull/164) の後)で、release ビルドのバイナリ、リポごとに 1 回、strict 指標・題名のみのタスクで測定。再現: `REPO=<clone> TASKMODE=title python3 bench/bench.py`(準備とリポごとのオプションは [bench/](./bench/README.md))。1 タスクは 0.02〜0.04 に相当するので、0.03 以下の差は誤差の範囲。
 
-**精度の目標は未達です([#135](https://github.com/flipslidersand-labs/context-smith/issues/135) は未解決)。** 下限(どのセルでも context-smith が単語一致 − 0.02 以上)は 27 セル中 25 で成立し、満たさないのは **poetry の 8k(-0.05)と 16k(-0.10)** の 2 つ。価値の目標(16k で単語一致を 0.05 以上上回る)は 9 リポ中 7 で成立し、外れるのは scrapy(+0.01)と poetry(-0.10)、どちらも Python。Rust の数字がそのまま通用するとは考えないこと。この測定では、poetry(0.26、0.30)と hono(0.72、0.83)で 8k から 16k に recall が下がる現象は起きていない。以前の値(master `aa4ef89`、[#164](https://github.com/flipslidersand-labs/context-smith/pull/164) より前)では起きており、[bench/](./bench/README.md) に残してある。正しいファイルが事前に分かっている場合に 16k に全文で入るものの上限(ceiling)は、axum 0.97、clap 0.87、bat 0.99、scrapy 0.97、poetry 0.99、hono 1.00、zod 0.68(bench による。ripgrep と fd は記載なし)。この数字は開発版のもので、crates.io の 0.4.0 には予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151)・[#162](https://github.com/flipslidersand-labs/context-smith/pull/162))と [#164](https://github.com/flipslidersand-labs/context-smith/pull/164) が入っていません。限界: BM25 のみ(埋め込みなし)、比較対象は未チューニング、リポごとに 1 回の測定。シンボルの重み(0.5)と予算配分の規則は axum・clap・bat・scrapy・poetry で開発したため、この表はそれらのリポに対して楽観的。ripgrep・fd・hono・zod は、どのパラメータの選択にも使っていない。ripgrep は正解ファイルが大きく(中央値 約 9,400 トークン。他は約 3,500)、予算配分の規則が最も効く。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
+**精度の目標は未達です([#135](https://github.com/flipslidersand-labs/context-smith/issues/135) は未解決)。** 下限(どのセルでも context-smith が単語一致 − 0.02 以上)は 27 セル中 25 で成立し、満たさないのは **poetry の 8k(-0.05)と 16k(-0.10)** の 2 つ。価値の目標(16k で単語一致を 0.05 以上上回る)は 9 リポ中 7 で成立し、外れるのは scrapy(+0.01)と poetry(-0.10)、どちらも Python。Rust の数字がそのまま通用するとは考えないこと。この測定では、poetry(0.26、0.30)と hono(0.72、0.83)で 8k から 16k に recall が下がる現象は起きていない。以前の値(master `aa4ef89`、[#164](https://github.com/flipslidersand-labs/context-smith/pull/164) より前)では起きており、[bench/](./bench/README.md) に残してある。正しいファイルが事前に分かっている場合に 16k に全文で入るものの上限(ceiling)は、axum 0.97、clap 0.87、bat 0.99、scrapy 0.97、poetry 0.99、hono 1.00、zod 0.68(bench による。ripgrep と fd は記載なし)。この数字は開発版のもの。予算配分・順位づけ・シンボル採点の修正([#142](https://github.com/flipslidersand-labs/context-smith/pull/142)・[#143](https://github.com/flipslidersand-labs/context-smith/pull/143)・[#151](https://github.com/flipslidersand-labs/context-smith/pull/151)・[#162](https://github.com/flipslidersand-labs/context-smith/pull/162))と [#164](https://github.com/flipslidersand-labs/context-smith/pull/164) は crates.io の 0.4.1 に入っている。[CHANGELOG.md](./CHANGELOG.md) のそれ以降の修正は未公開。限界: BM25 のみ(埋め込みなし)、比較対象は未チューニング、リポごとに 1 回の測定。シンボルの重み(0.5)と予算配分の規則は axum・clap・bat・scrapy・poetry で開発したため、この表はそれらのリポに対して楽観的。ripgrep・fd・hono・zod は、どのパラメータの選択にも使っていない。ripgrep は正解ファイルが大きく(中央値 約 9,400 トークン。他は約 3,500)、予算配分の規則が最も効く。この数字の再現手順(スクリプト・固定した候補・指標の定義): [bench/](./bench/README.md)。未解決の点: [#135](https://github.com/flipslidersand-labs/context-smith/issues/135)。
 
 ## ステータス
 
 | Phase | 内容 | 状態 |
 |---|---|---|
 | 1 | Git 走査・ファイル一覧取得 | ✅ |
-| 2 | Tree-sitter シンボル抽出 (Rust/Python/Go/TS/JS) | ✅ |
+| 2 | Tree-sitter シンボル抽出 (Rust/Python/Go/TS/JS/Ruby) | ✅ |
 | 3 | 依存グラフ構築 (SQL ベース BFS) | ✅ |
 | 4 | BM25 全文検索 (SQLite FTS5) | ✅ |
 | 5 | 予算配分 + バンドル出力 | ✅ |
-| 6 | ローカル埋め込みモデル + RRF 統合 | 🔲 計画中 |
+| 6 | 埋め込みシード + RRF 統合(opt-in の `remote-embed` feature。`EMBEDDING_SVC_URL` の外部埋め込みサービスを使う) | ✅(ローカル埋め込みモデルは未実装) |
 
 ## ライセンス
 

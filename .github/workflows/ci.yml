@@ -33,6 +33,20 @@ jobs:
       # pkg-config は libz-sys / libsqlite3-sys (system SQLite) が参照する。OpenSSL は git2 0.21 以降依存に無く不要 (#229)
       system-deps: pkg-config
 
+  # remote-embed (opt-in feature) は rust job では compile されないため別 job で test + clippy する (#221)。
+  # fmt / coverage は rust job と重複するので切る。
+  rust-remote-embed:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: flipslidersand-labs/qa-workflows/.github/workflows/rust-test.yml@ea9ddf743bd492a13ceb4aa7c1c54cc33e49f72d # qa-workflows main @ 2026-11-19 (SHA 固定。更新は手動 PR)
+    with:
+      test-args: --workspace --features remote-embed
+      clippy-args: --workspace --all-targets --features remote-embed
+      run-fmt: false
+      run-coverage: false
+      system-deps: pkg-config
+
   # reusable は feature 切替を渡せないため、system SQLite 構成だけローカルに残す
   test-no-default:
     name: test (no-default-features / system SQLite)
