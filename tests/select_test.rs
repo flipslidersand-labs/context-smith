@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use context_smith::{build_index, select_candidates, GitRepo, IndexDb, SelectOptions};
+use context_smith::{build_index, select_candidates, GitRepo, IndexDb, SeedMode, SelectOptions};
 
 fn commit_files(dir: &Path, files: &[(&str, &str)]) {
     let repo = git2::Repository::init(dir).unwrap();
@@ -77,14 +77,18 @@ fn unknown_lang_and_missing_row_are_skipped() {
     // b.rs becomes unknown-lang; the SQL filter yields no row for it (continue).
     conn.execute("UPDATE files SET lang = 'unknown' WHERE path = 'b.rs'", [])
         .unwrap();
-    let c = select_candidates(&repo, &db, "gamma_shared", &opts()).unwrap();
+    let c = select_candidates(&repo, &db, "gamma_shared", &opts())
+        .unwrap()
+        .candidates;
     let paths: Vec<_> = c.iter().map(|c| c.path.to_str().unwrap()).collect();
     assert_eq!(paths, vec!["a.rs"]);
 
     // Every row unknown: all seeds skipped, nothing unreadable -> empty success.
     conn.execute("UPDATE files SET lang = 'unknown'", [])
         .unwrap();
-    let c = select_candidates(&repo, &db, "gamma_shared", &opts()).unwrap();
+    let c = select_candidates(&repo, &db, "gamma_shared", &opts())
+        .unwrap()
+        .candidates;
     assert!(c.is_empty());
 
     // Row deleted entirely (no row) is skipped the same way.
@@ -92,7 +96,9 @@ fn unknown_lang_and_missing_row_are_skipped() {
     conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
     conn.execute("DELETE FROM files WHERE path = 'b.rs'", [])
         .unwrap();
-    let c = select_candidates(&repo, &db, "gamma_shared", &opts()).unwrap();
+    let c = select_candidates(&repo, &db, "gamma_shared", &opts())
+        .unwrap()
+        .candidates;
     let paths: Vec<_> = c.iter().map(|c| c.path.to_str().unwrap()).collect();
     assert_eq!(paths, vec!["a.rs"]);
 }
@@ -101,7 +107,9 @@ fn unknown_lang_and_missing_row_are_skipped() {
 fn test_path_score_is_halved() {
     let body = "pub fn delta_shared_thing() {}\n";
     let (_t, repo, db, _p) = setup(&[("src/m.rs", body), ("tests/m.rs", body)]);
-    let c = select_candidates(&repo, &db, "delta_shared_thing", &opts()).unwrap();
+    let c = select_candidates(&repo, &db, "delta_shared_thing", &opts())
+        .unwrap()
+        .candidates;
     let s = |p: &str| c.iter().find(|c| c.path == Path::new(p)).unwrap().score;
     assert!(s("src/m.rs") > 0.0);
     let ratio = s("tests/m.rs") / s("src/m.rs");
@@ -155,7 +163,9 @@ mod symlink {
         // "a_link.rs" sorts before "z_real.rs", so the real-path preference (not the
         // smaller-path tie-break) is what keeps z_real.rs.
         let (_t, repo, db) = setup_link("z_real.rs", "a_link.rs");
-        let c = select_candidates(&repo, &db, "epsilon_linked", &opts()).unwrap();
+        let c = select_candidates(&repo, &db, "epsilon_linked", &opts())
+            .unwrap()
+            .candidates;
         let paths: Vec<_> = c.iter().map(|c| c.path.to_str().unwrap()).collect();
         assert_eq!(paths, vec!["z_real.rs"]);
     }
@@ -164,7 +174,9 @@ mod symlink {
     fn two_symlinks_to_unindexed_target_keep_smaller_path() {
         // The target (.txt) is not a candidate; neither symlink is at the real path, so the score/path tie-break decides.
         let (_t, repo, db) = setup_links("real.txt", &["b_link.rs", "a_link.rs"], true);
-        let c = select_candidates(&repo, &db, "epsilon_linked", &opts()).unwrap();
+        let c = select_candidates(&repo, &db, "epsilon_linked", &opts())
+            .unwrap()
+            .candidates;
         let paths: Vec<_> = c.iter().map(|c| c.path.to_str().unwrap()).collect();
         assert_eq!(paths.len(), 1, "{paths:?}");
         assert_eq!(paths, vec!["a_link.rs"]);
@@ -193,10 +205,14 @@ fn seed_count_limits_seeds() {
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
     let (_t, repo, db, _p) = setup(&refs);
-    let all = select_candidates(&repo, &db, "zeta_common", &opts()).unwrap();
+    let all = select_candidates(&repo, &db, "zeta_common", &opts())
+        .unwrap()
+        .candidates;
     let mut o = opts();
     o.seed_count = 1;
-    let one = select_candidates(&repo, &db, "zeta_common", &o).unwrap();
+    let one = select_candidates(&repo, &db, "zeta_common", &o)
+        .unwrap()
+        .candidates;
     assert_eq!(all.len(), 5);
     assert_eq!(one.len(), 1);
 }
@@ -215,8 +231,20 @@ fn bfs_depth_zero_skips_dependency_expansion() {
         o.bfs_depth = d;
         select_candidates(&repo, &db, "eta_entry", &o)
             .unwrap()
+            .candidates
             .len()
     };
     assert_eq!(n(0), 1);
     assert!(n(2) > n(0), "depth 2 should pull in the dependency");
+}
+
+#[test]
+fn bm25_only_selection_reports_seed_mode_and_no_skips() {
+    let (_t, repo, db, _p) = setup(&[("a.rs", "pub fn theta_only() {}\n")]);
+    let mut o = opts();
+    o.no_embed = true;
+    let sel = select_candidates(&repo, &db, "theta_only", &o).unwrap();
+    assert_eq!(sel.seed_mode, SeedMode::Bm25);
+    assert!(sel.skipped.is_empty());
+    assert_eq!(sel.candidates.len(), 1);
 }
