@@ -1085,7 +1085,11 @@ mod tests {
         let (_tmp, repo) = repo_with(&[("a.rs", "pub fn readonly_marker() {}\n")]);
         let db = IndexDb::open_for_read(path)?;
         let opts = crate::SelectOptions::new(10_000);
-        Ok(crate::select_candidates(&repo, &db, "readonly_marker", &opts)?.len())
+        Ok(
+            crate::select_candidates(&repo, &db, "readonly_marker", &opts)?
+                .candidates
+                .len(),
+        )
     }
 
     #[cfg(unix)]
