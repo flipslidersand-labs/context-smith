@@ -44,7 +44,9 @@ fn select_does_not_read_untracked_path_from_db() {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute("UPDATE files SET path = '.env'", []).unwrap();
     }
-    match select_candidates(&repo, &db, "allocate_budget", &SelectOptions::new(10_000)) {
+    match select_candidates(&repo, &db, "allocate_budget", &SelectOptions::new(10_000))
+        .map(|s| s.candidates)
+    {
         Ok(c) => {
             assert!(
                 c.iter().all(|c| !c.content.contains("hunter2")),
@@ -64,6 +66,8 @@ fn select_reads_tracked_file_with_uncommitted_edit() {
         "pub fn allocate_budget() -> u32 { 2 } // edited\n",
     )
     .unwrap();
-    let c = select_candidates(&repo, &db, "allocate_budget", &SelectOptions::new(10_000)).unwrap();
+    let c = select_candidates(&repo, &db, "allocate_budget", &SelectOptions::new(10_000))
+        .unwrap()
+        .candidates;
     assert!(c.iter().any(|c| c.content.contains("edited")));
 }

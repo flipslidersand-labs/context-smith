@@ -39,6 +39,59 @@ impl SelectOptions {
     }
 }
 
+/// How the seed files were chosen.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedMode {
+    /// BM25 only (embeddings disabled, not built in, or no embedder configured).
+    Bm25,
+    /// BM25 RRF-fused with embedding seeds.
+    Fused,
+    /// An embedder was configured but no usable embeddings were stored; BM25 seeds used.
+    NoUsableEmbeddings,
+    /// Embedding failed; fell back to BM25. Holds the failure reason.
+    FallbackBm25(String),
+}
+
+/// Result of [`select_candidates`]: the candidates plus diagnostics the caller may display.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct Selection {
+    /// Selected candidates in score order.
+    pub candidates: Vec<Candidate>,
+    /// How the seeds were chosen.
+    pub seed_mode: SeedMode,
+    /// Files skipped because they could not be read: (absolute path, error).
+    pub skipped: Vec<(PathBuf, String)>,
+}
+
+/// Error from [`select_candidates`]. Carries the diagnostics gathered before the failure so the
+/// caller can still show them. `Display` and the error chain are those of the underlying error.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct SelectError {
+    /// The underlying failure.
+    pub error: anyhow::Error,
+    /// How the seeds were chosen before the failure (`Bm25` if it failed earlier).
+    pub seed_mode: SeedMode,
+    /// Files skipped as unreadable before the failure: (absolute path, error).
+    pub skipped: Vec<(PathBuf, String)>,
+}
+
+impl std::fmt::Display for SelectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for SelectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // Skip the wrapped error itself (already shown by `Display`); continue its chain.
+        let inner: &(dyn std::error::Error + Send + Sync + 'static) = self.error.as_ref();
+        inner.source()
+    }
+}
+
 /// Compute seed files for a task. With the `remote-embed` feature and a
 /// configured embedder, RRF-fuse BM25 with semantic (vector) seeds; otherwise
 /// return the BM25 seeds unchanged (backward compatible).
@@ -48,7 +101,7 @@ fn build_seeds(
     bm25: Vec<(i64, f32)>,
     no_embed: bool,
     seed_count: usize,
-) -> anyhow::Result<Vec<(i64, f32)>> {
+) -> anyhow::Result<(Vec<(i64, f32)>, SeedMode)> {
     #[cfg(feature = "remote-embed")]
     {
         if !no_embed {
@@ -56,34 +109,56 @@ fn build_seeds(
                 match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, seed_count)
                 {
                     Ok((seeds, fused)) => {
-                        if fused {
-                            eprintln!("semantic: RRF-fused BM25 with embedding seeds");
+                        let mode = if fused {
+                            SeedMode::Fused
                         } else {
-                            eprintln!("semantic: no usable embeddings; using BM25 seeds only");
-                        }
-                        return Ok(seeds);
+                            SeedMode::NoUsableEmbeddings
+                        };
+                        return Ok((seeds, mode));
                     }
-                    Err(e) => {
-                        eprintln!("semantic: embedding failed ({e}); falling back to BM25")
-                    }
+                    Err(e) => return Ok((bm25, SeedMode::FallbackBm25(e.to_string()))),
                 }
             }
         }
     }
     #[cfg(not(feature = "remote-embed"))]
     let _ = (conn, task, no_embed, seed_count);
-    Ok(bm25)
+    Ok((bm25, SeedMode::Bm25))
 }
 
 /// Run the selection pipeline for a task: BM25 (optionally RRF-fused with
 /// semantic seeds) → dependency BFS → load content → greedy budget allocation.
-/// Returns the selected candidates in score order, or an error when no files
+/// Returns the selected candidates in score order plus diagnostics (seed mode, skipped files), or an error when no files
 /// match (so the caller decides how to exit, preserving RAII drop order).
 pub fn select_candidates(
     repo: &GitRepo,
     db: &IndexDb,
     task: &str,
     opts: &SelectOptions,
+) -> Result<Selection, SelectError> {
+    let mut seed_mode = SeedMode::Bm25;
+    let mut skipped = Vec::new();
+    match select_inner(repo, db, task, opts, &mut seed_mode, &mut skipped) {
+        Ok(candidates) => Ok(Selection {
+            candidates,
+            seed_mode,
+            skipped,
+        }),
+        Err(error) => Err(SelectError {
+            error,
+            seed_mode,
+            skipped,
+        }),
+    }
+}
+
+fn select_inner(
+    repo: &GitRepo,
+    db: &IndexDb,
+    task: &str,
+    opts: &SelectOptions,
+    seed_mode_out: &mut SeedMode,
+    skipped: &mut Vec<(PathBuf, String)>,
 ) -> anyhow::Result<Vec<Candidate>> {
     if opts.seed_count == 0 {
         anyhow::bail!("seed_count must be >= 1");
@@ -94,7 +169,8 @@ pub fn select_candidates(
     // vectors. Fusion can surface files with zero lexical overlap, so the empty
     // check happens after fusion (semantic may rescue an empty BM25).
     let bm25 = search_bm25(db.connection(), task, seed_count)?;
-    let seeds = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
+    let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count)?;
+    *seed_mode_out = seed_mode;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
     }
@@ -157,7 +233,7 @@ pub fn select_candidates(
             let content = match repo.read_indexed(&git_index, Path::new(&rel_path)) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("warn: skip {:?}: {e}", abs);
+                    skipped.push((abs, e.to_string()));
                     unreadable.push(rel_path);
                     continue;
                 }
