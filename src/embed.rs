@@ -406,10 +406,12 @@ pub fn fuse_seeds_with_status(
         eprintln!("warn: query embedding empty or dimension mismatch; using BM25 seeds only");
         return Ok((bm25.to_vec(), false));
     }
-    // NaN/inf scores are dropped per row in `search_vectors`, so a bad query
-    // silently degrades to BM25 only. Warn once per query; behavior unchanged.
+    // A NaN/inf query makes every cosine score NaN, and `search_vectors` drops
+    // those rows, so fusion would be BM25 only anyway. Say so, and report the
+    // mode as BM25 instead of Fused.
     if has_non_finite(&query_vec) {
-        eprintln!("warning: query embedding contains non-finite values; using BM25 only");
+        eprintln!("warn: query embedding contains non-finite values; using BM25 seeds only");
+        return Ok((bm25.to_vec(), false));
     }
     // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
     // files that sit just outside `top_n` in the vector list still participate
@@ -926,7 +928,7 @@ mod tests {
     fn fuse_seeds_nan_query_keeps_bm25_only_ranking() {
         let conn = conn_with_two_dim_vectors();
         let bm25 = vec![(7i64, 2.0f32), (8, 1.0)];
-        let (out, _) = fuse_seeds_with_status(
+        let (out, fused) = fuse_seeds_with_status(
             &conn,
             &FixedEmbedder(vec![f32::NAN, 0.0]),
             "task",
@@ -934,8 +936,11 @@ mod tests {
             10,
         )
         .unwrap();
-        let ids: Vec<i64> = out.iter().map(|(id, _)| *id).collect();
-        assert_eq!(ids, vec![7, 8]);
+        assert_eq!(out, bm25);
+        assert!(
+            !fused,
+            "a non-finite query must report BM25 mode, not Fused"
+        );
     }
 
     #[test]
