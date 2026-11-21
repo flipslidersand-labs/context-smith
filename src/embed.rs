@@ -127,14 +127,14 @@ const EMBED_BATCH: usize = 64;
 /// chunks of [`EMBED_BATCH`] to cap peak RAM usage. Returns the number of files
 /// actually embedded (skipped files are not counted).
 pub fn populate_embeddings(
-    conn: &Connection,
     repo_root: &std::path::Path,
     embedder: &dyn Embedder,
     db: &crate::index_builder::IndexDb,
 ) -> Result<usize> {
+    let conn = db.connection();
     // BEGIN / INSERT / COMMIT can all hit SQLITE_BUSY when another process
     // holds the write lock; present the same friendly message as `build_index`.
-    populate_embeddings_inner(conn, repo_root, embedder, db).map_err(|e| {
+    populate_embeddings_inner(repo_root, embedder, db).map_err(|e| {
         if crate::index_builder::is_lock_error(&e) {
             let path = conn.path().unwrap_or("").to_string();
             anyhow::anyhow!(crate::index_builder::locked_message(
@@ -148,11 +148,11 @@ pub fn populate_embeddings(
 }
 
 fn populate_embeddings_inner(
-    conn: &Connection,
     repo_root: &std::path::Path,
     embedder: &dyn Embedder,
     db: &crate::index_builder::IndexDb,
 ) -> Result<usize> {
+    let conn = db.connection();
     // Query only the files that actually need (re-)embedding — avoids the
     // full-table DELETE and re-insert of the previous implementation.
     //
@@ -233,7 +233,7 @@ fn populate_embeddings_inner(
         {
             conn.execute("DELETE FROM embeddings", [])?;
             db.upsert_meta(EMBED_DIM_KEY, &dim.to_string())?;
-            return populate_embeddings_inner(conn, repo_root, embedder, db);
+            return populate_embeddings_inner(repo_root, embedder, db);
         }
 
         // Persist each vector with its content_sha in a single transaction.
@@ -358,12 +358,7 @@ pub fn embed_index(
     db: &crate::index_builder::IndexDb,
 ) -> Option<Result<usize>> {
     let embedder = RemoteEmbedder::from_env()?;
-    Some(populate_embeddings(
-        db.connection(),
-        repo.root(),
-        &embedder,
-        db,
-    ))
+    Some(populate_embeddings(repo.root(), &embedder, db))
 }
 
 /// Fuse BM25 seeds with vector-search seeds via RRF.
@@ -1010,7 +1005,7 @@ mod tests {
         std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
         track_all(dir.path());
         let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
-        let r = populate_embeddings(db.connection(), dir.path(), &ShortEmbedder, &db);
+        let r = populate_embeddings(dir.path(), &ShortEmbedder, &db);
         assert!(r.is_err(), "count mismatch must be an error");
         assert!(!has_embeddings(db.connection()).unwrap());
     }
@@ -1032,7 +1027,7 @@ mod tests {
                  BEGIN INSERT INTO fk_child VALUES (999); END;",
             )
             .unwrap();
-        let r = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db);
+        let r = populate_embeddings(dir.path(), &MockEmbedder, &db);
         assert!(r.is_err(), "COMMIT failure must surface as an error");
         assert!(db.connection().is_autocommit());
     }
@@ -1062,7 +1057,7 @@ mod tests {
         db.connection()
             .busy_timeout(std::time::Duration::from_millis(50))
             .unwrap();
-        let err = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db)
+        let err = populate_embeddings(dir.path(), &MockEmbedder, &db)
             .unwrap_err()
             .to_string();
         assert!(err.contains("locked by another process"), "{err}");
@@ -1099,7 +1094,7 @@ mod tests {
         std::fs::write(dir.path().join(".env"), "TOKEN=fake-secret-value").unwrap();
         let db = index_db_with_files(&[("a.rs", "sha-a"), (".env", "sha-env")]);
         let rec = RecordingEmbedder(Default::default());
-        let n = populate_embeddings(db.connection(), dir.path(), &rec, &db).unwrap();
+        let n = populate_embeddings(dir.path(), &rec, &db).unwrap();
         assert_eq!(n, 1);
         let sent = rec.0.lock().unwrap().join("\n");
         assert!(sent.contains("fn a()"), "{sent}");
@@ -1135,11 +1130,11 @@ mod tests {
         let db = index_db_with_files(&[("a.rs", "sha-a"), ("b.rs", "sha-b")]);
 
         // First run: both files need embedding.
-        let n = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        let n = populate_embeddings(dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n, 2, "both files should be embedded on first run");
 
         // Second run: sha unchanged → nothing re-embedded.
-        let n2 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        let n2 = populate_embeddings(dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n2, 0, "no files re-embedded when sha is unchanged");
 
         // Simulate a content change by updating blob_sha.
@@ -1149,7 +1144,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let n3 = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        let n3 = populate_embeddings(dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n3, 1, "only the changed file should be re-embedded");
     }
 
@@ -1177,20 +1172,20 @@ mod tests {
         let (dir, db) = two_file_db();
         let c = db.connection();
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
             2
         );
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
             0
         );
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m2", 4), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m2", 4), &db).unwrap(),
             2
         );
         assert_eq!(get_meta(c, EMBED_MODEL_KEY).unwrap().as_deref(), Some("m2"));
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m2", 4), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m2", 4), &db).unwrap(),
             0
         );
     }
@@ -1200,7 +1195,7 @@ mod tests {
         let (dir, db) = two_file_db();
         let c = db.connection();
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
             2
         );
         assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("4"));
@@ -1212,7 +1207,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
             2
         );
         assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("8"));
@@ -1225,7 +1220,7 @@ mod tests {
             .unwrap();
         assert_eq!(lens, vec![32, 32]);
         assert_eq!(
-            populate_embeddings(c, dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 8), &db).unwrap(),
             0
         );
     }
@@ -1258,7 +1253,7 @@ mod tests {
             mixed: true,
             calls: Default::default(),
         };
-        let err = populate_embeddings(db.connection(), dir.path(), &e, &db).unwrap_err();
+        let err = populate_embeddings(dir.path(), &e, &db).unwrap_err();
         assert!(err.to_string().contains("dimension"), "{err}");
         assert!(!has_embeddings(db.connection()).unwrap());
     }
@@ -1280,7 +1275,7 @@ mod tests {
             mixed: false,
             calls: Default::default(),
         };
-        let err = populate_embeddings(db.connection(), dir.path(), &e, &db).unwrap_err();
+        let err = populate_embeddings(dir.path(), &e, &db).unwrap_err();
         assert!(err.to_string().contains("dimension"), "{err}");
         // The committed first batch is kept, not deleted.
         let n: i64 = db
@@ -1849,7 +1844,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
         track_all(dir.path());
         let db = index_db_with_files(&[("a.rs", "sha-a")]);
-        let r = populate_embeddings(db.connection(), dir.path(), &FailingEmbedder, &db);
+        let r = populate_embeddings(dir.path(), &FailingEmbedder, &db);
         assert!(r.is_err());
         assert!(!has_embeddings(db.connection()).unwrap());
     }
@@ -1876,7 +1871,7 @@ mod tests {
         let rows: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "sha")).collect();
         let db = index_db_with_files(&rows);
         let embedder = FailOnSecondCall(std::sync::atomic::AtomicUsize::new(0));
-        let r = populate_embeddings(db.connection(), dir.path(), &embedder, &db);
+        let r = populate_embeddings(dir.path(), &embedder, &db);
         assert!(r.is_err(), "later batch failure must surface");
         let stored: i64 = db
             .connection()
@@ -1884,7 +1879,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored, EMBED_BATCH as i64, "first batch stays committed");
         // A retry only needs to embed the remaining file.
-        let n = populate_embeddings(db.connection(), dir.path(), &MockEmbedder, &db).unwrap();
+        let n = populate_embeddings(dir.path(), &MockEmbedder, &db).unwrap();
         assert_eq!(n, 1);
     }
 }
