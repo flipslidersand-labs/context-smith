@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A query embedding containing NaN/inf now prints a one-time warning before falling back to BM25-only ranking (#481).
+
 ### Breaking
 - `select_candidates` now returns `Result<Selection, SelectError>` instead of `Result<Vec<Candidate>>`; use `.candidates` for the old value (#400).
 

@@ -368,6 +368,11 @@ pub fn fuse_seeds(
     fuse_seeds_with_status(conn, embedder, task, bm25, top_n).map(|(seeds, _)| seeds)
 }
 
+/// True if any component is NaN or infinite.
+fn has_non_finite(v: &[f32]) -> bool {
+    v.iter().any(|x| !x.is_finite())
+}
+
 /// Like [`fuse_seeds`], but also reports whether vector fusion actually ran
 /// (`true`) or the BM25 seeds were returned unchanged (`false`: no stored
 /// embeddings, empty query vector, or dimension mismatch / mixed dimensions).
@@ -400,6 +405,11 @@ pub fn fuse_seeds_with_status(
     if query_vec.is_empty() || !consistent {
         eprintln!("warn: query embedding empty or dimension mismatch; using BM25 seeds only");
         return Ok((bm25.to_vec(), false));
+    }
+    // NaN/inf scores are dropped per row in `search_vectors`, so a bad query
+    // silently degrades to BM25 only. Warn once per query; behavior unchanged.
+    if has_non_finite(&query_vec) {
+        eprintln!("warning: query embedding contains non-finite values; using BM25 only");
     }
     // Fetch top_n * 3 vector candidates before RRF so that BM25-high-ranked
     // files that sit just outside `top_n` in the vector list still participate
@@ -901,6 +911,31 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn has_non_finite_detects_nan_and_inf() {
+        assert!(has_non_finite(&[1.0, f32::NAN]));
+        assert!(has_non_finite(&[f32::INFINITY, 0.0]));
+        assert!(has_non_finite(&[f32::NEG_INFINITY]));
+        assert!(!has_non_finite(&[1.0, -2.0, 0.0]));
+        assert!(!has_non_finite(&[]));
+    }
+
+    #[test]
+    fn fuse_seeds_nan_query_keeps_bm25_only_ranking() {
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 2.0f32), (8, 1.0)];
+        let (out, _) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![f32::NAN, 0.0]),
+            "task",
+            &bm25,
+            10,
+        )
+        .unwrap();
+        let ids: Vec<i64> = out.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![7, 8]);
     }
 
     #[test]
