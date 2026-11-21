@@ -386,12 +386,31 @@ impl IndexDb {
     }
 
     pub(crate) fn upsert_meta(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
+        Self::upsert_meta_on(&self.conn, key, value)
+    }
+
+    /// Upsert a `meta` row on any connection (usable inside a transaction).
+    pub(crate) fn upsert_meta_on(
+        conn: &rusqlite::Connection,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        conn.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Read a `meta` value on any connection.
+    pub(crate) fn get_meta_on(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()?)
     }
 
     /// Delete everything derived from a file's content (symbols, symbol/body
