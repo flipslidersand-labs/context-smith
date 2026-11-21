@@ -49,6 +49,8 @@ check "network.py ranks first" "$(printf '%s\n' "$out2" | sed -n '2p' | awk '{pr
 printf '#!/bin/sh\necho "contextsmith 0.4.0"\n' > "$tmp/old"; chmod +x "$tmp/old"
 CONTEXTSMITH_BIN=$tmp/old "$sel" "$repo" invoice >/dev/null 2>&1; check "old version -> exit 3" "$?" 3
 CONTEXTSMITH_BIN=$tmp/absent "$sel" "$repo" invoice >/dev/null 2>&1; check "missing binary -> exit 2" "$?" 2
+printf '#!/bin/sh\nexit 7\n' > "$tmp/vfail"; chmod +x "$tmp/vfail"
+CONTEXTSMITH_BIN=$tmp/vfail "$sel" "$repo" invoice >/dev/null 2>&1; check "--version failing -> exit 2" "$?" 2
 
 # Option parsing.
 out=$("$sel" --help 2>&1); code=$?

@@ -30,7 +30,7 @@ repo_arg=$1; shift
 task="$*"
 
 command -v "$BIN" >/dev/null 2>&1 || die 2 "'$BIN' not found; install it with: cargo install context-smith (or set CONTEXTSMITH_BIN)"
-version=$("$BIN" --version | awk '{print $2}')
+version=$("$BIN" --version | awk '{print $2}') || die 2 "'$BIN --version' failed; is it a working contextsmith binary?"
 if [ "$(printf '%s\n%s\n' "$MIN_VERSION" "$version" | sort -V | head -n1)" != "$MIN_VERSION" ]; then
   die 3 "contextsmith $version is too old (need >= $MIN_VERSION: earlier versions rank poorly and can fail on multi-word tasks); update with: cargo install context-smith"
 fi
