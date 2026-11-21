@@ -333,6 +333,30 @@ fn expand_rust_use(s: &str) -> Vec<String> {
     }
 }
 
+/// `/*` の直後から始まる本文を受け取り、ネストを数えて対応する `*/` の後ろを返す。
+/// 閉じ忘れなら空文字列(以降を捨てる)。
+fn skip_block_comment(body: &str) -> &str {
+    let b = body.as_bytes();
+    let (mut depth, mut i) = (1usize, 0usize);
+    while i + 1 < b.len() {
+        match (b[i], b[i + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                i += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return &body[i..];
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    ""
+}
+
 /// Remove `// ...` line comments and `/* ... */` block comments from a use path.
 fn strip_rust_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -343,7 +367,7 @@ fn strip_rust_comments(s: &str) -> String {
         if tail.starts_with("//") {
             rest = tail.find('\n').map_or("", |n| &tail[n..]);
         } else if let Some(body) = tail.strip_prefix("/*") {
-            rest = body.find("*/").map_or("", |n| &body[n + 2..]);
+            rest = skip_block_comment(body);
             out.push(' ');
         } else {
             out.push('/');
@@ -2134,11 +2158,17 @@ mod tests {
         assert_eq!(strip_rust_comments("/"), "/");
     }
 
-    /// 既知の制限(別 Issue): ネストしたブロックコメントは最初の `*/` で閉じるため、
-    /// 外側の閉じ `*/` が残る。現状の挙動を固定する。
+    /// ネストしたブロックコメントは深さを数えて外側の `*/` で閉じる。
     #[test]
-    fn strip_rust_comments_nested_block_known_limitation() {
-        assert_eq!(strip_rust_comments("a /* /* x */ */ b"), "a   */ b");
+    fn strip_rust_comments_nested_block() {
+        assert_eq!(strip_rust_comments("a /* /* x */ */ b"), "a   b");
+        // 深さが残ったまま終端したら以降を捨てる
+        assert_eq!(strip_rust_comments("a /* /* x */ b"), "a  ");
+        // `use` 展開経由でも外側の `*/` が残らない
+        assert_eq!(
+            expand_rust_use(&strip_rust_comments("a::{b, /* /* x */ */ c}")),
+            vec!["a::b".to_string(), "a::c".to_string()]
+        );
     }
 
     #[test]
