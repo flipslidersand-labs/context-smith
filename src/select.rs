@@ -1,5 +1,5 @@
 use crate::budget::{allocate, Candidate};
-use crate::dep_builder::bfs_expand;
+use crate::expand::{expand, mode_from_env};
 use crate::index_builder::IndexDb;
 use crate::path_kind::path_score_factor;
 use crate::search_index::search_bm25;
@@ -227,7 +227,7 @@ fn select_inner(
     }
 
     // Step 2: BFS expand from seeds (depth=`bfs_depth`)
-    let mut scored = bfs_expand(db.connection(), &seeds, opts.bfs_depth)?;
+    let mut scored = expand(db.connection(), mode_from_env()?, &seeds, opts.bfs_depth)?;
     for (fid, s) in &seeds {
         scored
             .entry(*fid)
