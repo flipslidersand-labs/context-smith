@@ -154,6 +154,9 @@ pub fn bfs_capped(
         all.sort_unstable();
         all.dedup();
         let deg = degrees(conn, &all)?;
+        // Like `bfs_expand`, edges inside the current frontier are not expanded (a seed is
+        // never re-scored from a neighbouring seed) and do not use up a parent's K slots.
+        let in_frontier: std::collections::HashSet<i64> = ids.iter().copied().collect();
         let mut best: HashMap<i64, f32> = HashMap::new();
         for &(parent, ps) in &frontier {
             let Some(list) = nbrs.get(&parent) else {
@@ -161,6 +164,7 @@ pub fn bfs_capped(
             };
             let mut picked: Vec<(usize, i64)> = list
                 .iter()
+                .filter(|n| !in_frontier.contains(n))
                 .map(|&n| (deg.get(&n).copied().unwrap_or(1), n))
                 .collect();
             picked.sort_unstable();
@@ -340,6 +344,17 @@ mod tests {
         let b = bfs_expand(&conn, &[(1, 8.0)], 2).unwrap();
         let c = bfs_capped(&conn, &[(1, 8.0)], 2).unwrap();
         assert!(c.keys().all(|k| b.contains_key(k)));
+    }
+
+    #[test]
+    fn capped_does_not_rescore_adjacent_seeds() {
+        // Seeds 1 (8.0) and 2 (1.0) are adjacent; bfs keeps seed 2 at 1.0, so must capped.
+        let conn = graph(&[(1, 2), (2, 3)]);
+        let seeds = [(1, 8.0), (2, 1.0)];
+        let b = bfs_expand(&conn, &seeds, 2).unwrap();
+        let c = bfs_capped(&conn, &seeds, 2).unwrap();
+        assert_eq!(b[&2], 1.0);
+        assert_eq!(c[&2], 1.0);
     }
 
     #[test]
