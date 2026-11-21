@@ -2116,4 +2116,40 @@ mod tests {
         assert!(r.get(&(100_000 + n)).copied() == Some(0.5));
         assert_eq!(r[&(100_001)], 0.5);
     }
+
+    #[test]
+    fn strip_rust_comments_boundaries() {
+        assert_eq!(strip_rust_comments(""), "");
+        assert_eq!(strip_rust_comments("a::b"), "a::b");
+        // 行コメントが改行なしで終わる場合は以降を全て捨てる
+        assert_eq!(strip_rust_comments("a // tail"), "a ");
+        // 改行は残る
+        assert_eq!(strip_rust_comments("a // x\nb"), "a \nb");
+        // 閉じ忘れのブロックコメントは以降を全て捨てる(直前に空白 1 つ)
+        assert_eq!(strip_rust_comments("a /* open"), "a  ");
+        assert_eq!(strip_rust_comments("a/* open"), "a ");
+        // `/` 単独は保持する
+        assert_eq!(strip_rust_comments("a/b"), "a/b");
+        assert_eq!(strip_rust_comments("a/"), "a/");
+        assert_eq!(strip_rust_comments("/"), "/");
+    }
+
+    /// 既知の制限(別 Issue): ネストしたブロックコメントは最初の `*/` で閉じるため、
+    /// 外側の閉じ `*/` が残る。現状の挙動を固定する。
+    #[test]
+    fn strip_rust_comments_nested_block_known_limitation() {
+        assert_eq!(strip_rust_comments("a /* /* x */ */ b"), "a   */ b");
+    }
+
+    #[test]
+    fn split_brace_aware_boundaries() {
+        let v = |s| split_brace_aware(s).collect::<Vec<_>>();
+        assert_eq!(v(""), vec![""]);
+        assert_eq!(v("a,{b,c},d"), vec!["a", "{b,c}", "d"]);
+        assert_eq!(v("a,,b"), vec!["a", "", "b"]);
+        // `}` 過多は saturating_sub で吸収され、以降は通常通り分割される
+        assert_eq!(v("a},b"), vec!["a}", "b"]);
+        // `{` 不足(閉じ忘れ)だと以降のカンマでは分割されない
+        assert_eq!(v("a,{b,c"), vec!["a", "{b,c"]);
+    }
 }
