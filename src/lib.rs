@@ -517,38 +517,50 @@ impl SymbolExtractor {
         }
     }
 
-    fn extract_rust(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
+    /// Parse `source` with `grammar`; `name` only labels error messages.
+    fn parse(
+        path: &Path,
+        source: &str,
+        grammar: tree_sitter::Language,
+        name: &str,
+    ) -> Result<tree_sitter::Tree> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(&tree_sitter_rust::LANGUAGE.into())
-            .with_context(|| format!("Failed to load Rust grammar for {:?}", path))?;
-        let tree = parser.parse(source, None).context("Rust parse failed")?;
-        let root = tree.root_node();
-        Ok(collect_rust_symbols(root, source.as_bytes(), path))
+            .set_language(&grammar)
+            .with_context(|| format!("Failed to load {name} grammar for {:?}", path))?;
+        parser
+            .parse(source, None)
+            .with_context(|| format!("{name} parse failed"))
+    }
+
+    fn extract_rust(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
+        let tree = Self::parse(path, source, tree_sitter_rust::LANGUAGE.into(), "Rust")?;
+        Ok(collect_rust_symbols(
+            tree.root_node(),
+            source.as_bytes(),
+            path,
+        ))
     }
 
     fn extract_python(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_python::LANGUAGE.into())
-            .with_context(|| format!("Failed to load Python grammar for {:?}", path))?;
-        let tree = parser.parse(source, None).context("Python parse failed")?;
-        let root = tree.root_node();
-        Ok(collect_python_symbols(root, source.as_bytes(), path))
+        let tree = Self::parse(path, source, tree_sitter_python::LANGUAGE.into(), "Python")?;
+        Ok(collect_python_symbols(
+            tree.root_node(),
+            source.as_bytes(),
+            path,
+        ))
     }
 
     fn extract_go(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_go::LANGUAGE.into())
-            .with_context(|| format!("Failed to load Go grammar for {:?}", path))?;
-        let tree = parser.parse(source, None).context("Go parse failed")?;
-        let root = tree.root_node();
-        Ok(collect_go_symbols(root, source.as_bytes(), path))
+        let tree = Self::parse(path, source, tree_sitter_go::LANGUAGE.into(), "Go")?;
+        Ok(collect_go_symbols(
+            tree.root_node(),
+            source.as_bytes(),
+            path,
+        ))
     }
 
     fn extract_typescript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let mut parser = tree_sitter::Parser::new();
         // TSX is not a superset of TS: `<T>x` assertions and `<T>(x) => x` parse as JSX
         // there. Use the TSX grammar only for `.tsx`; `.ts`/`.mts`/`.cts` use plain TS.
         let grammar = if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
@@ -556,36 +568,35 @@ impl SymbolExtractor {
         } else {
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT
         };
-        parser
-            .set_language(&grammar.into())
-            .with_context(|| format!("Failed to load TypeScript grammar for {:?}", path))?;
-        let tree = parser
-            .parse(source, None)
-            .context("TypeScript parse failed")?;
-        let root = tree.root_node();
-        Ok(collect_ecma_symbols(root, source.as_bytes(), path))
+        let tree = Self::parse(path, source, grammar.into(), "TypeScript")?;
+        Ok(collect_ecma_symbols(
+            tree.root_node(),
+            source.as_bytes(),
+            path,
+        ))
     }
 
     fn extract_javascript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_javascript::LANGUAGE.into())
-            .with_context(|| format!("Failed to load JavaScript grammar for {:?}", path))?;
-        let tree = parser
-            .parse(source, None)
-            .context("JavaScript parse failed")?;
-        let root = tree.root_node();
-        Ok(collect_ecma_symbols(root, source.as_bytes(), path))
+        let tree = Self::parse(
+            path,
+            source,
+            tree_sitter_javascript::LANGUAGE.into(),
+            "JavaScript",
+        )?;
+        Ok(collect_ecma_symbols(
+            tree.root_node(),
+            source.as_bytes(),
+            path,
+        ))
     }
 
     fn extract_ruby(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_ruby::LANGUAGE.into())
-            .with_context(|| format!("Failed to load Ruby grammar for {:?}", path))?;
-        let tree = parser.parse(source, None).context("Ruby parse failed")?;
-        let root = tree.root_node();
-        Ok(collect_ruby_symbols(root, source.as_bytes(), path))
+        let tree = Self::parse(path, source, tree_sitter_ruby::LANGUAGE.into(), "Ruby")?;
+        Ok(collect_ruby_symbols(
+            tree.root_node(),
+            source.as_bytes(),
+            path,
+        ))
     }
 }
 
