@@ -10,9 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 - `select_candidates` now returns `Result<Selection, SelectError>` instead of `Result<Vec<Candidate>>`; use `.candidates` for the old value (#400).
 
-### Fixed
-- Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
-
 ### Security
 - libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
 
@@ -26,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Duplicated and dead code in `bundle_writer` and `budget` is removed; behavior is unchanged (#422).
 
 ### Fixed
+- Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
 - `recent_diff` no longer drops the root commit's files when the repository is shallow only on a merge's second-parent side; a real root is told apart from a shallow boundary by its raw parent header, and a shallow boundary now prints a note on stderr (#494).
 - `query`/`build` warn when `--index` points at an index built for a different repository (`meta.repo_root`) (#494).
 - `adapters/claude-code/ctx-select.sh` now exits 2 with a message when `contextsmith --version` fails, instead of exiting silently with an undocumented code (#494).
@@ -164,9 +162,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets no longer exceed the SQLite variable limit (#277).
 - `ctx-select.sh` creates its cache directory with mode 700 and refuses a symbolic-link or
   other-user cache directory (#243), and rejects a non-numeric `--top` / `--budget` (#332).
-
-### Fixed
-- Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
 
 ### Security
 - Symbolic links: tracked symbolic links that point outside the repository, or to files that
