@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- libz-sys is updated to 1.1.33 to address RUSTSEC-2026-0544 (#492).
+
 ### Changed
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
