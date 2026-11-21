@@ -96,6 +96,38 @@ REPO=/tmp/bench/<name> TASKMODE=title python3 bench/bench.py | tee out-<name>.tx
 
 and put `f1` / `cov` for `cs` and `kw` at 4k / 8k / 16k into a table here, grouped by `splits.json`.
 
+## Dependency expansion: BFS vs capped BFS vs PageRank ([#293](https://github.com/flipslidersand-labs/context-smith/issues/293))
+
+Measured 2026-11-21 with one release binary built from the #508 branch (`2879e60`, based on master `dd51442`), switching the expansion with `CONTEXTSMITH_EXPAND` (added in #508; the default is `bfs`). `strict`, title only, `eval` repositories only, one run each. Command per arm and repository:
+
+```bash
+REPO=<clone> TASKMODE=title CONTEXTSMITH_EXPAND=<arm> python3 bench/bench.py
+```
+
+- `bfs`: the current expansion (depth 2, score x0.5 per hop).
+- `bfs-capped`: each parent expands to at most 10 neighbours, lowest degree first. A neighbour scores `parent * 0.5 / sqrt(degree)`.
+- `ppr`: personalized PageRank (alpha 0.85) on the undirected deps graph, restricted to the `bfs` candidate set. Only the order changes.
+
+`cs` recall per cell (`bfs` / `bfs-capped` / `ppr`):
+
+| repo (tasks) | 4k | 8k | 16k |
+|---|---|---|---|
+| ripgrep (26) | 0.17 / 0.15 / 0.16 | 0.22 / 0.22 / 0.23 | 0.49 / 0.49 / 0.46 |
+| fd (74) | 0.37 / 0.38 / 0.36 | 0.60 / 0.57 / 0.56 | 0.77 / 0.76 / 0.78 |
+| hono (60) | 0.60 / 0.59 / 0.58 | 0.72 / 0.81 / 0.73 | 0.79 / 0.86 / 0.77 |
+| zod (60) | 0.19 / 0.21 / 0.21 | 0.26 / 0.31 / 0.23 | 0.30 / 0.38 / 0.29 |
+| **mean of 12 cells** | | | **0.457 / 0.478 / 0.447** |
+
+The bar, set before the run: the `eval` mean improves by +0.02 or more, no cell drops by more than 0.04, and the query time does not get worse.
+
+- **`ppr`: rejected.** Mean -0.010; worst cell fd 8k -0.04.
+- **`bfs-capped`: meets the bar, but only just.** Mean +0.021; worst cell fd 8k -0.03.
+  - The gain comes from the two TypeScript repositories (hono 8k +0.09, 16k +0.07; zod 8k +0.05, 16k +0.08). The two Rust repositories are flat or slightly down.
+  - Each run was done once, and one task moves a cell by 0.01-0.04, so +0.021 is close to noise.
+  - The default stays `bfs` in this PR. Changing the default needs a second run and a `tuning`-group check first.
+- **Speed.** Total wall time per repository, which includes indexing every task, was within about 10% across the three arms (ripgrep 10-12 s, fd 7-8 s, hono 53-59 s, zod 60-62 s). Query time was not measured on its own.
+- Raw outputs: `out-<arm>-<repo>.txt`, kept outside the repository. `bfs-capped` was re-run after the review fix in `2879e60`; the numbers above are from the re-run.
+
 ## Targets and current status ([#147](https://github.com/flipslidersand-labs/context-smith/issues/147))
 
 Provisional targets, in terms of the `strict`, title-only recall above. Review date: 2026-11-15. A PR that changes accuracy updates the table below.
