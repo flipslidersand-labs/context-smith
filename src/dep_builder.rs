@@ -1,3 +1,4 @@
+use crate::Language;
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -24,8 +25,7 @@ fn is_go_generated_or_test(path: &Path) -> bool {
 fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Vec<i64>> {
     let mut dir_to_files: HashMap<PathBuf, Vec<i64>> = HashMap::new();
     for (id, path) in file_paths {
-        if path.extension().and_then(|e| e.to_str()) != Some("go") || is_go_generated_or_test(path)
-        {
+        if Language::from_path(path) != Language::Go || is_go_generated_or_test(path) {
             continue;
         }
         if let Some(dir) = path.parent() {
@@ -104,16 +104,15 @@ fn resolve_import(
     go_dir_index: &HashMap<PathBuf, Vec<i64>>,
     go_module: &[GoModule],
 ) -> Vec<i64> {
-    let ext = from_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    match ext {
-        "rs" => resolve_rust(import_str, from_path, path_to_id),
-        "py" => resolve_python(import_str, from_path, path_to_id),
-        "go" => resolve_go(import_str, go_dir_index, go_module),
-        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => {
+    match Language::from_path(from_path) {
+        Language::Rust => resolve_rust(import_str, from_path, path_to_id),
+        Language::Python => resolve_python(import_str, from_path, path_to_id),
+        Language::Go => resolve_go(import_str, go_dir_index, go_module),
+        Language::TypeScript | Language::JavaScript => {
             resolve_ts_js(import_str, from_path, path_to_id)
         }
-        "rb" => resolve_ruby(import_str, from_path, path_to_id),
-        _ => vec![],
+        Language::Ruby => resolve_ruby(import_str, from_path, path_to_id),
+        Language::Unknown => vec![],
     }
 }
 
@@ -743,7 +742,7 @@ pub fn read_go_modules(
 ) -> Vec<GoModule> {
     let mut dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     for path in file_paths.values() {
-        if path.extension().and_then(|e| e.to_str()) != Some("go") {
+        if Language::from_path(path) != Language::Go {
             continue;
         }
         let mut cur = path.parent();
