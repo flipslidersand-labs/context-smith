@@ -5,6 +5,8 @@
 [![CI](https://github.com/flipslidersand-labs/context-smith/actions/workflows/ci.yml/badge.svg)](https://github.com/flipslidersand-labs/context-smith/actions/workflows/ci.yml)
 [![license](https://img.shields.io/crates/l/context-smith.svg)](./LICENSE)
 
+Release type: `library`
+
 **English**: this page | **日本語**: [README.ja.md](./README.ja.md)
 
 **AI context compiler** — a CLI that ranks the files of a Git repository against your task description (BM25 + a dependency graph) and emits a context bundle that fits within a token budget.
