@@ -568,7 +568,7 @@ mod tests {
                 .0;
             db.connection()
                 .execute(
-                    "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, 'function', 1, '')",
+                    "INSERT INTO symbols (file_id, name, kind) VALUES (?1, ?2, 'function')",
                     params![id, sym],
                 )
                 .unwrap();
@@ -579,7 +579,7 @@ mod tests {
         }
         db.connection()
             .execute(
-                "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (1, 'use std::io', 'import', 1, '')",
+                "INSERT INTO symbols (file_id, name, kind) VALUES (1, 'use std::io', 'import')",
                 [],
             )
             .unwrap();
