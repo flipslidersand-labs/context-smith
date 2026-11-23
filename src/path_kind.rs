@@ -1,4 +1,29 @@
-//! Path classification used to rank files.
+//! Path classification used to rank files, and escaping of paths for display.
+
+/// Make a path (or other attacker-controlled name) safe to print on one line of a terminal or an
+/// agent transcript. Backslash is doubled first so a literal `\n` in a name stays distinguishable
+/// from an escaped newline; CR and LF become `\r` and `\n`; every other control character (C0,
+/// DEL, C1, U+2028, U+2029: the same set as `ctrl` in `adapters/claude-code/ctx-select.sh`) becomes
+/// `\xNN` (U+2028 and U+2029 become `\u{2028}` and `\u{2029}`). Everything else, including non-ASCII text, is kept.
+pub fn escape_control(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\u{00}'..='\u{1f}' | '\u{7f}'..='\u{9f}' => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            '\u{2028}' | '\u{2029}' => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 /// Score multiplier for test and fixture files (see [`path_score_factor`]).
 pub const TEST_PATH_FACTOR: f32 = 0.5;
@@ -38,9 +63,54 @@ pub fn path_score_factor(path: &str) -> f32 {
     }
 }
 
+/// The set `ctx-select.sh` replaces: `[\x00-\x1f\x7f-\x9f\u2028\u2029]`.
+#[cfg(test)]
+pub(crate) fn is_ctrl(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_control_leaves_plain_and_non_ascii_text() {
+        assert_eq!(
+            escape_control("src/a b/\u{e9}\u{4e2d}.rs"),
+            "src/a b/\u{e9}\u{4e2d}.rs"
+        );
+        // U+00A0 (first char after C1) and U+2027 / U+202A are not in the escaped set.
+        assert_eq!(
+            escape_control("\u{a0}\u{2027}\u{202a}"),
+            "\u{a0}\u{2027}\u{202a}"
+        );
+    }
+
+    #[test]
+    fn escape_control_keeps_newline_and_backslash_escapes_compatible() {
+        assert_eq!(escape_control("a\nb\rc"), "a\\nb\\rc");
+        assert_eq!(escape_control("a\\nb"), "a\\\\nb");
+        assert_ne!(escape_control("a\\nb"), escape_control("a\nb"));
+    }
+
+    #[test]
+    fn escape_control_escapes_every_c0_del_c1_and_line_separator() {
+        let mut all: Vec<char> = ('\u{0}'..='\u{1f}').collect();
+        all.extend('\u{7f}'..='\u{9f}');
+        all.push('\u{2028}');
+        all.push('\u{2029}');
+        for c in all {
+            let out = escape_control(&format!("a{c}b"));
+            assert!(
+                out.chars().all(|o| !is_ctrl(o)) && out.starts_with('a') && out.ends_with('b'),
+                "U+{:04X} -> {out:?}",
+                c as u32
+            );
+        }
+        assert_eq!(escape_control("a\u{1b}]0;X\u{7}b"), "a\\x1b]0;X\\x07b");
+        assert_eq!(escape_control("\u{7f}\u{85}\u{9f}"), "\\x7f\\x85\\x9f");
+        assert_eq!(escape_control("\u{2028}\u{2029}"), "\\u{2028}\\u{2029}");
+    }
 
     #[test]
     fn test_directories_are_tests() {
