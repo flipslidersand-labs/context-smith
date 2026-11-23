@@ -309,6 +309,23 @@ impl IndexDb {
         &self.conn
     }
 
+    /// Path of the `files` row with this id, or `None` when no such row exists.
+    pub(crate) fn path_for_id(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .prepare_cached("SELECT path FROM files WHERE id = ?1")?
+            .query_row([id], |row| row.get(0))
+            .optional()
+    }
+
+    /// Like [`Self::path_for_id`], but `None` also for files of unknown language
+    /// (never selected as content).
+    pub(crate) fn indexed_path_for_id(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != ?2")?
+            .query_row(params![id, Language::Unknown.as_str()], |row| row.get(0))
+            .optional()
+    }
+
     pub(crate) fn init_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS files (
@@ -383,11 +400,11 @@ impl IndexDb {
             "SELECT f.id, f.path, f.blob_sha
              FROM files f
              LEFT JOIN embeddings e ON e.file_id = f.id
-             WHERE f.lang != 'unknown'
+             WHERE f.lang != ?1
                AND (e.file_id IS NULL OR e.content_sha IS NULL OR e.content_sha != f.blob_sha)",
         )?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map([Language::Unknown.as_str()], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -1179,6 +1196,34 @@ mod tests {
     #[test]
     fn files_needing_embed_empty_db() {
         assert!(mem_db().files_needing_embed().unwrap().is_empty());
+    }
+
+    // ---- path_for_id / indexed_path_for_id ----
+
+    #[test]
+    fn path_lookup_by_id_hides_unknown_language_only_for_indexed() {
+        let db = mem_db();
+        let (known, _) = db
+            .upsert_file(Path::new("a.rs"), Language::Rust, "s1", 1)
+            .unwrap();
+        let (unknown, _) = db
+            .upsert_file(Path::new("data.bin"), Language::Unknown, "s2", 1)
+            .unwrap();
+        let missing = known.max(unknown) + 100;
+
+        assert_eq!(db.path_for_id(known).unwrap().as_deref(), Some("a.rs"));
+        assert_eq!(
+            db.path_for_id(unknown).unwrap().as_deref(),
+            Some("data.bin")
+        );
+        assert_eq!(db.path_for_id(missing).unwrap(), None);
+
+        assert_eq!(
+            db.indexed_path_for_id(known).unwrap().as_deref(),
+            Some("a.rs")
+        );
+        assert_eq!(db.indexed_path_for_id(unknown).unwrap(), None);
+        assert_eq!(db.indexed_path_for_id(missing).unwrap(), None);
     }
 
     // ---- read-only open ----
