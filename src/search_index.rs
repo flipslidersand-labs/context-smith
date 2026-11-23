@@ -100,72 +100,6 @@ pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Resu
         .join(" OR "))
 }
 
-/// Populate fts_path, fts_symbols and fts_body inside a single transaction.
-/// Clears all three tables atomically before rebuilding; rolls back on any error.
-#[cfg(test)]
-pub fn populate_fts_with_paths(
-    conn: &Connection,
-    repo_root: &std::path::Path,
-    rel_file_paths: &std::collections::HashMap<i64, std::path::PathBuf>,
-    abs_file_paths: &std::collections::HashMap<i64, std::path::PathBuf>,
-) -> Result<()> {
-    use crate::tokenizer::{tokenize_code, tokenize_path};
-
-    let canonical_root = repo_root.canonicalize()?;
-    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
-    let result = (|| -> Result<()> {
-        conn.execute_batch("DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;")?;
-
-        // fts_path: tokenized file path (weight W_PATH in UNION ALL query)
-        for (&file_id, rel_path) in rel_file_paths {
-            let tokenized = tokenize_path(&rel_path.to_string_lossy());
-            conn.execute(
-                "INSERT INTO fts_path (file_id, path) VALUES (?1, ?2)",
-                params![file_id, tokenized],
-            )?;
-        }
-
-        // fts_symbols: pre-tokenized symbol names (weight W_SYMBOLS)
-        let mut sym_stmt =
-            conn.prepare("SELECT file_id, name FROM symbols WHERE kind != 'import'")?;
-        let sym_rows: Vec<(i64, String)> = sym_stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        for (file_id, name) in sym_rows {
-            conn.execute(
-                "INSERT INTO fts_symbols (file_id, name) VALUES (?1, ?2)",
-                params![file_id, tokenize_code(&name)],
-            )?;
-        }
-
-        // fts_body: original source content (weight W_BODY, provides snippet())
-        for (&file_id, abs_path) in abs_file_paths {
-            let content = match crate::read_within_root(&canonical_root, abs_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("warn: skip {:?}: {e}", abs_path);
-                    continue;
-                }
-            };
-            let truncated = crate::index_builder::truncate_fts_body(&content);
-            conn.execute(
-                "INSERT INTO fts_body (file_id, content) VALUES (?1, ?2)",
-                params![file_id, truncated],
-            )?;
-        }
-
-        Ok(())
-    })();
-
-    // Early return drops `tx`, which rolls back.
-    result?;
-    tx.commit()?;
-    Ok(())
-}
-
 /// Upper bound applied to `top_n` in [`search_bm25`].
 const MAX_TOP_N: usize = 1000;
 
@@ -244,8 +178,6 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
 mod tests {
     use super::*;
     use crate::index_builder::IndexDb;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -528,200 +460,70 @@ mod tests {
         assert!(result.contains("Notify"), "got: {result}");
     }
 
-    // ---- populate_fts_with_paths / search_bm25 ----
+    // ---- search_bm25 over an index built by the production `build_index` ----
 
     struct Fixture {
         db: IndexDb,
-        dir: TempDir,
-        rel: HashMap<i64, PathBuf>,
-        abs: HashMap<i64, PathBuf>,
+        _repo_dir: TempDir,
+        login_id: i64,
+        store_id: i64,
     }
 
-    fn count(conn: &Connection, table: &str) -> i64 {
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap()
-    }
-
-    /// Files: auth/login.rs (symbol authenticate_user), db/store.rs (symbol open_pool).
+    /// Indexes a real git repo through `build_index` so FTS rows get the same rowids and
+    /// tokenization as production. Files: auth/login.rs (symbol authenticate_user),
+    /// db/store.rs (symbol open_pool).
     fn fixture() -> Fixture {
+        let dir = TempDir::new().unwrap();
+        crate::test_util::commit_files(
+            dir.path(),
+            &[
+                (
+                    "auth/login.rs",
+                    "fn authenticate_user() { check password }\n",
+                ),
+                ("db/store.rs", "fn open_pool() { connect database }\n"),
+            ],
+            &[],
+        );
+        let repo = crate::GitRepo::new(dir.path()).unwrap();
         let db = IndexDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
-        let dir = TempDir::new().unwrap();
-        let mut rel = HashMap::new();
-        let mut abs = HashMap::new();
-        let specs = [
-            (
-                "auth/login.rs",
-                "authenticate_user",
-                "fn authenticate_user() { check password }",
-            ),
-            (
-                "db/store.rs",
-                "open_pool",
-                "fn open_pool() { connect database }",
-            ),
-        ];
-        for (path, sym, body) in specs {
-            let id: i64 = db
-                .upsert_file(std::path::Path::new(path), crate::Language::Rust, "sha", 1)
-                .unwrap()
-                .0;
+        crate::index_builder::build_index(&repo, &db, false).unwrap();
+        let id_of = |path: &str| -> i64 {
             db.connection()
-                .execute(
-                    "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, 'function', 1, '')",
-                    params![id, sym],
-                )
-                .unwrap();
-            let abs_path = dir.path().join(path.replace('/', "_"));
-            std::fs::write(&abs_path, body).unwrap();
-            rel.insert(id, PathBuf::from(path));
-            abs.insert(id, abs_path);
+                .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+                .unwrap()
+        };
+        let (login_id, store_id) = (id_of("auth/login.rs"), id_of("db/store.rs"));
+        Fixture {
+            db,
+            _repo_dir: dir,
+            login_id,
+            store_id,
         }
-        db.connection()
-            .execute(
-                "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (1, 'use std::io', 'import', 1, '')",
-                [],
-            )
-            .unwrap();
-        Fixture { db, dir, rel, abs }
-    }
-
-    #[test]
-    fn populate_fills_all_three_fts_tables() {
-        let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        let c = f.db.connection();
-        assert_eq!(count(c, "fts_path"), 2);
-        // import symbols are excluded
-        assert_eq!(count(c, "fts_symbols"), 2);
-        assert_eq!(count(c, "fts_body"), 2);
-    }
-
-    #[test]
-    fn populate_twice_does_not_duplicate_rows() {
-        let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        assert_eq!(count(f.db.connection(), "fts_path"), 2);
-        assert_eq!(count(f.db.connection(), "fts_body"), 2);
-    }
-
-    #[test]
-    fn populate_with_empty_maps_clears_fts() {
-        let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        populate_fts_with_paths(
-            f.db.connection(),
-            f.dir.path(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(count(f.db.connection(), "fts_path"), 0);
-        assert_eq!(count(f.db.connection(), "fts_body"), 0);
-    }
-
-    #[test]
-    fn populate_skips_unreadable_body_but_keeps_rest() {
-        let mut f = fixture();
-        let id = *f.abs.keys().next().unwrap();
-        f.abs.insert(id, f.dir.path().join("does_not_exist.rs"));
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        assert_eq!(count(f.db.connection(), "fts_body"), 1);
-        assert_eq!(count(f.db.connection(), "fts_path"), 2);
-    }
-
-    #[test]
-    fn populate_truncates_large_body_on_char_boundary() {
-        let f = fixture();
-        let id = *f.abs.keys().next().unwrap();
-        std::fs::write(&f.abs[&id], "あ".repeat(200_000)).unwrap();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        let bytes: i64 =
-            f.db.connection()
-                .query_row(
-                    "SELECT length(CAST(content AS BLOB)) FROM fts_body WHERE file_id = ?1",
-                    params![id],
-                    |r| r.get(0),
-                )
-                .unwrap();
-        assert!(bytes <= 512 * 1024 && bytes > 512 * 1024 - 3, "{bytes}");
-    }
-
-    /// #231: a failing COMMIT (deferred FK violation raised by a trigger) must
-    /// not leave the transaction open.
-    #[test]
-    fn populate_rolls_back_when_commit_fails() {
-        let f = fixture();
-        f.db.connection()
-            .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
-                 CREATE TABLE fk_child (r INTEGER REFERENCES fk_parent(id) DEFERRABLE INITIALLY DEFERRED);
-                 DROP TABLE fts_path;
-                 CREATE TABLE fts_path_store (file_id INTEGER, path TEXT);
-                 CREATE VIEW fts_path AS SELECT file_id, path FROM fts_path_store;
-                 CREATE TRIGGER fts_path_del INSTEAD OF DELETE ON fts_path
-                 BEGIN SELECT 1; END;
-                 CREATE TRIGGER fts_path_ins INSTEAD OF INSERT ON fts_path
-                 BEGIN INSERT INTO fk_child VALUES (999); END;",
-            )
-            .unwrap();
-        let res = populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs);
-        assert!(res.is_err(), "COMMIT failure must surface as an error");
-        assert!(f.db.connection().is_autocommit());
-    }
-
-    #[test]
-    fn populate_error_rolls_back_transaction() {
-        let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        f.db.connection()
-            .execute_batch("DROP TABLE fts_symbols")
-            .unwrap();
-        let res = populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs);
-        assert!(res.is_err());
-        // Transaction must have been closed and earlier data restored.
-        assert!(f.db.connection().is_autocommit());
-        assert_eq!(count(f.db.connection(), "fts_path"), 2);
     }
 
     #[test]
     fn search_finds_file_by_path_term() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let hits = search_bm25(f.db.connection(), "login", 5).unwrap();
         assert_eq!(hits.len(), 1);
-        let login_id = *f
-            .rel
-            .iter()
-            .find(|(_, p)| p.ends_with("login.rs"))
-            .unwrap()
-            .0;
-        assert_eq!(hits[0].0, login_id);
+        assert_eq!(hits[0].0, f.login_id);
         assert!(hits[0].1 > 0.0);
     }
 
     #[test]
     fn search_finds_file_by_symbol_and_body_terms() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
-        let store_id = *f
-            .rel
-            .iter()
-            .find(|(_, p)| p.ends_with("store.rs"))
-            .unwrap()
-            .0;
         let by_symbol = search_bm25(f.db.connection(), "pool", 5).unwrap();
-        assert_eq!(by_symbol[0].0, store_id);
+        assert_eq!(by_symbol[0].0, f.store_id);
         let by_body = search_bm25(f.db.connection(), "database", 5).unwrap();
-        assert_eq!(by_body[0].0, store_id);
+        assert_eq!(by_body[0].0, f.store_id);
     }
 
     #[test]
     fn search_no_match_returns_empty() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         assert!(search_bm25(f.db.connection(), "zzzzqqqq", 5)
             .unwrap()
             .is_empty());
@@ -730,7 +532,6 @@ mod tests {
     #[test]
     fn search_respects_top_n() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         // "fn" appears in both bodies
         let all = search_bm25(f.db.connection(), "fn", 10).unwrap();
         assert_eq!(all.len(), 2);
@@ -741,7 +542,6 @@ mod tests {
     #[test]
     fn search_huge_top_n_is_clamped_not_overflowing() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         for n in [usize::MAX / 2, usize::MAX] {
             let hits = search_bm25(f.db.connection(), "fn", n).unwrap();
             assert_eq!(hits.len(), 2);
@@ -751,7 +551,6 @@ mod tests {
     #[test]
     fn search_results_sorted_by_score_descending() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         let hits = search_bm25(f.db.connection(), "fn authenticate", 10).unwrap();
         assert!(hits.windows(2).all(|w| w[0].1 >= w[1].1), "{hits:?}");
     }
@@ -772,7 +571,6 @@ mod tests {
     #[test]
     fn search_with_fts_operators_in_query_does_not_error() {
         let f = fixture();
-        populate_fts_with_paths(f.db.connection(), f.dir.path(), &f.rel, &f.abs).unwrap();
         assert!(search_bm25(f.db.connection(), "login OR (x) AND \"y\" *", 5).is_ok());
     }
 
