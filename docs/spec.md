@@ -25,12 +25,15 @@ contextsmith build \
   --task "認証エラーを調査" \
   --budget 30000 \
   --out context.bundle/
+
+# ファイルへ書かずに stdout へ出す(スクリプト・パイプ向け。--format json|md)
+contextsmith query --repo ./project --task "認証エラーを調査" --format json
 ```
 
 ## インデックスの格納場所
 
 `contextsmith index` は `{repo}/.contextsmith/index.db` に SQLite ファイルを生成する。
-このファイルには files / symbols / deps / meta / fts_symbols / fts_body がすべて含まれる。
+このファイルには files / symbols / deps / meta / fts_path / fts_symbols / fts_body がすべて含まれる(テーブルの定義は [data-model.md](./data-model.md))。
 
 小規模リポジトリ（目安: ソースコード 10MB 以下）であれば `index.db` を git 管理対象にして
 チームで共有できる。大規模リポジトリの場合は `.gitignore` に追加することを推奨する。
@@ -39,14 +42,13 @@ contextsmith build \
 
 ```
 context.bundle/
-├── task.md               # タスク説明 + 選択理由
-├── relevant-code/        # 関連ファイル抜粋
-├── dependency-graph.json # シンボル依存グラフ
-├── recent-diffs/         # 直近の Git 差分
-├── schema-summary.md     # DB スキーマ要約 (将来)
-├── related-issues.md     # 関連 Issue (将来)
-└── citations.json        # 各スニペットのファイル・行番号参照
+├── task.md               # タスク説明 + 選択したファイル一覧 + 直近の Git 差分(`## Recent Diff`)
+├── relevant-code/        # 選択したファイルの内容(ファイルごとに 1 つの .md)
+└── citations.json        # 各ファイルのスコアとトークン数。直近の差分があるときだけ、末尾に `(recent diff)` の項目
 ```
+
+`dependency-graph.json`・`recent-diffs/`・`schema-summary.md`・`related-issues.md` は**未実装**(出力されない)。
+直近の差分は `task.md` に含まれる。
 
 ## MVP の境界線
 
@@ -76,4 +78,4 @@ context.bundle/
 | Phase 3 | 依存グラフ (SQLite の deps テーブル) を構築しタスク起点で BFS 展開  |
 | Phase 4 | BM25 スコアリングでファイルをランキング                         |
 | Phase 5 | `--budget N` 内に収めるグリーディー選択 + Markdown バンドル出力 |
-| Phase 6 | ローカル埋め込みモデルでベクトル検索を追加し BM25 と RRF で統合 |
+| Phase 6 | 埋め込みシードを追加し BM25 と RRF で統合(opt-in の `remote-embed` feature・リモート埋め込みサービス経由。ローカル埋め込みモデルは未実装) |
