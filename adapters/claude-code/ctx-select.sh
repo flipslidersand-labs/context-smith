@@ -23,7 +23,8 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-case $budget in ''|*[!0-9]*) die 2 "--budget must be a non-negative integer (got: $budget)" ;; esac
+case $budget in ''|*[!0-9]*) die 2 "--budget must be a positive integer (got: $budget)" ;; esac
+case $budget in *[!0]*) ;; *) die 2 "--budget must be a positive integer (got: $budget)" ;; esac  # all zeros
 case $top in ''|*[!0-9]*) die 2 "--top must be a non-negative integer (got: $top)" ;; esac
 [ $# -ge 2 ] || die 2 "usage: ctx-select.sh [--budget N] [--top N] <repo> <task words...>"
 repo_arg=$1; shift
@@ -41,6 +42,14 @@ cache="$CACHE_ROOT/$key"
 # The cache holds a copy of the repository's text: keep it private to this user (umask also
 # covers index.db and the logs), and refuse a symlink or another user's directory.
 umask 077
+mkdir -p "$CACHE_ROOT"
+# The cache root itself must be ours and not writable by group/other, or someone else could swap
+# the per-repo directory under it. (A symlinked root is fine: its target is what gets checked.)
+[ -O "$CACHE_ROOT" ] || die 2 "$CACHE_ROOT is owned by another user; refusing to use it"
+case $(ls -ldL "$CACHE_ROOT" | cut -c6,9) in
+  --) ;;
+  *) die 2 "$CACHE_ROOT is writable by group or others; refusing to use it (fix: chmod go-w '$CACHE_ROOT')" ;;
+esac
 mkdir -p "$cache"
 { [ ! -L "$cache" ] && [ -O "$cache" ]; } || die 2 "$cache is a symlink or owned by another user; refusing to use it"
 chmod 700 "$cache"
