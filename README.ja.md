@@ -175,7 +175,7 @@ bare import(`react` など node_modules パッケージ)は依存グラフには
 | 3 | 依存グラフ構築 (SQL ベース BFS) | ✅ |
 | 4 | BM25 全文検索 (SQLite FTS5) | ✅ |
 | 5 | 予算配分 + バンドル出力 | ✅ |
-| 6 | 埋め込みシード + RRF 統合(opt-in の `remote-embed` feature。`EMBEDDING_SVC_URL` の外部埋め込みサービスを使う) | ✅(ローカル埋め込みモデルは未実装) |
+| 6 | 埋め込みシード + RRF 統合(opt-in の `remote-embed` feature。`EMBEDDING_SVC_URL` の外部埋め込みサービスを使う。ループバック以外への平文 `http://` は API キーとファイル本文が暗号化されずに送られるため、`EMBEDDING_ALLOW_INSECURE=1` が無ければ拒否する) | ✅(ローカル埋め込みモデルは未実装) |
 
 ## ライセンス
 

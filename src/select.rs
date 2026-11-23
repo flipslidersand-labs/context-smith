@@ -105,7 +105,11 @@ fn build_seeds(
     #[cfg(feature = "remote-embed")]
     {
         if !no_embed {
-            if let Some(embedder) = crate::embed::RemoteEmbedder::from_env() {
+            let embedder = match crate::embed::RemoteEmbedder::from_env() {
+                Ok(e) => e,
+                Err(e) => return (bm25, SeedMode::FallbackBm25(e.to_string())),
+            };
+            if let Some(embedder) = embedder {
                 match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, seed_count)
                 {
                     Ok((seeds, fused)) => {
@@ -211,6 +215,9 @@ fn select_inner(
     seed_mode_out: &mut SeedMode,
     skipped: &mut Vec<(PathBuf, String)>,
 ) -> anyhow::Result<Vec<Candidate>> {
+    // Read the expansion mode first so a bad CONTEXTSMITH_EXPAND is reported even when the
+    // search finds nothing (#531).
+    let mode = mode_from_env()?;
     if opts.seed_count == 0 {
         anyhow::bail!("seed_count must be >= 1");
     }
@@ -229,7 +236,7 @@ fn select_inner(
 
     // Step 2: BFS expand from seeds (depth=`bfs_depth`)
     // Every expansion mode already keeps each seed at its max score (never lowered).
-    let scored = expand(db.connection(), mode_from_env()?, &seeds, opts.bfs_depth)?;
+    let scored = expand(db.connection(), mode, &seeds, opts.bfs_depth)?;
 
     // Step 3: Load paths for scored files only, then read content.
     // Filter in the SQL query so we never fetch rows for unscored files,
