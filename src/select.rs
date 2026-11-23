@@ -1,7 +1,7 @@
 use crate::budget::{allocate, Candidate};
 use crate::expand::{expand, mode_from_env};
 use crate::index_builder::IndexDb;
-use crate::path_kind::path_score_factor;
+use crate::path_kind::{escape_control, path_score_factor};
 use crate::search_index::search_bm25;
 use crate::GitRepo;
 use anyhow::Context;
@@ -305,7 +305,11 @@ fn select_inner(
     if candidates.is_empty() && !unreadable.is_empty() {
         anyhow::bail!(
             "matching files could not be read ({}); re-run `contextsmith index` to refresh the index",
-            unreadable.join(", ")
+            unreadable
+                .iter()
+                .map(|p| escape_control(p))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -315,7 +319,7 @@ fn select_inner(
     if !candidates.is_empty() && candidates.iter().all(|c| c.content.is_empty()) {
         let names: Vec<String> = candidates
             .iter()
-            .map(|c| c.path.display().to_string())
+            .map(|c| escape_control(&c.path.to_string_lossy()))
             .collect();
         anyhow::bail!(
             "No matching files with content: all matches are empty ({})",

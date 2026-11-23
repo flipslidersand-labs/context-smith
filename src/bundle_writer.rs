@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::budget::{allocate, estimate_tokens, truncate_to_tokens, Candidate};
+use crate::path_kind::escape_control;
 
 #[derive(Serialize)]
 pub struct Citation {
@@ -313,19 +314,11 @@ fn render_bundle(
     }
 }
 
-/// Replace line breaks with visible escapes so a path stays on one line.
-/// Backslashes are doubled first so a literal `\n` in a name stays distinguishable.
-fn escape_newlines(p: &str) -> String {
-    p.replace('\\', "\\\\")
-        .replace('\r', "\\r")
-        .replace('\n', "\\n")
-}
-
 /// Render a path as a single-line Markdown inline code span. The delimiter is
 /// longer than the longest backtick run in the path (CommonMark code spans), and
 /// a space pads content that starts or ends with a backtick.
 fn inline_code(p: &str) -> String {
-    let p = escape_newlines(p);
+    let p = escape_control(p);
     let delim = "`".repeat(longest_backtick_run(&p) + 1);
     if p.starts_with('`') || p.ends_with('`') {
         format!("{delim} {p} {delim}")
@@ -337,9 +330,7 @@ fn inline_code(p: &str) -> String {
 /// Render a path for use inside `<!-- ... -->`: one line, and no `>` so neither
 /// `-->` nor `--!>` can end the comment early.
 fn comment_path(p: &str) -> String {
-    escape_newlines(p)
-        .replace('&', "&amp;")
-        .replace('>', "&gt;")
+    escape_control(p).replace('&', "&amp;").replace('>', "&gt;")
 }
 
 fn longest_backtick_run(s: &str) -> usize {
@@ -652,6 +643,42 @@ mod tests {
         // A literal backslash-n in the name must differ from a real newline.
         assert_eq!(inline_code("a\\nb"), "`a\\\\nb`");
         assert_ne!(inline_code("a\\nb"), inline_code("a\nb"));
+    }
+
+    #[test]
+    fn rendered_bundle_has_no_raw_control_characters_from_paths() {
+        // ESC/BEL (OSC title + SGR), DEL, C1 (CSI 0x9b), U+2028/2029 in one name.
+        let name = "a\u{1b}]0;PWNED\u{7}\u{1b}[31m\u{7f}\u{9b}2K\u{2028}\u{2029}.rs";
+        let c = cand(name, 0.9, "fn x() {}");
+        let bad = |s: &str| {
+            s.chars()
+                .any(|ch| ch != '\n' && crate::path_kind::is_ctrl(ch))
+        };
+
+        let task_md = render_task_md("t", 1000, std::slice::from_ref(&c), "", false);
+        assert!(!bad(&task_md), "task.md: {task_md:?}");
+        assert!(task_md.contains("\\x1b]0;PWNED\\x07"), "{task_md:?}");
+
+        let file_md = render_file_md(&c);
+        let first = file_md.lines().next().unwrap();
+        assert!(
+            first.starts_with("<!-- ") && first.ends_with(" -->"),
+            "{first:?}"
+        );
+        assert!(!bad(first), "<!-- path -->: {first:?}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_bundle("t", 1000, std::slice::from_ref(&c), "", tmp.path(), false).unwrap();
+        let mut seen = 0;
+        for e in std::fs::read_dir(tmp.path().join("relevant-code")).unwrap() {
+            let md = std::fs::read_to_string(e.unwrap().path()).unwrap();
+            let head = md.lines().next().unwrap();
+            assert!(!bad(head), "{head:?}");
+            seen += 1;
+        }
+        assert_eq!(seen, 1);
+        let task_md = std::fs::read_to_string(tmp.path().join("task.md")).unwrap();
+        assert!(!bad(&task_md), "{task_md:?}");
     }
 
     #[test]

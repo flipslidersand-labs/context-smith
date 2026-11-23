@@ -161,11 +161,16 @@ fn warn_if_foreign_index(repo: &GitRepo, db: &IndexDb) {
     let Some(stored) = stored else { return };
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     if canon(std::path::Path::new(&stored)) != canon(repo.root()) {
-        eprintln!(
-            "warn: index was built for {stored}, not {}; results may not match this repository",
-            repo.root().display()
-        );
+        eprintln!("{}", foreign_index_warning(&stored, repo.root()));
     }
+}
+
+/// The text of the foreign-index warning. Both paths are printed with `{:?}` because
+/// `meta.repo_root` comes from the index file and may hold terminal control characters.
+fn foreign_index_warning(stored: &str, root: &std::path::Path) -> String {
+    format!(
+        "warn: index was built for {stored:?}, not {root:?}; results may not match this repository"
+    )
 }
 
 /// Resolve the index db path for a repo, erroring if it does not exist.
@@ -352,6 +357,19 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn foreign_index_warning_has_no_raw_control_characters() {
+        let stored = "/r\u{1b}]0;PWNED\u{7}\u{1b}[2K\u{7f}\u{85}\u{9b}\u{2028}\u{2029}";
+        let root = Path::new("/x\u{1b}[31m");
+        let msg = foreign_index_warning(stored, root);
+        assert!(
+            msg.chars().all(|c| !c.is_control()) && !msg.contains(['\u{2028}', '\u{2029}']),
+            "{msg:?}"
+        );
+        assert!(msg.starts_with("warn: index was built for \"/r"), "{msg}");
+        assert!(msg.contains("PWNED"), "{msg}");
+    }
 
     fn empty_repo() -> (tempfile::TempDir, GitRepo) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -551,6 +569,21 @@ mod tests {
         assert_eq!(err.seed_mode, SeedMode::Bm25);
         assert_eq!(err.skipped.len(), 1);
         assert_eq!(err.skipped[0].0, repo.root().join("a.rs"));
+    }
+
+    #[test]
+    fn select_error_escapes_control_characters_in_unreadable_paths() {
+        let name = "a\u{1b}]0;PWNED\u{7}\u{9b}\u{2028}.rs";
+        let (t, repo, _d, db) = indexed_repo(&[name]);
+        std::fs::remove_file(t.path().join(name)).unwrap();
+        let err = select_candidates(&repo, &db, "alpha_widget", &opts(10_000, true)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("could not be read"), "msg: {msg:?}");
+        assert!(msg.contains("\\x1b]0;PWNED\\x07"), "msg: {msg:?}");
+        assert!(
+            !msg.chars().any(|c| c.is_control() || c == '\u{2028}'),
+            "msg: {msg:?}"
+        );
     }
 
     #[test]
