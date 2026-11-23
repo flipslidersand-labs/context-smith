@@ -108,7 +108,7 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
         if used >= budget {
             break;
         }
-        if c.content.is_empty() {
+        if c.content.trim().is_empty() {
             continue;
         }
         // Ensure files shorter than 4 chars still count as 1 token so they aren't silently excluded
@@ -163,6 +163,17 @@ mod tests {
             truncated: false,
             original_tokens: 0,
         }
+    }
+
+    #[test]
+    fn whitespace_only_candidate_is_not_allocated() {
+        // #564: a whitespace-only file is as empty as a zero-byte one.
+        let mut blank = make(5.0, 0);
+        blank.content = "\n   \n\t\n".into();
+        let real = make(1.0, 40);
+        let out = allocate(vec![blank, real], 10_000);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].content.trim().is_empty());
     }
 
     #[test]
