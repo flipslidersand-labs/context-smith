@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opening `index.db` now sets `trusted_schema=OFF` and DEFENSIVE, and refuses a DB that holds a trigger, a view, or a known table name that is not a table, asking to delete and re-index (#541).
 - Files over 4 MiB (`MAX_FILE_BYTES`) are no longer read: the file stays findable by path, its content is not indexed, and a warning is printed. At most 10,000 symbols (`MAX_SYMBOLS_PER_FILE`) are kept per file. Both limits are provisional. `EXTRACT_VERSION` is now 10, so an existing index is rebuilt on the next `index` run (#567).
 - Paths in `query --format md` output (the `task.md` list and `<!-- path -->`), the `meta.repo_root` index warning and the unreadable/empty-match errors no longer print raw control characters (ESC, BEL, DEL, C1, U+2028/2029); they are shown as `\x1b`-style escapes, so a crafted file name cannot retitle the terminal, erase lines or write the clipboard (#566).
+- The "has no commits yet" error from `index` no longer prints raw control characters in the repo path; they are shown as `\x1b`-style escapes (#585).
+
+### Changed
+- `index.db` no longer stores `symbols.line` and `symbols.snippet` (nothing read them, and they made the DB much larger). `EXTRACT_VERSION` is 11 (was 10): an existing index is rebuilt in full on the next `index` (the old `symbols` table is recreated), so re-index once after upgrading.
 
 ### Removed
 - `CONTEXTSMITH_EXPAND=ppr` (personalized PageRank, experimental) is removed after the bench rejected it (ADR-005); the value is now rejected as unknown like any other. `bfs-capped` (default) and `bfs` are unchanged (#533).
