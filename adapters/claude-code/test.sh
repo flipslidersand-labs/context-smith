@@ -121,6 +121,15 @@ ln -s "$tmp/target-dir" "$key_link/$(basename "$cdir")"
 CTX_SELECT_CACHE=$key_link "$sel" "$repo" invoice tax >/dev/null 2>&1; check "symlinked cache dir -> exit 2" "$?" 2
 check "nothing written through the symlink" "$(ls -A "$tmp/target-dir" | wc -l | tr -d ' ')" "0"
 
+# The cache root itself must not be writable by others (they could replace the per-repo dir).
+open_root=$tmp/cache-open; mkdir -p "$open_root"; chmod 777 "$open_root"
+CTX_SELECT_CACHE=$open_root "$sel" "$repo" invoice tax >/dev/null 2>&1; check "world-writable cache root -> exit 2" "$?" 2
+check "nothing written into a world-writable root" "$(ls -A "$open_root" | wc -l | tr -d ' ')" "0"
+group_root=$tmp/cache-group; mkdir -p "$group_root"; chmod 770 "$group_root"
+CTX_SELECT_CACHE=$group_root "$sel" "$repo" invoice tax >/dev/null 2>&1; check "group-writable cache root -> exit 2" "$?" 2
+ok_root=$tmp/cache-ok; mkdir -p "$ok_root"; chmod 755 "$ok_root"
+CTX_SELECT_CACHE=$ok_root "$sel" "$repo" invoice tax >/dev/null 2>&1; check "a 755 cache root is accepted" "$?" 0
+
 # cwd must not influence which python modules ctx-select imports (a json.py in an untrusted
 # working directory must not run).
 evil=$tmp/evil; mkdir -p "$evil"

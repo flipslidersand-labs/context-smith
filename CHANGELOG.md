@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `ctx-select.sh` now refuses a cache root that is owned by another user or writable by group/others, and `SKILL.md` tells callers to single-quote the task text so shell metacharacters in copied issue text are not executed (#542).
+
 ## [0.6.0] - 2026-11-23
 
 ### Breaking
