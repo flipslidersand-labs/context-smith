@@ -183,7 +183,7 @@ Source: [bench/README.md](./bench/README.md#targets-and-current-status-147), mea
 | 3 | Dependency graph construction (SQL-based BFS) | ✅ |
 | 4 | BM25 full-text search (SQLite FTS5) | ✅ |
 | 5 | Budget allocation + bundle output | ✅ |
-| 6 | Embedding seeds + RRF fusion (opt-in `remote-embed` feature, remote embedding service via `EMBEDDING_SVC_URL`) | ✅ (a local embedding model is not implemented) |
+| 6 | Embedding seeds + RRF fusion (opt-in `remote-embed` feature, remote embedding service via `EMBEDDING_SVC_URL`; plain `http://` to a non-loopback host is refused unless `EMBEDDING_ALLOW_INSECURE=1`, because the API key and file contents would be sent unencrypted) | ✅ (a local embedding model is not implemented) |
 
 ## Development
 

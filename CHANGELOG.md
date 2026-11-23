@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- With `remote-embed`, plain `http://` to a non-loopback `EMBEDDING_SVC_URL` is now refused (embeddings are skipped and BM25 is used, with the reason shown) unless `EMBEDDING_ALLOW_INSECURE=1`; the variable now allows the send instead of silencing a warning (#540).
+
 ## [0.6.0] - 2026-11-23
 
 ### Breaking
