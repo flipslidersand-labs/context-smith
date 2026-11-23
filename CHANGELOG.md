@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
-- The scan now checks that the file it opens is the file it validated (dev/ino, and the resolved path on Linux), so swapping a path for a symlink between the check and the open can no longer read files outside the repo (#543).
+- The scan now checks that the file it opens is the file it validated (dev/ino, and the resolved path on Linux), so swapping a path for a symlink between the check and the open can no longer read files outside the repo. On Unix other than Linux, a directory swapped before the check's own lstat is still not detected (#543).
 
 ## [0.6.0] - 2026-11-23
 
