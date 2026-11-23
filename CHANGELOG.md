@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `select_candidates` now returns a `Selection` (`candidates`, `seed_mode`, `skipped`) instead of printing diagnostics itself; the CLI prints the same stderr messages (#400).
 - Vector search now orders equal-score hits by ascending file id, so results are deterministic (#481).
 - The `index` output-path logic is extracted from `main` into `resolve_index_output`; behavior is unchanged (#402).
+- `resolve_import` and the Go file checks in `dep_builder` now use `Language::from_path` instead of their own extension tables; internal cleanup, behavior is unchanged (#528).
 - `SelectOptions` gains `seed_count` (default 20) and `bfs_depth` (default 2), replacing hard-coded values in the select pipeline; default behavior is unchanged (#401).
 - The scan reuses one lazily opened git index for all tracked-symlink checks instead of reopening the repo per symlink; fail-closed behavior is unchanged (#353).
 - The 512 KiB body truncation for the full-text index is now one shared helper instead of two copies; behavior is unchanged (#290).
@@ -33,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `ctx-select.sh` rejects `--budget 0` as a usage error (exit 2, "must be a positive integer") instead of passing it to the CLI and failing with "query failed" (#532).
+- Empty or whitespace-only files no longer take a BM25 seed slot, so a matching file with content is no longer pushed out of the seeds (#536).
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
 - A query embedding containing NaN/inf now prints a one-time warning before falling back to BM25-only ranking (#481).
 - Embedding writes now check that every vector in a batch, and every batch of a run, has the same dimension; a mid-run change is an error instead of deleting committed batches and restarting (#465).

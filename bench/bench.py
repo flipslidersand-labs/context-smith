@@ -95,7 +95,7 @@ for c in cands:
             txt = ""
         score[p] = sum(1 for w in words if w in txt) + 3 * sum(1 for w in words if w in p.lower())
     for b in BUDGETS:
-        q = run(CS, "query", "--repo", REPO, "--task", task, "--format", "json", "--budget", str(b), *(["--top", os.environ["CSTOP"]] if os.environ.get("CSTOP") else []))
+        q = run(CS, "query", "--repo", REPO, "--task", task, "--format", "json", "--budget", str(b))
         try:
             _fs = _all = json.loads(q.stdout)["files"]
             if METRIC == "strict":  # a file counts only if >=50% of its content is included
