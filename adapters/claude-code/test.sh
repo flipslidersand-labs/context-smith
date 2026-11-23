@@ -8,7 +8,8 @@ sel=$here/ctx-select.sh
 # Same minimum as MIN_VERSION in ctx-select.sh.
 min_version=0.4.1
 bin=${CONTEXTSMITH_BIN:-contextsmith}
-bin_version=$("$bin" --version 2>/dev/null | awk '{print $2}')
+bin_out=$("$bin" --version 2>/dev/null) || bin_out=""
+bin_version=$(printf '%s\n' "$bin_out" | awk '{print $2}')
 if [ -z "$bin_version" ] || [ "$(printf '%s\n%s\n' "$min_version" "$bin_version" | sort -V | head -n1)" != "$min_version" ]; then
   echo "test.sh: '$bin' is missing, has no usable --version, or is older than $min_version (got: ${bin_version:-none}); set CONTEXTSMITH_BIN=target/debug/contextsmith" >&2
   exit 2
