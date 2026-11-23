@@ -99,8 +99,6 @@ pub(crate) struct Symbol {
     pub file_id: i64,
     pub name: String,
     pub kind: SymbolKind,
-    pub line: u32,
-    pub snippet: String,
 }
 
 #[non_exhaustive]
@@ -509,7 +507,7 @@ impl GitRepo {
             Ok(h) => h.peel_to_tree()?,
             Err(e) if e.code() == git2::ErrorCode::UnbornBranch => anyhow::bail!(
                 "'{}' has no commits yet (HEAD is unborn); make a first commit before indexing",
-                self.root.display()
+                path_kind::escape_control(&self.root.to_string_lossy())
             ),
             Err(e) => return Err(e.into()),
         };
@@ -1351,6 +1349,20 @@ mod tests {
         let err = repo.scan().unwrap_err().to_string();
         assert!(err.contains("no commits"), "{err}");
         assert!(!err.contains("UnbornBranch"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_without_commits_escapes_control_chars_in_path() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("a\u{1b}[2Kb\u{7}");
+        std::fs::create_dir(&dir).unwrap();
+        git2::Repository::init(&dir).unwrap();
+        let repo = GitRepo::new(&dir).unwrap();
+        let err = repo.scan().unwrap_err().to_string();
+        assert!(err.contains("no commits"), "{err:?}");
+        assert!(!err.chars().any(char::is_control), "{err:?}");
+        assert!(err.contains("a\\x1b[2Kb\\x07"), "{err:?}");
     }
 
     #[test]

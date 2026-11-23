@@ -17,9 +17,7 @@ CREATE TABLE symbols (
     id      INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id),
     name    TEXT NOT NULL,
-    kind    TEXT NOT NULL,           -- "function" | "struct" | "class" | "impl" | "import"
-    line    INTEGER NOT NULL,
-    snippet TEXT NOT NULL            -- 前後 5 行
+    kind    TEXT NOT NULL            -- "function" | "struct" | "class" | "impl" | "import"
 );
 
 CREATE TABLE deps (
@@ -63,8 +61,6 @@ pub struct Symbol {
     pub file_id: i64,
     pub name:    String,
     pub kind:    SymbolKind,
-    pub line:    u32,
-    pub snippet: String,
 }
 
 #[derive(Clone, Copy)]

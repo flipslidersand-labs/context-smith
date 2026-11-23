@@ -5,7 +5,6 @@ use crate::path_kind::{escape_control, path_score_factor};
 use crate::search_index::search_bm25;
 use crate::GitRepo;
 use anyhow::Context;
-use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_SEED_COUNT: usize = 20;
@@ -98,7 +97,7 @@ impl std::error::Error for SelectError {
 fn build_seeds(
     repo: &GitRepo,
     git_index: &git2::Index,
-    conn: &rusqlite::Connection,
+    db: &IndexDb,
     task: &str,
     bm25: Vec<(i64, f32)>,
     no_embed: bool,
@@ -112,7 +111,7 @@ fn build_seeds(
                 Err(e) => return (bm25, SeedMode::FallbackBm25(e.to_string())),
             };
             if let Some(embedder) = embedder {
-                match fuse_filtered(repo, git_index, conn, &embedder, task, &bm25, seed_count) {
+                match fuse_filtered(repo, git_index, db, &embedder, task, &bm25, seed_count) {
                     Ok((seeds, fused)) => {
                         let mode = if fused {
                             SeedMode::Fused
@@ -127,7 +126,7 @@ fn build_seeds(
         }
     }
     #[cfg(not(feature = "remote-embed"))]
-    let _ = (repo, git_index, conn, task, no_embed, seed_count);
+    let _ = (repo, git_index, db, task, no_embed, seed_count);
     (bm25, SeedMode::Bm25)
 }
 
@@ -140,21 +139,27 @@ fn build_seeds(
 fn fuse_filtered(
     repo: &GitRepo,
     git_index: &git2::Index,
-    conn: &rusqlite::Connection,
+    db: &IndexDb,
     embedder: &dyn crate::embed::Embedder,
     task: &str,
     bm25: &[(i64, f32)],
     seed_count: usize,
 ) -> anyhow::Result<(Vec<(i64, f32)>, bool)> {
-    let class = |id: i64| classify_seed(repo, git_index, conn, id);
+    let class = |id: i64| classify_seed(repo, git_index, db, id);
     let usable = |id: i64| matches!(class(id), Ok(Seed::Usable));
     let lexical: Vec<(i64, f32)> = bm25
         .iter()
         .copied()
         .filter(|&(id, _)| !matches!(class(id), Ok(Seed::Blank)))
         .collect();
-    let (seeds, fused) =
-        crate::embed::fuse_seeds_with_status(conn, embedder, task, &lexical, seed_count, &usable)?;
+    let (seeds, fused) = crate::embed::fuse_seeds_with_status(
+        db.connection(),
+        embedder,
+        task,
+        &lexical,
+        seed_count,
+        &usable,
+    )?;
     if !fused || seeds.is_empty() {
         return Ok((bm25.to_vec(), fused));
     }
@@ -202,12 +207,10 @@ enum Seed {
 fn classify_seed(
     repo: &GitRepo,
     git_index: &git2::Index,
-    conn: &rusqlite::Connection,
+    db: &IndexDb,
     id: i64,
 ) -> anyhow::Result<Seed> {
-    let rel: Option<String> = conn
-        .query_row("SELECT path FROM files WHERE id = ?1", [id], |r| r.get(0))
-        .optional()?;
+    let rel = db.path_for_id(id)?;
     let Some(rel) = rel else {
         return Ok(Seed::Missing);
     };
@@ -238,7 +241,7 @@ fn readable_bm25(
         let mut readable = Vec::with_capacity(seed_count);
         let mut dropped: Vec<(PathBuf, String)> = Vec::new();
         for &(id, score) in &hits {
-            match classify_seed(repo, git_index, conn, id)? {
+            match classify_seed(repo, git_index, db, id)? {
                 Seed::Missing | Seed::Blank => {}
                 Seed::Usable => {
                     if readable.len() < seed_count {
@@ -286,15 +289,8 @@ fn select_inner(
     // check happens after fusion (semantic may rescue an empty BM25).
     let git_index = repo.open_index()?;
     let bm25 = readable_bm25(repo, &git_index, db, task, seed_count, skipped)?;
-    let (seeds, seed_mode) = build_seeds(
-        repo,
-        &git_index,
-        db.connection(),
-        task,
-        bm25,
-        opts.no_embed,
-        seed_count,
-    );
+    let (seeds, seed_mode) =
+        build_seeds(repo, &git_index, db, task, bm25, opts.no_embed, seed_count);
     *seed_mode_out = seed_mode;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
@@ -310,7 +306,6 @@ fn select_inner(
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
     {
-        let conn = db.connection();
         // Collect only the file IDs that have a positive score; the DB query
         // is restricted to this set so we read at most len(scored) rows.
         let scored_ids: Vec<i64> = scored
@@ -326,19 +321,14 @@ fn select_inner(
 
         for file_id in scored_ids {
             let rel_path: String = {
-                let mut stmt = conn
-                    .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != 'unknown'")?;
                 // Only "no row" (unscored/unknown-lang file) is expected; any
                 // other DB error must propagate rather than drop candidates.
-                match stmt
-                    .query_row([file_id], |row| row.get(0))
-                    .optional()
-                    .with_context(|| {
-                        format!(
-                            "failed to read files row id={file_id} from index \
-                             (rebuild with `contextsmith index --force`)"
-                        )
-                    })? {
+                match db.indexed_path_for_id(file_id).with_context(|| {
+                    format!(
+                        "failed to read files row id={file_id} from index \
+                         (rebuild with `contextsmith index --force`)"
+                    )
+                })? {
                     Some(p) => p,
                     None => continue,
                 }
@@ -513,7 +503,7 @@ mod fused_tests {
         let (seeds, fused) = fuse_filtered(
             &repo,
             &git_index,
-            db.connection(),
+            &db,
             &Fixed(vec![1.0, 0.0]),
             "frobnicator",
             &bm25,
@@ -537,7 +527,7 @@ mod fused_tests {
         let (seeds, _) = fuse_filtered(
             &repo,
             &git_index,
-            db.connection(),
+            &db,
             &Fixed(vec![1.0, 0.0]),
             "frobnicator",
             &bm25,

@@ -212,6 +212,20 @@ fn refuse_symlinked_index_files(db_path: &std::path::Path) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Bail if the repo has no commits, which the scan would reject anyway; checking it
+/// first keeps `index` from creating `index.db` before it fails.
+fn refuse_unborn_head(repo: &GitRepo) -> anyhow::Result<()> {
+    if let Err(e) = git2::Repository::open(repo.root()).and_then(|r| r.head().map(|_| ())) {
+        if e.code() == git2::ErrorCode::UnbornBranch {
+            anyhow::bail!(
+                "'{}' has no commits yet (HEAD is unborn); make a first commit before indexing",
+                repo.root().display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the index db path for `index`, rejecting symlinked targets and
 /// creating the parent directory. `out` is an explicit db path (kept outside
 /// the repo, e.g. in a cache dir); otherwise `<repo>/.contextsmith/index.db`.
@@ -242,6 +256,9 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Index { repo, out, force } => {
             let repo = GitRepo::new(&repo)?;
+            // Before anything is created: a failure here must not leave an empty
+            // index.db (or its parent directory) that `query` would then open.
+            refuse_unborn_head(&repo)?;
             let db_path = resolve_index_output(&repo, out.as_deref())?;
             let db = IndexDb::open(&db_path)?;
             let stats = build_index(&repo, &db, force)?;
