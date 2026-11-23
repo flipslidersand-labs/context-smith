@@ -15,7 +15,7 @@ chmod +x ~/.claude/skills/ctx-select/ctx-select.sh
 Try it on any repository:
 
 ```bash
-~/.claude/skills/ctx-select/ctx-select.sh ~/some/repo "what you are working on"
+~/.claude/skills/ctx-select/ctx-select.sh ~/some/repo 'what you are working on'
 ```
 
 ## Test
@@ -29,4 +29,4 @@ bash adapters/claude-code/test.sh      # builds a throwaway git repository; chec
 | Variable | Default | Use |
 |---|---|---|
 | `CONTEXTSMITH_BIN` | `contextsmith` | path to the binary |
-| `CTX_SELECT_CACHE` | `${XDG_CACHE_HOME:-~/.cache}/contextsmith` | where indexes are kept (one directory per repository; created mode 700 because the index holds file text, and a symlink or another user's directory is refused) |
+| `CTX_SELECT_CACHE` | `${XDG_CACHE_HOME:-~/.cache}/contextsmith` | where indexes are kept (one directory per repository; created mode 700 because the index holds file text, and a symlink or another user's directory is refused; the root itself must be owned by you and not group- or world-writable, so an existing 775 root is refused: `chmod go-w` it) |
