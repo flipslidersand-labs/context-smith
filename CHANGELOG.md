@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `index.db` no longer stores `symbols.line` and `symbols.snippet` (nothing read them, and they made the DB much larger). `EXTRACT_VERSION` is 11 (was 10): an existing index is rebuilt in full on the next `index` (the old `symbols` table is recreated), so re-index once after upgrading.
+- Internal: `Language` and `SymbolKind` moved from `src/lib.rs` to `src/language.rs`; behavior is unchanged (#546).
 
 ### Removed
 - `CONTEXTSMITH_EXPAND=ppr` (personalized PageRank, experimental) is removed after the bench rejected it (ADR-005); the value is now rejected as unknown like any other. `bfs-capped` (default) and `bfs` are unchanged (#533).
