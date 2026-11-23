@@ -20,34 +20,49 @@ pub(crate) fn locked_message(path: &Path, detail: &str) -> String {
     )
 }
 
-/// True if any error in the chain is SQLITE_BUSY / SQLITE_LOCKED (by code).
-pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
+/// True if any error in the chain is a SQLite failure with one of `codes`.
+fn chain_has_code(err: &anyhow::Error, codes: &[rusqlite::ErrorCode]) -> bool {
     err.chain().any(|e| {
         matches!(
             e.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::SqliteFailure(f, _))
-                if matches!(
-                    f.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
+            Some(rusqlite::Error::SqliteFailure(f, _)) if codes.contains(&f.code)
         )
     })
+}
+
+/// True if any error in the chain is SQLITE_BUSY / SQLITE_LOCKED (by code).
+pub(crate) fn is_lock_error(err: &anyhow::Error) -> bool {
+    chain_has_code(
+        err,
+        &[
+            rusqlite::ErrorCode::DatabaseBusy,
+            rusqlite::ErrorCode::DatabaseLocked,
+        ],
+    )
 }
 
 /// True if any error in the chain is SQLITE_READONLY (any extended code), or
 /// SQLITE_CANTOPEN (some SQLite builds report that when -shm/-wal cannot be
 /// created in a read-only directory). Callers must rule out a missing file.
 fn is_readonly_error(err: &anyhow::Error) -> bool {
-    err.chain().any(|e| {
-        matches!(
-            e.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::SqliteFailure(f, _))
-                if matches!(
-                    f.code,
-                    rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen
-                )
-        )
-    })
+    chain_has_code(
+        err,
+        &[
+            rusqlite::ErrorCode::ReadOnly,
+            rusqlite::ErrorCode::CannotOpen,
+        ],
+    )
+}
+
+/// Replace a lock error with the friendly `locked_message` for `conn`'s DB;
+/// any other error passes through unchanged.
+pub(crate) fn friendly_lock_error(conn: &Connection, e: anyhow::Error) -> anyhow::Error {
+    if is_lock_error(&e) {
+        let path = conn.path().unwrap_or("");
+        anyhow::anyhow!(locked_message(Path::new(path), &format!("{e:#}")))
+    } else {
+        e
+    }
 }
 
 /// Percent-escape bytes for a SQLite `file:` URI path (keeps `/ . - _` and alphanumerics).
@@ -472,13 +487,6 @@ impl IndexDb {
         Ok(self.conn.last_insert_rowid())
     }
 
-    #[cfg(test)]
-    pub(crate) fn delete_deps_from(&self, file_id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM deps WHERE from_file = ?1", params![file_id])?;
-        Ok(())
-    }
-
     pub(crate) fn upsert_meta(&self, key: &str, value: &str) -> Result<()> {
         Self::upsert_meta_on(&self.conn, key, value)
     }
@@ -571,26 +579,7 @@ pub const EXTRACT_VERSION: u32 = 11;
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
 pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
-    build_index_inner(repo, db, force).map_err(|e| {
-        if is_lock_error(&e) {
-            let path = db.connection().path().unwrap_or("").to_string();
-            anyhow::anyhow!(locked_message(Path::new(&path), &format!("{e:#}")))
-        } else {
-            e
-        }
-    })
-}
-
-/// Stored extractor version. Only a missing row means "no version"; other errors
-/// (SQLITE_BUSY, ...) propagate instead of silently forcing a full re-index.
-fn stored_extract_version(conn: &Connection) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![EXTRACT_VERSION_KEY],
-            |r| r.get(0),
-        )
-        .optional()?)
+    build_index_inner(repo, db, force).map_err(|e| friendly_lock_error(db.connection(), e))
 }
 
 fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
@@ -607,7 +596,9 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             .execute_batch("UPDATE embeddings SET content_sha = NULL;")?;
     }
     {
-        let stored = stored_extract_version(db.connection())?;
+        // Only a missing row means "no version"; other errors (SQLITE_BUSY, ...)
+        // propagate instead of silently forcing a full re-index.
+        let stored = IndexDb::get_meta_on(db.connection(), EXTRACT_VERSION_KEY)?;
         let has_files: i64 = db
             .connection()
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
@@ -652,172 +643,165 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
 
     let mut file_paths: HashMap<i64, std::path::PathBuf> = HashMap::new();
 
-    // Cleanup + Pass 1 run inside this closure so that every `?` is followed
-    // by a rollback when `tx` is dropped (covers cleanup + upserts to avoid N+1 fsync and
-    // SQLITE_BUSY risk).
-    let pass1_result = (|| -> Result<()> {
-        if wipe_fts {
-            db.connection().execute_batch(
-                "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
-            )?;
-            // A table from an older layout keeps its extra NOT NULL columns
-            // (`CREATE TABLE IF NOT EXISTS` leaves it alone), which would fail
-            // every insert. The rebuild repopulates all rows, so recreate it
-            // (#590). Inside the rebuild transaction, so a failure keeps the old one.
-            db.connection().execute_batch(
-                "DROP TABLE symbols;
-                 CREATE TABLE symbols (
-                     id      INTEGER PRIMARY KEY,
-                     file_id INTEGER NOT NULL REFERENCES files(id),
-                     name    TEXT NOT NULL,
-                     kind    TEXT NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);",
-            )?;
+    // Cleanup + Pass 1 + Pass 2 run in this transaction; any `?` returns early and
+    // dropping `tx` rolls everything back.
+    if wipe_fts {
+        db.connection().execute_batch(
+            "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
+        )?;
+        // A table from an older layout keeps its extra NOT NULL columns
+        // (`CREATE TABLE IF NOT EXISTS` leaves it alone), which would fail
+        // every insert. The rebuild repopulates all rows, so recreate it
+        // (#590). Inside the rebuild transaction, so a failure keeps the old one.
+        db.connection().execute_batch(
+            "DROP TABLE symbols;
+             CREATE TABLE symbols (
+                 id      INTEGER PRIMARY KEY,
+                 file_id INTEGER NOT NULL REFERENCES files(id),
+                 name    TEXT NOT NULL,
+                 kind    TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);",
+        )?;
+    }
+    // --- Cleanup: remove DB entries for files no longer in git ---
+    let db_files = db.all_file_ids_and_paths()?;
+    for (file_id, path) in &db_files {
+        if !git_paths.contains(path) {
+            db.delete_file_records(*file_id)?;
+            stats.files_deleted += 1;
         }
-        // --- Cleanup: remove DB entries for files no longer in git ---
-        let db_files = db.all_file_ids_and_paths()?;
-        for (file_id, path) in &db_files {
-            if !git_paths.contains(path) {
-                db.delete_file_records(*file_id)?;
-                stats.files_deleted += 1;
-            }
+    }
+
+    // --- Pass 1: upsert files + incremental symbol / FTS update ---
+    for (rel_path, lang, blob_sha, size) in &files {
+        stats.files_total += 1;
+        let (file_id, sha_changed) = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
+        file_paths.insert(file_id, rel_path.clone());
+
+        if !sha_changed {
+            stats.files_skipped += 1;
+            continue;
         }
 
-        // --- Pass 1: upsert files + incremental symbol / FTS update ---
-        for (rel_path, lang, blob_sha, size) in &files {
-            stats.files_total += 1;
-            let (file_id, sha_changed) = db.upsert_file(rel_path, *lang, blob_sha, *size)?;
-            file_paths.insert(file_id, rel_path.clone());
+        // File is new or changed — re-index symbols and FTS.
+        if *lang == Language::Unknown {
+            // Drop stale rows left from a previous known language (lang
+            // change), keeping the files row and path FTS.
+            db.delete_content_records(file_id)?;
+            // Still mark as indexed so we don't re-check every run.
+            db.mark_indexed(file_id)?;
+            stats.files_indexed += 1;
+            continue;
+        }
 
-            if !sha_changed {
+        let abs_path = repo.root().join(rel_path);
+        let source = match repo.read_tracked(rel_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // Content is not UTF-8: drop stale symbol/body/dep/embedding
+                // rows (#286) but keep the files row and a path FTS row so
+                // the file stays findable by name (#308). indexed_sha is
+                // reset to NULL so a later restore to the same blob is
+                // re-indexed instead of skipped (#448).
+                eprintln!("warn: unreadable content {:?}: {e}", abs_path);
+                db.delete_content_records(file_id)?;
+                db.connection().execute(
+                    "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
+                    params![file_id],
+                )?;
+                db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+                file_paths.remove(&file_id);
                 stats.files_skipped += 1;
                 continue;
             }
-
-            // File is new or changed — re-index symbols and FTS.
-            if *lang == Language::Unknown {
-                // Drop stale rows left from a previous known language (lang
-                // change), keeping the files row and path FTS.
+            Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
+                // Same handling as non-UTF-8 content: keep the files row
+                // and path FTS so the file stays findable by name, drop
+                // content-derived rows, and retry on the next run (#567).
+                eprintln!("warn: skipping content of {:?}: {e}", abs_path);
                 db.delete_content_records(file_id)?;
-                // Still mark as indexed so we don't re-check every run.
-                db.mark_indexed(file_id)?;
-                stats.files_indexed += 1;
+                db.connection().execute(
+                    "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
+                    params![file_id],
+                )?;
+                db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+                file_paths.remove(&file_id);
+                stats.files_skipped += 1;
                 continue;
             }
-
-            let abs_path = repo.root().join(rel_path);
-            let source = match repo.read_tracked(rel_path) {
-                Ok(s) => s,
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                    // Content is not UTF-8: drop stale symbol/body/dep/embedding
-                    // rows (#286) but keep the files row and a path FTS row so
-                    // the file stays findable by name (#308). indexed_sha is
-                    // reset to NULL so a later restore to the same blob is
-                    // re-indexed instead of skipped (#448).
-                    eprintln!("warn: unreadable content {:?}: {e}", abs_path);
-                    db.delete_content_records(file_id)?;
-                    db.connection().execute(
-                        "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
-                        params![file_id],
-                    )?;
-                    db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
-                    file_paths.remove(&file_id);
-                    stats.files_skipped += 1;
-                    continue;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
-                    // Same handling as non-UTF-8 content: keep the files row
-                    // and path FTS so the file stays findable by name, drop
-                    // content-derived rows, and retry on the next run (#567).
-                    eprintln!("warn: skipping content of {:?}: {e}", abs_path);
-                    db.delete_content_records(file_id)?;
-                    db.connection().execute(
-                        "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
-                        params![file_id],
-                    )?;
-                    db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
-                    file_paths.remove(&file_id);
-                    stats.files_skipped += 1;
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("warn: skip {:?}: {e}", abs_path);
-                    // Drop stale rows (symbols/FTS/deps/embeddings/files) so
-                    // search never returns content we can no longer read; the
-                    // file is re-attempted on the next run (#286).
-                    db.delete_file_records(file_id)?;
-                    file_paths.remove(&file_id);
-                    stats.files_skipped += 1;
-                    continue;
-                }
-            };
-
-            // (a) Clear stale symbol rows (fts_symbols rows are keyed by
-            // symbols.id, so they must go first).
-            db.connection().execute(
-                "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
-                params![file_id],
-            )?;
-            db.delete_symbols_for(file_id)?;
-
-            // (b) Extract and insert new symbols.
-            let mut raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
-            if raw_syms.len() > MAX_SYMBOLS_PER_FILE {
-                eprintln!(
-                    "warn: {:?} has {} symbols; keeping the first {MAX_SYMBOLS_PER_FILE}",
-                    abs_path,
-                    raw_syms.len()
-                );
-                raw_syms = cap_symbols(raw_syms, MAX_SYMBOLS_PER_FILE);
+            Err(e) => {
+                eprintln!("warn: skip {:?}: {e}", abs_path);
+                // Drop stale rows (symbols/FTS/deps/embeddings/files) so
+                // search never returns content we can no longer read; the
+                // file is re-attempted on the next run (#286).
+                db.delete_file_records(file_id)?;
+                file_paths.remove(&file_id);
+                stats.files_skipped += 1;
+                continue;
             }
-            // (id, name) of non-import symbols, in insertion order, for fts_symbols.
-            let mut fts_syms: Vec<(i64, String)> = Vec::new();
-            for (name, kind, _line) in raw_syms {
-                let is_import = kind.as_str() == "import";
-                let sym = Symbol {
-                    file_id,
-                    name,
-                    kind,
-                };
-                let sym_id = db.insert_symbol(&sym)?;
-                if !is_import {
-                    fts_syms.push((sym_id, sym.name));
-                }
-                stats.symbols_total += 1;
-            }
+        };
 
-            // (c) Replace FTS rows for this file.
-            db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+        // (a) Clear stale symbol rows (fts_symbols rows are keyed by
+        // symbols.id, so they must go first).
+        db.connection().execute(
+            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        db.delete_symbols_for(file_id)?;
 
-            for (sym_id, name) in fts_syms {
-                db.connection().execute(
-                    "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
-                    params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
-                )?;
-            }
-
-            db.connection()
-                .execute("DELETE FROM fts_body WHERE rowid = ?1", params![file_id])?;
-            let truncated = truncate_fts_body(&source);
-            db.connection().execute(
-                "INSERT INTO fts_body (rowid, file_id, content) VALUES (?1, ?1, ?2)",
-                params![file_id, truncated],
-            )?;
-
-            // (d) Stamp indexed_sha so this file is skipped next time.
-            db.mark_indexed(file_id)?;
-            stats.files_indexed += 1;
+        // (b) Extract and insert new symbols.
+        let mut raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
+        if raw_syms.len() > MAX_SYMBOLS_PER_FILE {
+            eprintln!(
+                "warn: {:?} has {} symbols; keeping the first {MAX_SYMBOLS_PER_FILE}",
+                abs_path,
+                raw_syms.len()
+            );
+            raw_syms = cap_symbols(raw_syms, MAX_SYMBOLS_PER_FILE);
         }
-        // --- Pass 2: resolve imports → deps table, in the same transaction so
-        // a failure never leaves new symbols with stale deps (#494). ---
-        let go_modules = dep_builder::read_go_modules(repo.root(), &file_paths, &git_paths);
-        dep_builder::build_deps_in_tx(db.connection(), &file_paths, &go_modules)?;
-        Ok(())
-    })();
-    // On error, returning drops `tx`, rolling back both the stale-file deletions
-    // and any Pass-1 writes so the DB is never left in a half-cleaned state.
-    pass1_result?;
+        // (id, name) of non-import symbols, in insertion order, for fts_symbols.
+        let mut fts_syms: Vec<(i64, String)> = Vec::new();
+        for (name, kind, _line) in raw_syms {
+            let is_import = kind.as_str() == "import";
+            let sym = Symbol {
+                file_id,
+                name,
+                kind,
+            };
+            let sym_id = db.insert_symbol(&sym)?;
+            if !is_import {
+                fts_syms.push((sym_id, sym.name));
+            }
+            stats.symbols_total += 1;
+        }
+
+        // (c) Replace FTS rows for this file.
+        db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+
+        for (sym_id, name) in fts_syms {
+            db.connection().execute(
+                "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
+                params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
+            )?;
+        }
+
+        db.connection()
+            .execute("DELETE FROM fts_body WHERE rowid = ?1", params![file_id])?;
+        let truncated = truncate_fts_body(&source);
+        db.connection().execute(
+            "INSERT INTO fts_body (rowid, file_id, content) VALUES (?1, ?1, ?2)",
+            params![file_id, truncated],
+        )?;
+
+        // (d) Stamp indexed_sha so this file is skipped next time.
+        db.mark_indexed(file_id)?;
+        stats.files_indexed += 1;
+    }
+    // --- Pass 2: resolve imports → deps table, in the same transaction so
+    // a failure never leaves new symbols with stale deps (#494). ---
+    let go_modules = dep_builder::read_go_modules(repo.root(), &file_paths, &git_paths);
+    dep_builder::build_deps_in_tx(db.connection(), &file_paths, &go_modules)?;
     tx.commit()
         .context("Failed to commit cleanup+Pass-1 transaction")?;
 
@@ -1109,37 +1093,22 @@ mod tests {
     }
 
     #[test]
-    fn delete_deps_from_removes_only_outgoing_edges() {
+    fn extract_version_meta_missing_row_is_none_but_errors_propagate() {
         let db = mem_db();
-        let (a, _) = db
-            .upsert_file(Path::new("a.rs"), Language::Rust, "a", 1)
-            .unwrap();
-        let (b, _) = db
-            .upsert_file(Path::new("b.rs"), Language::Rust, "b", 1)
-            .unwrap();
-        db.connection()
-            .execute("INSERT INTO deps VALUES (?1, ?2)", params![a, b])
-            .unwrap();
-        db.connection()
-            .execute("INSERT INTO deps VALUES (?1, ?2)", params![b, a])
-            .unwrap();
-        db.delete_deps_from(a).unwrap();
-        assert_eq!(count(&db, "SELECT COUNT(*) FROM deps"), 1);
-        assert_eq!(count(&db, "SELECT from_file FROM deps"), b);
-    }
-
-    #[test]
-    fn stored_extract_version_missing_row_is_none_but_errors_propagate() {
-        let db = mem_db();
-        assert_eq!(stored_extract_version(db.connection()).unwrap(), None);
+        assert_eq!(
+            IndexDb::get_meta_on(db.connection(), EXTRACT_VERSION_KEY).unwrap(),
+            None
+        );
         db.upsert_meta(EXTRACT_VERSION_KEY, "7").unwrap();
         assert_eq!(
-            stored_extract_version(db.connection()).unwrap().as_deref(),
+            IndexDb::get_meta_on(db.connection(), EXTRACT_VERSION_KEY)
+                .unwrap()
+                .as_deref(),
             Some("7")
         );
         // A query failure (here: no meta table) must not read as "no version".
         db.connection().execute_batch("DROP TABLE meta").unwrap();
-        assert!(stored_extract_version(db.connection()).is_err());
+        assert!(IndexDb::get_meta_on(db.connection(), EXTRACT_VERSION_KEY).is_err());
     }
 
     #[test]

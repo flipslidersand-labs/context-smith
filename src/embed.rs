@@ -130,17 +130,8 @@ pub fn populate_embeddings(
     let conn = db.connection();
     // BEGIN / INSERT / COMMIT can all hit SQLITE_BUSY when another process
     // holds the write lock; present the same friendly message as `build_index`.
-    populate_embeddings_inner(repo_root, embedder, db).map_err(|e| {
-        if crate::index_builder::is_lock_error(&e) {
-            let path = conn.path().unwrap_or("").to_string();
-            anyhow::anyhow!(crate::index_builder::locked_message(
-                std::path::Path::new(&path),
-                &format!("{e:#}")
-            ))
-        } else {
-            e
-        }
-    })
+    populate_embeddings_inner(repo_root, embedder, db)
+        .map_err(|e| crate::index_builder::friendly_lock_error(conn, e))
 }
 
 fn populate_embeddings_inner(
@@ -235,23 +226,18 @@ fn populate_embeddings_inner(
         // Persist each vector with its content_sha in a single transaction.
         let tx =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
-        let result = (|| -> Result<()> {
-            crate::index_builder::IndexDb::upsert_meta_on(conn, EMBED_DIM_KEY, &dim.to_string())?;
-            for ((id, sha), v) in ids.iter().zip(shas.iter()).zip(vecs.iter()) {
-                conn.execute(
-                    "INSERT INTO embeddings (file_id, vector, content_sha)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(file_id) DO UPDATE
-                       SET vector      = excluded.vector,
-                           content_sha = excluded.content_sha",
-                    params![id, vec_to_blob(v), sha],
-                )?;
-            }
-            Ok(())
-        })();
-
-        // Early return drops `tx`, which rolls back.
-        result?;
+        // An early `?` return drops `tx`, which rolls back.
+        crate::index_builder::IndexDb::upsert_meta_on(conn, EMBED_DIM_KEY, &dim.to_string())?;
+        for ((id, sha), v) in ids.iter().zip(shas.iter()).zip(vecs.iter()) {
+            conn.execute(
+                "INSERT INTO embeddings (file_id, vector, content_sha)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(file_id) DO UPDATE
+                   SET vector      = excluded.vector,
+                       content_sha = excluded.content_sha",
+                params![id, vec_to_blob(v), sha],
+            )?;
+        }
         tx.commit()?;
         written += ids.len();
     }
