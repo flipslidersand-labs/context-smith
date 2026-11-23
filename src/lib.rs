@@ -5,6 +5,7 @@ mod dep_builder;
 mod embed;
 mod expand;
 mod index_builder;
+mod language;
 mod path_kind;
 mod search_index;
 mod select;
@@ -15,6 +16,7 @@ pub use bundle_writer::{render_task_md, write_bundle};
 #[cfg(feature = "remote-embed")]
 pub use embed::embed_index;
 pub use index_builder::{build_index, IndexDb, IndexStats};
+pub(crate) use language::{Language, SymbolKind};
 pub use select::{select_candidates, SeedMode, SelectError, SelectOptions, Selection};
 
 /// True if the commit's raw object records a parent, even when libgit2 hides it
@@ -35,64 +37,6 @@ mod moved;
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Language {
-    Rust,
-    Python,
-    Go,
-    TypeScript,
-    JavaScript,
-    Ruby,
-    Unknown,
-}
-
-impl Language {
-    pub(crate) fn from_path(path: &Path) -> Self {
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("rs") => Language::Rust,
-            Some("py") => Language::Python,
-            Some("go") => Language::Go,
-            Some("ts" | "tsx" | "mts" | "cts") => Language::TypeScript,
-            Some("js" | "jsx" | "mjs" | "cjs") => Language::JavaScript,
-            Some("rb") => Language::Ruby,
-            _ => Language::Unknown,
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Language::Rust => "rust",
-            Language::Python => "python",
-            Language::Go => "go",
-            Language::TypeScript => "typescript",
-            Language::JavaScript => "javascript",
-            Language::Ruby => "ruby",
-            Language::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SymbolKind {
-    Function,
-    Struct,
-    Class,
-    Impl,
-    Import,
-}
-
-impl SymbolKind {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            SymbolKind::Function => "function",
-            SymbolKind::Struct => "struct",
-            SymbolKind::Class => "class",
-            SymbolKind::Impl => "impl",
-            SymbolKind::Import => "import",
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Symbol {
