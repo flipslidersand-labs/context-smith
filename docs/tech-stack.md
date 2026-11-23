@@ -6,7 +6,7 @@
 
 ## 主要クレートと選定理由
 
-版は `Cargo.toml` が正本。この表は 0.5.0 時点。
+版は `Cargo.toml` が正本。この表は 0.6.0 時点。
 
 | クレート               | バージョン | 役割                                         | 選定理由                                        |
 | ---------------------- | ---------- | -------------------------------------------- | ----------------------------------------------- |
@@ -17,7 +17,7 @@
 | `serde` / `serde_json` | 1          | citations.json・`query --format json` 出力   | derive で簡潔                                   |
 | `clap`                 | 4          | CLI                                          | derive マクロ                                   |
 | `anyhow`               | 1          | エラーハンドリング                           | 複数クレートのエラーを集約                      |
-| `ureq` / `zeroize`     | 2 / 1      | 埋め込みサービス連携（`remote-embed` feature のみ） | 既定ビルドは BM25 のみでオフライン動作      |
+| `ureq` / `zeroize`     | 3 / 1      | 埋め込みサービス連携（`remote-embed` feature のみ） | 既定ビルドは BM25 のみでオフライン動作      |
 
 SQLite は既定で同梱ビルド（`bundled-sqlite` feature）。`--no-default-features` でシステムの SQLite を使う。
 

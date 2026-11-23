@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
 ### Breaking
 - `select_candidates` now returns `Result<Selection, SelectError>` instead of `Result<Vec<Candidate>>`; use `.candidates` for the old value (#400).
 
@@ -84,7 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ctx-select.sh` now prints control characters (newlines, tabs, ...) in file names as `?`, so a crafted file name can no longer forge extra rank rows (#397).
 - Rust `mod x;` declarations now resolve from every Cargo target root (`build.rs`, `tests/*.rs`, `src/bin/*.rs`, `src/bin/<name>/main.rs`), not only `lib.rs`/`main.rs`/`mod.rs` (#420).
 
-## [0.5.0] - 2026-11-16
+## [0.5.0] - 2026-11-16 (not published)
+
+Prepared but never tagged or published to crates.io. Every change below ships in 0.6.0.
 
 ### Added
 - Files that were cut to fit the budget are now marked: `task.md` and `relevant-code/*.md`
@@ -383,8 +387,8 @@ Initial release. Published to [crates.io](https://crates.io/crates/context-smith
 - Short (<4 char) files are still selected when the budget allows (#17).
 - Slug collisions now produce distinct bundle output filenames (#20).
 
-[Unreleased]: https://github.com/flipslidersand-labs/context-smith/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.4.1...v0.5.0
+[Unreleased]: https://github.com/flipslidersand-labs/context-smith/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.4.1...v0.6.0
 [0.4.1]: https://github.com/flipslidersand-labs/context-smith/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/flipslidersand-labs/context-smith/compare/v0.2.0...v0.3.0
