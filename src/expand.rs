@@ -12,7 +12,8 @@ use std::collections::{HashMap, HashSet};
 pub const EXPAND_ENV: &str = "CONTEXTSMITH_EXPAND";
 
 const CAP_K: usize = 10;
-const CHUNK: usize = 500;
+/// Max ids per `IN` clause (stays far below SQLite's bound-variable limit).
+pub(crate) const CHUNK: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpandMode {
@@ -52,7 +53,7 @@ pub fn expand(
     }
 }
 
-fn placeholders(n: usize) -> String {
+pub(crate) fn placeholders(n: usize) -> String {
     (1..=n)
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
@@ -118,7 +119,7 @@ fn degrees(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, usize>> {
     Ok(out)
 }
 
-fn dedup_seeds(seeds: &[(i64, f32)]) -> HashMap<i64, f32> {
+pub(crate) fn dedup_seeds(seeds: &[(i64, f32)]) -> HashMap<i64, f32> {
     let mut m: HashMap<i64, f32> = HashMap::new();
     for &(id, s) in seeds {
         let e = m.entry(id).or_insert(0.0);

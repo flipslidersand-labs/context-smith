@@ -385,6 +385,17 @@ pub(crate) fn safe_fence(content: &str) -> String {
     "`".repeat(len)
 }
 
+/// Bail when `meta` (from `symlink_metadata` of `shown`) is a symlink; `hint` is appended to the message.
+fn bail_if_symlink(meta: &std::fs::Metadata, shown: &Path, hint: &str) -> Result<()> {
+    if meta.file_type().is_symlink() {
+        anyhow::bail!(
+            "{} is a symlink; refusing to write bundle{hint}",
+            shown.display()
+        );
+    }
+    Ok(())
+}
+
 /// Write `contents` to `path`, refusing if `path` is a symlink (dangling or not).
 ///
 /// An existing regular file is removed first and the new one is opened with `create_new`
@@ -394,9 +405,7 @@ pub(crate) fn safe_fence(content: &str) -> String {
 fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
     if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!("{} is a symlink; refusing to write bundle", path.display());
-        }
+        bail_if_symlink(&meta, path, "")?;
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -441,23 +450,13 @@ pub fn write_bundle(
     // e.g. /tmp on macOS). `components()` drops a trailing slash so `link/` is checked too.
     let out_checked: std::path::PathBuf = out_dir.components().collect();
     if let Ok(meta) = std::fs::symlink_metadata(&out_checked) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "{} is a symlink; refusing to write bundle (pass the real path to --out instead)",
-                out_dir.display()
-            );
-        }
+        bail_if_symlink(&meta, out_dir, " (pass the real path to --out instead)")?;
     }
     std::fs::create_dir_all(out_dir)?;
     let rc_dir = out_dir.join("relevant-code");
     // Refuse to follow a symlinked relevant-code/ (never delete outside out_dir).
     if let Ok(meta) = std::fs::symlink_metadata(&rc_dir) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "{} is a symlink; refusing to write bundle",
-                rc_dir.display()
-            );
-        }
+        bail_if_symlink(&meta, &rc_dir, "")?;
         // Remove stale *.md from a previous run (regular files only, no recursion).
         let clean_err = |p: &Path| format!("failed to clean {}", p.display());
         for entry in std::fs::read_dir(&rc_dir).with_context(|| clean_err(&rc_dir))? {
