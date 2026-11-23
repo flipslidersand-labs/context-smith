@@ -105,7 +105,11 @@ fn build_seeds(
     #[cfg(feature = "remote-embed")]
     {
         if !no_embed {
-            if let Some(embedder) = crate::embed::RemoteEmbedder::from_env() {
+            let embedder = match crate::embed::RemoteEmbedder::from_env() {
+                Ok(e) => e,
+                Err(e) => return (bm25, SeedMode::FallbackBm25(e.to_string())),
+            };
+            if let Some(embedder) = embedder {
                 match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, seed_count)
                 {
                     Ok((seeds, fused)) => {

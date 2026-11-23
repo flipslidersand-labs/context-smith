@@ -338,13 +338,18 @@ const SEARCH_VECTORS_MAX: usize = 3_000;
 /// Generate embeddings for the indexed files via the remote embedding service.
 ///
 /// Returns `None` when `EMBEDDING_SVC_URL` is not configured (nothing was
-/// attempted), otherwise the number of files embedded or the failure.
+/// attempted), `Some(Err)` when the configuration is refused (plain `http://` to
+/// a non-loopback host without `EMBEDDING_ALLOW_INSECURE=1`), otherwise the number of files embedded or the failure.
 #[cfg(feature = "remote-embed")]
 pub fn embed_index(
     repo: &crate::GitRepo,
     db: &crate::index_builder::IndexDb,
 ) -> Option<Result<usize>> {
-    let embedder = RemoteEmbedder::from_env()?;
+    let embedder = match RemoteEmbedder::from_env() {
+        Ok(Some(e)) => e,
+        Ok(None) => return None,
+        Err(e) => return Some(Err(e)),
+    };
     Some(populate_embeddings(repo.root(), &embedder, db))
 }
 
@@ -441,8 +446,9 @@ pub fn fuse_seeds_with_status(
 ///   - `EMBEDDING_COLLECTION`  (optional, default `context-smith`; must be a
 ///     collection registered on the service)
 ///   - `EMBEDDING_TIMEOUT_SECS` (optional, read timeout in seconds; default 30)
-///   - `EMBEDDING_ALLOW_INSECURE` (optional, `1` silences the warning printed for
-///     plain `http://` to a non-loopback host; prefer `https://`)
+///   - `EMBEDDING_ALLOW_INSECURE` (optional; plain `http://` to a non-loopback
+///     host is refused unless this is `1`, because the API key and file contents
+///     would be sent unencrypted; prefer `https://`)
 ///
 /// Requests use a 5-second connect timeout and a configurable read timeout
 /// (default 30 s). Transient errors (connection reset, 5xx, 408/425/429) are
@@ -541,31 +547,39 @@ fn is_insecure_remote(url: &str) -> bool {
 
 #[cfg(feature = "remote-embed")]
 impl RemoteEmbedder {
-    /// Construct from env; returns `None` if `EMBEDDING_SVC_URL` is unset, empty, or whitespace-only.
+    /// Construct from env; returns `Ok(None)` if `EMBEDDING_SVC_URL` is unset, empty, or whitespace-only.
     ///
-    /// Plain `http://` to a non-loopback host prints a warning to stderr, since the
-    /// API key and file contents would travel unencrypted. Prefer `https://`; set
-    /// `EMBEDDING_ALLOW_INSECURE=1` to silence the warning for a trusted network.
-    pub fn from_env() -> Option<Self> {
-        let url = std::env::var("EMBEDDING_SVC_URL").ok()?;
+    /// Fails closed: plain `http://` to a non-loopback host returns an error (nothing
+    /// is sent) because the API key and file contents would travel unencrypted.
+    /// Prefer `https://`; set `EMBEDDING_ALLOW_INSECURE=1` to allow it on a trusted
+    /// network (a warning is still printed to stderr).
+    pub fn from_env() -> Result<Option<Self>> {
+        let Ok(url) = std::env::var("EMBEDDING_SVC_URL") else {
+            return Ok(None);
+        };
         let url = url.trim().to_string();
         if url.is_empty() {
-            return None;
+            return Ok(None);
         }
-        if is_insecure_remote(&url)
-            && std::env::var("EMBEDDING_ALLOW_INSECURE").as_deref() != Ok("1")
-        {
+        if is_insecure_remote(&url) {
+            if std::env::var("EMBEDDING_ALLOW_INSECURE").as_deref() != Ok("1") {
+                anyhow::bail!(
+                    "EMBEDDING_SVC_URL uses plain http:// to a non-loopback host; the API key \
+                     and file contents would be sent unencrypted, so embeddings are disabled. \
+                     Use https:// or set EMBEDDING_ALLOW_INSECURE=1 to allow it."
+                );
+            }
             eprintln!(
                 "warning: EMBEDDING_SVC_URL uses plain http:// to a non-loopback host; \
-                 the API key and file contents are sent unencrypted. Use https:// or set \
-                 EMBEDDING_ALLOW_INSECURE=1 to silence this warning."
+                 the API key and file contents are sent unencrypted \
+                 (allowed by EMBEDDING_ALLOW_INSECURE=1)."
             );
         }
         let timeout_secs = std::env::var("EMBEDDING_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_READ_TIMEOUT_SECS);
-        Some(RemoteEmbedder {
+        Ok(Some(RemoteEmbedder {
             url: url.trim_end_matches('/').to_string(),
             api_key: std::env::var("EMBEDDING_API_KEY")
                 .ok()
@@ -573,7 +587,7 @@ impl RemoteEmbedder {
             collection: std::env::var("EMBEDDING_COLLECTION")
                 .unwrap_or_else(|_| "context-smith".to_string()),
             timeout: std::time::Duration::from_secs(timeout_secs),
-        })
+        }))
     }
 
     /// Build a ureq agent with the configured timeouts.
@@ -1666,7 +1680,7 @@ mod tests {
         for k in EMBED_ENV {
             std::env::remove_var(k);
         }
-        assert!(RemoteEmbedder::from_env().is_none());
+        assert!(RemoteEmbedder::from_env().unwrap().is_none());
     }
 
     #[cfg(feature = "remote-embed")]
@@ -1678,7 +1692,7 @@ mod tests {
         }
         for v in ["", "   ", "\t\n"] {
             std::env::set_var("EMBEDDING_SVC_URL", v);
-            let got = RemoteEmbedder::from_env();
+            let got = RemoteEmbedder::from_env().unwrap();
             std::env::remove_var("EMBEDDING_SVC_URL");
             assert!(got.is_none(), "{v:?} must be treated as unset");
         }
@@ -1692,7 +1706,7 @@ mod tests {
             std::env::remove_var(k);
         }
         std::env::set_var("EMBEDDING_SVC_URL", "  http://127.0.0.1:9092/ ");
-        let e = RemoteEmbedder::from_env().expect("url set");
+        let e = RemoteEmbedder::from_env().unwrap().expect("url set");
         std::env::remove_var("EMBEDDING_SVC_URL");
         assert_eq!(e.url, "http://127.0.0.1:9092");
     }
@@ -1705,7 +1719,7 @@ mod tests {
             std::env::remove_var(k);
         }
         std::env::set_var("EMBEDDING_SVC_URL", "http://127.0.0.1:9092/");
-        let e = RemoteEmbedder::from_env().expect("url set");
+        let e = RemoteEmbedder::from_env().unwrap().expect("url set");
         std::env::remove_var("EMBEDDING_SVC_URL");
         assert_eq!(e.url, "http://127.0.0.1:9092");
         assert_eq!(e.collection, "context-smith");
@@ -1725,13 +1739,61 @@ mod tests {
         }
         std::env::set_var("EMBEDDING_SVC_URL", "http://127.0.0.1:9092");
         std::env::set_var("EMBEDDING_TIMEOUT_SECS", "abc");
-        let e = RemoteEmbedder::from_env().expect("url set");
+        let e = RemoteEmbedder::from_env().unwrap().expect("url set");
         std::env::remove_var("EMBEDDING_SVC_URL");
         std::env::remove_var("EMBEDDING_TIMEOUT_SECS");
         assert_eq!(
             e.timeout,
             std::time::Duration::from_secs(DEFAULT_READ_TIMEOUT_SECS)
         );
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_refuses_insecure_http_unless_allowed() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("EMBEDDING_SVC_URL", "http://embedding-svc.example:9092");
+        std::env::set_var("EMBEDDING_API_KEY", "secret");
+        // Unset, and any value other than "1": refused, nothing can be sent.
+        let unset = RemoteEmbedder::from_env();
+        std::env::set_var("EMBEDDING_ALLOW_INSECURE", "0");
+        let zero = RemoteEmbedder::from_env();
+        // "1": allowed.
+        std::env::set_var("EMBEDDING_ALLOW_INSECURE", "1");
+        let allowed = RemoteEmbedder::from_env();
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        for r in [unset, zero] {
+            let msg = format!("{:#}", r.err().expect("must fail closed"));
+            assert!(msg.contains("EMBEDDING_ALLOW_INSECURE=1"), "got: {msg}");
+            assert!(!msg.contains("secret"), "key must not leak: {msg}");
+        }
+        let e = allowed.unwrap().expect("allowed with =1");
+        assert_eq!(e.url, "http://embedding-svc.example:9092");
+    }
+
+    #[cfg(feature = "remote-embed")]
+    #[test]
+    fn from_env_allows_https_and_loopback_http_without_flag() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for k in EMBED_ENV {
+            std::env::remove_var(k);
+        }
+        for u in [
+            "https://embedding-svc.example.com",
+            "http://localhost:9092",
+            "http://127.0.0.1:9092",
+            "http://[::1]:9092",
+        ] {
+            std::env::set_var("EMBEDDING_SVC_URL", u);
+            let got = RemoteEmbedder::from_env();
+            std::env::remove_var("EMBEDDING_SVC_URL");
+            assert!(got.unwrap().is_some(), "{u} must be accepted");
+        }
     }
 
     // ---- rrf_fuse boundaries ----
