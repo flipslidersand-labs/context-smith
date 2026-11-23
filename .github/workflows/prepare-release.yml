@@ -1,0 +1,80 @@
+name: Prepare release
+
+# repo-compass ADR-028 decision 3: the only human step is merging the release PR.
+#  - push to main      : release-please opens/updates a release PR as a draft (merge-queue only
+#                        picks up ready PRs). It bumps Cargo.toml / Cargo.lock and CHANGELOG.md.
+#  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
+#                        Release, then `publish` uploads the crate to crates.io with trusted
+#                        publishing (OIDC, no long-lived token).
+# Prerequisites (human steps):
+#  - v0.6.0 is tagged and published first (.release-please-manifest.json starts at 0.6.0).
+#  - A GitHub App installed on this repo: vars.RELEASE_APP_CLIENT_ID + secrets.RELEASE_APP_PRIVATE_KEY.
+#    The job is skipped until the variable exists (GITHUB_TOKEN may not open PRs, and a PR opened
+#    with it would get no CI).
+#  - crates.io trusted publisher for context-smith: this repo, workflow prepare-release.yml,
+#    environment `release`.
+# Not named release*.yml on purpose: repo-compass release_check reads the first release*.yml for C5.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: vars.RELEASE_APP_CLIENT_ID != ''
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 10
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - name: GitHub App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # release-please: tag/Release + CHANGELOG commits, the release PR, and its labels
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Release PR / tag + GitHub Release
+        id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - name: crates.io token (OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
