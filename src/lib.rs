@@ -99,8 +99,6 @@ pub(crate) struct Symbol {
     pub file_id: i64,
     pub name: String,
     pub kind: SymbolKind,
-    pub line: u32,
-    pub snippet: String,
 }
 
 #[non_exhaustive]
