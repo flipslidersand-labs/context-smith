@@ -96,6 +96,8 @@ impl std::error::Error for SelectError {
 /// configured embedder, RRF-fuse BM25 with semantic (vector) seeds; otherwise
 /// return the BM25 seeds unchanged (backward compatible).
 fn build_seeds(
+    repo: &GitRepo,
+    git_index: &git2::Index,
     conn: &rusqlite::Connection,
     task: &str,
     bm25: Vec<(i64, f32)>,
@@ -110,8 +112,12 @@ fn build_seeds(
                 Err(e) => return (bm25, SeedMode::FallbackBm25(e.to_string())),
             };
             if let Some(embedder) = embedder {
-                match crate::embed::fuse_seeds_with_status(conn, &embedder, task, &bm25, seed_count)
-                {
+                // Vector seeds go through the same readable / non-blank filter as BM25 (#564).
+                let usable =
+                    |id: i64| matches!(classify_seed(repo, git_index, conn, id), Ok(Seed::Usable));
+                match crate::embed::fuse_seeds_with_status(
+                    conn, &embedder, task, &bm25, seed_count, &usable,
+                ) {
                     Ok((seeds, fused)) => {
                         let mode = if fused {
                             SeedMode::Fused
@@ -126,7 +132,7 @@ fn build_seeds(
         }
     }
     #[cfg(not(feature = "remote-embed"))]
-    let _ = (conn, task, no_embed, seed_count);
+    let _ = (repo, git_index, conn, task, no_embed, seed_count);
     (bm25, SeedMode::Bm25)
 }
 
@@ -156,6 +162,37 @@ pub fn select_candidates(
     }
 }
 
+/// How a seed candidate's file looks on disk (shared by the BM25 and vector seed filters, #564).
+enum Seed {
+    /// No `files` row for the id.
+    Missing,
+    /// Readable and has non-whitespace content.
+    Usable,
+    /// Readable but empty or whitespace-only: it must not take a seed slot (#536).
+    Blank,
+    /// Could not be read (absolute path, error text).
+    Unreadable(PathBuf, String),
+}
+
+fn classify_seed(
+    repo: &GitRepo,
+    git_index: &git2::Index,
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> anyhow::Result<Seed> {
+    let rel: Option<String> = conn
+        .query_row("SELECT path FROM files WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?;
+    let Some(rel) = rel else {
+        return Ok(Seed::Missing);
+    };
+    Ok(match repo.read_indexed(git_index, Path::new(&rel)) {
+        Ok(content) if content.trim().is_empty() => Seed::Blank,
+        Ok(_) => Seed::Usable,
+        Err(e) => Seed::Unreadable(repo.root().join(&rel), e.to_string()),
+    })
+}
+
 /// BM25 top-`seed_count` among files that can actually be read and are non-empty (#536). Unreadable files (e.g. non-UTF-8
 /// ones that are indexed by path only, #308) would otherwise occupy seed slots and push real
 /// candidates out (#465), so fetch more rows until enough readable ones are found. When none is
@@ -176,18 +213,14 @@ fn readable_bm25(
         let mut readable = Vec::with_capacity(seed_count);
         let mut dropped: Vec<(PathBuf, String)> = Vec::new();
         for &(id, score) in &hits {
-            let rel: Option<String> = conn
-                .query_row("SELECT path FROM files WHERE id = ?1", [id], |r| r.get(0))
-                .optional()?;
-            let Some(rel) = rel else { continue };
-            match repo.read_indexed(git_index, Path::new(&rel)) {
-                // Empty / whitespace-only files do not take a seed slot (#536).
-                Ok(content) => {
-                    if !content.trim().is_empty() && readable.len() < seed_count {
+            match classify_seed(repo, git_index, conn, id)? {
+                Seed::Missing | Seed::Blank => {}
+                Seed::Usable => {
+                    if readable.len() < seed_count {
                         readable.push((id, score));
                     }
                 }
-                Err(e) => dropped.push((repo.root().join(&rel), e.to_string())),
+                Seed::Unreadable(path, err) => dropped.push((path, err)),
             }
         }
         // `hits.len() < fetch` means BM25 has no more rows to give.
@@ -228,7 +261,15 @@ fn select_inner(
     // check happens after fusion (semantic may rescue an empty BM25).
     let git_index = repo.open_index()?;
     let bm25 = readable_bm25(repo, &git_index, db, task, seed_count, skipped)?;
-    let (seeds, seed_mode) = build_seeds(db.connection(), task, bm25, opts.no_embed, seed_count);
+    let (seeds, seed_mode) = build_seeds(
+        repo,
+        &git_index,
+        db.connection(),
+        task,
+        bm25,
+        opts.no_embed,
+        seed_count,
+    );
     *seed_mode_out = seed_mode;
     if seeds.is_empty() {
         anyhow::bail!("No matching files found for task: {}", task);
@@ -316,7 +357,7 @@ fn select_inner(
     // Matches existed but every one is empty (e.g. only an empty `__init__.py`): there is nothing
     // to put in a bundle, so fail like the unreadable case rather than return `files: []` (#311).
     // The "No matching files" prefix keeps wrappers that key on it working.
-    if !candidates.is_empty() && candidates.iter().all(|c| c.content.is_empty()) {
+    if !candidates.is_empty() && candidates.iter().all(|c| c.content.trim().is_empty()) {
         let names: Vec<String> = candidates
             .iter()
             .map(|c| escape_control(&c.path.to_string_lossy()))

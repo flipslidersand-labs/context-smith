@@ -366,7 +366,7 @@ pub fn fuse_seeds(
     bm25: &[(i64, f32)],
     top_n: usize,
 ) -> Result<Vec<(i64, f32)>> {
-    fuse_seeds_with_status(conn, embedder, task, bm25, top_n).map(|(seeds, _)| seeds)
+    fuse_seeds_with_status(conn, embedder, task, bm25, top_n, &|_| true).map(|(seeds, _)| seeds)
 }
 
 /// True if any component is NaN or infinite.
@@ -377,12 +377,16 @@ fn has_non_finite(v: &[f32]) -> bool {
 /// Like [`fuse_seeds`], but also reports whether vector fusion actually ran
 /// (`true`) or the BM25 seeds were returned unchanged (`false`: no stored
 /// embeddings, empty query vector, or dimension mismatch / mixed dimensions).
+///
+/// `usable` says whether a file id may become a vector seed (readable and non-blank, #564);
+/// ids it rejects are dropped from the vector ranking before fusion. `bm25` is taken as is.
 pub fn fuse_seeds_with_status(
     conn: &Connection,
     embedder: &dyn Embedder,
     task: &str,
     bm25: &[(i64, f32)],
     top_n: usize,
+    usable: &dyn Fn(i64) -> bool,
 ) -> Result<(Vec<(i64, f32)>, bool)> {
     if !has_embeddings(conn)? {
         return Ok((bm25.to_vec(), false));
@@ -430,7 +434,8 @@ pub fn fuse_seeds_with_status(
     // files that sit just outside `top_n` in the vector list still participate
     // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
     let vec_candidates = top_n.saturating_mul(3);
-    let vector = search_vectors(conn, &query_vec, vec_candidates)?;
+    let mut vector = search_vectors(conn, &query_vec, vec_candidates)?;
+    vector.retain(|&(id, _)| usable(id));
     Ok((rrf_fuse(&[bm25, &vector], 60.0, top_n), true))
 }
 
@@ -907,11 +912,19 @@ mod tests {
     fn fuse_seeds_with_status_reports_fusion() {
         let conn = conn_with_two_dim_vectors();
         let bm25 = vec![(7i64, 1.0f32)];
-        let (_, fused) =
-            fuse_seeds_with_status(&conn, &FixedEmbedder(vec![1.0, 0.0]), "t", &bm25, 10).unwrap();
+        let (_, fused) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![1.0, 0.0]),
+            "t",
+            &bm25,
+            10,
+            &|_| true,
+        )
+        .unwrap();
         assert!(fused);
         let (out, fused) =
-            fuse_seeds_with_status(&conn, &FixedEmbedder(vec![1.0]), "t", &bm25, 10).unwrap();
+            fuse_seeds_with_status(&conn, &FixedEmbedder(vec![1.0]), "t", &bm25, 10, &|_| true)
+                .unwrap();
         assert!(!fused);
         assert_eq!(out, bm25);
     }
@@ -949,6 +962,26 @@ mod tests {
     }
 
     #[test]
+    fn fuse_seeds_drops_vector_seeds_rejected_by_usable() {
+        // #564: id 1 is the best vector match but is blank/unreadable, so it must not be a seed.
+        let conn = conn_with_two_dim_vectors();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let (out, fused) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![1.0, 0.0]),
+            "t",
+            &bm25,
+            10,
+            &|id| id != 1,
+        )
+        .unwrap();
+        assert!(fused);
+        let ids: Vec<i64> = out.iter().map(|&(id, _)| id).collect();
+        assert!(!ids.contains(&1), "{ids:?}");
+        assert!(ids.contains(&2) && ids.contains(&7), "{ids:?}");
+    }
+
+    #[test]
     fn has_non_finite_detects_nan_and_inf() {
         assert!(has_non_finite(&[1.0, f32::NAN]));
         assert!(has_non_finite(&[f32::INFINITY, 0.0]));
@@ -967,6 +1000,7 @@ mod tests {
             "task",
             &bm25,
             10,
+            &|_| true,
         )
         .unwrap();
         assert_eq!(out, bm25);
@@ -1296,20 +1330,21 @@ mod tests {
         .unwrap();
         let bm25 = vec![(7i64, 1.0f32)];
         let other = IdEmbedder("new-model", 2);
-        let (out, fused) = fuse_seeds_with_status(&conn, &other, "task", &bm25, 10).unwrap();
+        let (out, fused) =
+            fuse_seeds_with_status(&conn, &other, "task", &bm25, 10, &|_| true).unwrap();
         assert_eq!(out, bm25);
         assert!(!fused);
         // Same model id (and no stored id) keep fusing.
         let same = IdEmbedder("old-model", 2);
         assert!(
-            fuse_seeds_with_status(&conn, &same, "task", &bm25, 10)
+            fuse_seeds_with_status(&conn, &same, "task", &bm25, 10, &|_| true)
                 .unwrap()
                 .1
         );
         conn.execute("DELETE FROM meta WHERE key = ?1", [EMBED_MODEL_KEY])
             .unwrap();
         assert!(
-            fuse_seeds_with_status(&conn, &other, "task", &bm25, 10)
+            fuse_seeds_with_status(&conn, &other, "task", &bm25, 10, &|_| true)
                 .unwrap()
                 .1
         );

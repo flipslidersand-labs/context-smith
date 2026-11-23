@@ -68,6 +68,30 @@ fn all_empty_matches_report_no_matching_files_with_content() {
 }
 
 #[test]
+fn whitespace_only_match_is_not_bundled() {
+    // #564: a file holding only whitespace is as empty as a zero-byte one.
+    let (_t, repo, db, _p) = setup(&[("frobnicator.py", "\n   \n\t\n")]);
+    let e = select_candidates(&repo, &db, "frobnicator", &opts()).unwrap_err();
+    assert!(
+        e.to_string().contains("No matching files with content"),
+        "{e}"
+    );
+}
+
+#[test]
+fn whitespace_only_match_does_not_displace_real_file() {
+    let (_t, repo, db, _p) = setup(&[
+        ("frobnicator.py", "\n   \n\t\n"),
+        ("real.py", "def frobnicator(): pass\n"),
+    ]);
+    let c = select_candidates(&repo, &db, "frobnicator", &opts())
+        .unwrap()
+        .candidates;
+    let paths: Vec<_> = c.iter().map(|c| c.path.to_str().unwrap()).collect();
+    assert_eq!(paths, vec!["real.py"]);
+}
+
+#[test]
 fn unknown_lang_and_missing_row_are_skipped() {
     let (_t, repo, db, db_path) = setup(&[
         ("a.rs", "pub fn gamma_shared() {}\n"),
