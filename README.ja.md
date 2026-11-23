@@ -39,7 +39,7 @@ contextsmith index --repo ./my-project
 `./my-project/.contextsmith/index.db` に SQLite インデックスを生成する。
 ファイル一覧・シンボル・依存関係・BM25 全文インデックスがすべて 1 ファイルに収まる。
 
-小規模リポジトリ（目安: ソース 10MB 以下）なら `index.db` を git 管理してチーム共有できる。
+小規模リポジトリ（目安: ソース 10MB 以下）なら `index.db` を git 管理してチーム共有できる。信頼できる入手元の `index.db` だけを使うこと(trigger / view を含むものは拒否するが、自分で作っていないファイルは削除して作り直す)。
 
 | オプション | デフォルト | 説明 |
 |---|---|---|

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Opening `index.db` now sets `trusted_schema=OFF` and DEFENSIVE, and refuses a DB that holds a trigger, a view, or a known table name that is not a table, asking to delete and re-index (#541).
+
 ## [0.6.0] - 2026-11-23
 
 ### Breaking
