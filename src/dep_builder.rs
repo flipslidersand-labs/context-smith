@@ -1,3 +1,4 @@
+use crate::expand::{dedup_seeds, placeholders, CHUNK};
 use crate::Language;
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -36,25 +37,11 @@ fn build_go_dir_index(file_paths: &HashMap<i64, PathBuf>) -> HashMap<PathBuf, Ve
 }
 
 /// Populate the deps table by resolving import symbols already stored in the DB.
-/// Clears the table and rebuilds atomically inside a transaction.
+/// Clears the table and rebuilds it inside the caller's already-open transaction
+/// (no BEGIN/COMMIT/ROLLBACK), so the caller can make it atomic with other writes.
 ///
 /// `go_modules` are the `(directory, module path)` pairs of every `go.mod` in the repo (see
 /// [`read_go_modules`]); when non-empty, Go imports resolve only inside those modules (#419, #429).
-#[cfg(test)]
-pub fn build_deps(
-    conn: &Connection,
-    file_paths: &HashMap<i64, PathBuf>,
-    go_module: &[GoModule],
-) -> Result<()> {
-    // Dropping `tx` on error rolls back; a failed COMMIT is rolled back by Drop too.
-    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
-    build_deps_in_tx(&tx, file_paths, go_module)?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// Same as [`build_deps`] but writes inside the caller's already-open transaction
-/// (no BEGIN/COMMIT/ROLLBACK), so the caller can make it atomic with other writes.
 pub(crate) fn build_deps_in_tx(
     conn: &Connection,
     file_paths: &HashMap<i64, PathBuf>,
@@ -855,7 +842,7 @@ fn resolve_go_package(
 /// # Batch query strategy (#91)
 /// Instead of calling `query_neighbors` once per node (N×2 queries per depth level),
 /// each BFS depth level collects the entire frontier and issues 2 SQL queries
-/// per chunk of `NEIGHBOR_BATCH_CHUNK` ids (one `IN` for outgoing edges, one `IN` for
+/// per chunk of `CHUNK` ids (one `IN` for outgoing edges, one `IN` for
 /// incoming edges), i.e. 2 × ceil(frontier / chunk) per level. This keeps round-trips
 /// proportional to frontier/chunk rather than O(frontier), avoiding the N+1 problem of the original per-node approach.
 pub fn bfs_expand(
@@ -863,14 +850,7 @@ pub fn bfs_expand(
     seeds: &[(i64, f32)],
     max_depth: u8,
 ) -> Result<HashMap<i64, f32>> {
-    let mut scores: HashMap<i64, f32> = HashMap::new();
-
-    for &(file_id, score) in seeds {
-        let prev = scores.entry(file_id).or_insert(0.0);
-        if score > *prev {
-            *prev = score;
-        }
-    }
+    let mut scores = dedup_seeds(seeds);
 
     // Build the frontier from the deduplicated max scores so duplicate seeds cannot
     // overwrite each other (last-wins) when collected into a map below. (#274)
@@ -915,11 +895,8 @@ pub fn bfs_expand(
     Ok(scores)
 }
 
-/// Max ids per IN clause in `query_neighbors_batch`.
-const NEIGHBOR_BATCH_CHUNK: usize = 500;
-
 /// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries per
-/// chunk of `NEIGHBOR_BATCH_CHUNK` ids (one outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
+/// chunk of `CHUNK` ids (one outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
 /// node from `ids` and `neighbour` is the node on the other end, never itself in `ids`.
 ///
 /// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
@@ -933,12 +910,8 @@ fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64
     let mut edges: HashSet<(i64, i64)> = HashSet::new();
     // Chunk the ids so each statement stays far below SQLite's bound-variable limit
     // (32766); the HashSet merges and de-duplicates results across chunks. (#273)
-    for chunk in ids.chunks(NEIGHBOR_BATCH_CHUNK) {
-        // Build the IN-clause placeholder string: "?1,?2,...,?N"
-        let placeholders: String = (1..=chunk.len())
-            .map(|i| format!("?{}", i))
-            .collect::<Vec<_>>()
-            .join(",");
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = placeholders(chunk.len());
         // Outgoing: parent → X, then incoming: X → parent.
         for sql in [
             format!(
@@ -1933,7 +1906,11 @@ mod tests {
             (2, PathBuf::from("src/b.rs")),
         ]
         .into();
-        assert!(build_deps(&conn, &paths, &[]).is_err());
+        let tx =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Deferred)
+                .unwrap();
+        build_deps_in_tx(&tx, &paths, &[]).unwrap();
+        assert!(tx.commit().is_err());
         assert!(
             conn.is_autocommit(),
             "transaction left open after failed COMMIT"
@@ -1956,7 +1933,7 @@ mod tests {
             (2, PathBuf::from("src/b.rs")),
         ]
         .into();
-        build_deps(&conn, &paths, &[]).unwrap();
+        build_deps_in_tx(&conn, &paths, &[]).unwrap();
 
         let edges: Vec<(i64, i64)> = conn
             .prepare("SELECT from_file, to_file FROM deps")
@@ -1992,7 +1969,7 @@ mod tests {
             [],
         )
         .unwrap();
-        build_deps(&conn, &paths, &[]).unwrap();
+        build_deps_in_tx(&conn, &paths, &[]).unwrap();
 
         let edges: Vec<(i64, i64)> = conn
             .prepare("SELECT from_file, to_file FROM deps")

@@ -111,22 +111,21 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
         if c.content.trim().is_empty() {
             continue;
         }
-        // Ensure files shorter than 4 chars still count as 1 token so they aren't silently excluded
-        let t = c.tokens().max(1);
+        // Non-blank content is non-empty, so `tokens()` is already >= 1 (see `estimate_tokens`).
+        let t = c.tokens();
         if used + t <= budget {
             used += t;
             selected.push(c);
         } else if (budget - used) * 2 >= t {
-            // at least half of the file fits: take that part and stop
+            // at least half of the file fits: take that part and stop. `used < budget` here, so
+            // the cut keeps at least the first char of the non-blank content (never empty).
             let cut = truncate_to_tokens(&c.content, budget - used);
-            if estimate_tokens(&cut) > 0 {
-                selected.push(Candidate {
-                    content: cut,
-                    truncated: true,
-                    original_tokens: t,
-                    ..c
-                });
-            }
+            selected.push(Candidate {
+                content: cut,
+                truncated: true,
+                original_tokens: t,
+                ..c
+            });
             used = budget;
         } else if best_overflow.is_none() {
             best_overflow = Some(c);
@@ -134,17 +133,15 @@ pub fn allocate(mut candidates: Vec<Candidate>, budget: usize) -> Vec<Candidate>
     }
 
     if let (true, Some(c)) = (selected.is_empty(), best_overflow) {
-        // best_overflow only holds non-empty candidates, so tokens() >= 1 here.
+        // best_overflow was set while `used < budget`, so budget >= 1 and the cut is non-empty.
         let original_tokens = c.tokens();
         let cut = truncate_to_tokens(&c.content, budget);
-        if estimate_tokens(&cut) > 0 {
-            selected.push(Candidate {
-                content: cut,
-                truncated: true,
-                original_tokens,
-                ..c
-            });
-        }
+        selected.push(Candidate {
+            content: cut,
+            truncated: true,
+            original_tokens,
+            ..c
+        });
     }
 
     selected
