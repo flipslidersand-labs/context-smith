@@ -322,3 +322,90 @@ fn empty_files_do_not_fill_seed_slots() {
         sel.candidates
     );
 }
+
+/// Run git in `dir` (hermetic config) and return whether it succeeded.
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .expect("run git")
+        .success()
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    assert!(git_ok(dir, args), "git {args:?} failed");
+}
+
+/// Index `dir` (already a git repo with commits) into a db outside the repo.
+fn index_dir(tmp: &Path, dir: &Path) -> (GitRepo, IndexDb) {
+    let repo = GitRepo::new(dir).unwrap();
+    let db = IndexDb::open(&tmp.join("index.db")).unwrap();
+    build_index(&repo, &db, false).unwrap();
+    (repo, db)
+}
+
+/// #563: a file with an unresolved merge conflict has no stage-0 entry (only
+/// stages 1-3) but is tracked, so it must still be readable and selectable.
+#[test]
+fn conflicted_file_is_selected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    let widget = dir.join("widget.py");
+    std::fs::write(&widget, "def widget_unique():\n    return 1\n").unwrap();
+    git(&dir, &["add", "widget.py"]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    git(&dir, &["checkout", "-q", "-b", "other"]);
+    std::fs::write(&widget, "def widget_unique():\n    return 2\n").unwrap();
+    git(&dir, &["commit", "-q", "-am", "other"]);
+    git(&dir, &["checkout", "-q", "main"]);
+    std::fs::write(&widget, "def widget_unique():\n    return 3\n").unwrap();
+    git(&dir, &["commit", "-q", "-am", "main"]);
+    assert!(
+        !git_ok(&dir, &["merge", "other"]),
+        "merge must conflict for this test to mean anything"
+    );
+    let raw = git2::Repository::open(&dir).unwrap().index().unwrap();
+    assert!(raw.has_conflicts());
+
+    let (repo, db) = index_dir(tmp.path(), &dir);
+    let sel = select_candidates(&repo, &db, "widget_unique", &opts()).unwrap();
+    let hit = sel
+        .candidates
+        .iter()
+        .find(|c| c.path == Path::new("widget.py"))
+        .expect("conflicted widget.py must be in the bundle");
+    // The working-tree content (with conflict markers) is what gets bundled.
+    assert!(hit.content.contains("<<<<<<<"), "{}", hit.content);
+}
+
+/// #563 / #395: a file removed from the git index (`git rm --cached`) is still
+/// refused, and the error must not point at re-indexing as the only fix.
+#[test]
+fn rm_cached_file_is_refused_with_accurate_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("lib.rs"), "pub fn alpha_unique() {}\n").unwrap();
+    git(&dir, &["add", "lib.rs"]);
+    git(&dir, &["commit", "-q", "-m", "init"]);
+    git(&dir, &["rm", "-q", "--cached", "lib.rs"]);
+
+    let (repo, db) = index_dir(tmp.path(), &dir);
+    let e = select_candidates(&repo, &db, "alpha_unique", &opts()).unwrap_err();
+    let m = e.to_string();
+    assert!(m.contains("could not be read (lib.rs)"), "{m}");
+    assert!(m.contains("warn: skip"), "{m}");
+    assert!(m.contains("only if these files changed"), "{m}");
+    assert!(
+        !m.contains("to refresh the index"),
+        "must not suggest re-indexing as the fix: {m}"
+    );
+}

@@ -140,8 +140,16 @@ pub(crate) fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::R
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-/// True if `real` (canonical, inside `canonical_root`) is a stage-0 entry in the
-/// repo's index. Fails closed on any error.
+/// True if `rel` has an entry at any stage (0 = normal, 1-3 = unresolved merge
+/// conflict) in `idx`. A conflicted file has no stage-0 entry but is still
+/// tracked by git, so it must count; a file removed with `git rm --cached` has
+/// no entry at any stage and does not (#563, #395).
+pub(crate) fn in_git_index(idx: &git2::Index, rel: &Path) -> bool {
+    (0..=3).any(|stage| idx.get_path(rel, stage).is_some())
+}
+
+/// True if `real` (canonical, inside `canonical_root`) is an entry (any stage,
+/// see [`in_git_index`]) in the repo's index. Fails closed on any error.
 fn is_tracked_in_index(
     canonical_root: &Path,
     real: &Path,
@@ -162,7 +170,7 @@ fn is_tracked_in_index(
                 .ok()
         })
         .as_ref()
-        .is_some_and(|idx| idx.get_path(Path::new(rel), 0).is_some())
+        .is_some_and(|idx| in_git_index(idx, Path::new(rel)))
 }
 
 /// True if `path` or any ancestor below the repo root is a symlink. Walks up,
@@ -183,11 +191,20 @@ fn path_has_symlink_component(canonical_root: &Path, path: &Path) -> bool {
     true
 }
 
+/// Largest file (bytes) that is read and indexed; bigger files are refused with
+/// `ErrorKind::FileTooLarge` before any content is read (#567). Provisional.
+pub(crate) const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
 pub(crate) fn read_bytes_within_root(
     canonical_root: &Path,
     path: &Path,
 ) -> std::io::Result<Vec<u8>> {
-    read_bytes_within_root_with(canonical_root, path, &std::cell::OnceCell::new())
+    read_bytes_within_root_with(
+        canonical_root,
+        path,
+        &std::cell::OnceCell::new(),
+        MAX_FILE_BYTES,
+    )
 }
 
 /// Like [`read_bytes_within_root`], but reuses a lazily opened git index across
@@ -196,6 +213,7 @@ fn read_bytes_within_root_with(
     canonical_root: &Path,
     path: &Path,
     index: &std::cell::OnceCell<Option<git2::Index>>,
+    max_bytes: u64,
 ) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
@@ -226,9 +244,27 @@ fn read_bytes_within_root_with(
             "not a regular file",
         ));
     }
-    let mut file = open_verified(&real, &meta)?;
+    // Refuse before reading: the whole file would otherwise be held in memory
+    // and then expanded into per-symbol rows (#567).
+    let too_large = || {
+        std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("file is larger than {max_bytes} bytes"),
+        )
+    };
+    if meta.len() > max_bytes {
+        return Err(too_large());
+    }
+    let file = open_verified(&real, &meta)?;
     let mut buf = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    std::io::Read::read_to_end(&mut file, &mut buf)?;
+    // `take` bounds the read even if the file grows after the size check.
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, max_bytes.saturating_add(1)),
+        &mut buf,
+    )?;
+    if buf.len() as u64 > max_bytes {
+        return Err(too_large());
+    }
     Ok(buf)
 }
 
@@ -310,11 +346,11 @@ impl GitRepo {
     }
 
     /// Like [`GitRepo::read_tracked`], but additionally refuses a path that is
-    /// not a stage-0 entry in `index`, so a path taken from an untrusted
+    /// not an entry (any stage, see [`in_git_index`]) in `index`, so a path taken from an untrusted
     /// index.db cannot expose untracked files such as `.env` (#395). Uncommitted
     /// edits to tracked files are still readable.
     pub(crate) fn read_indexed(&self, index: &git2::Index, rel: &Path) -> std::io::Result<String> {
-        if index.get_path(rel, 0).is_none() {
+        if !in_git_index(index, rel) {
             return Err(std::io::Error::other(PathEscape));
         }
         self.read_tracked(rel)
@@ -329,7 +365,7 @@ impl GitRepo {
         &self.canonical_root
     }
 
-    /// Unified diff of the last n_commits commits (empty string if repo has no history).
+    /// Unified diff of the last n_commits commits (empty string if the repo has no commits).
     ///
     /// The accumulated patch is capped at `DIFF_MAX_BYTES` (512 KiB). Any content
     /// beyond that limit is dropped and a `[diff truncated]` marker is appended so
@@ -346,7 +382,12 @@ impl GitRepo {
 
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
-        let head_commit = repo.head()?.peel_to_commit()?;
+        let head_commit = match repo.head() {
+            Ok(h) => h.peel_to_commit()?,
+            // No commits yet: there is no history to diff.
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(String::new()),
+            Err(e) => return Err(e.into()),
+        };
 
         // 0 means "no diff". Without this, a root-only history would fall into the
         // empty-tree branch below and return the whole initial commit.
@@ -464,7 +505,14 @@ impl GitRepo {
     fn scan_limited(&self, max_depth: usize) -> Result<ScanAcc> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
-        let head = repo.head()?.peel_to_tree()?;
+        let head = match repo.head() {
+            Ok(h) => h.peel_to_tree()?,
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => anyhow::bail!(
+                "'{}' has no commits yet (HEAD is unborn); make a first commit before indexing",
+                self.root.display()
+            ),
+            Err(e) => return Err(e.into()),
+        };
         let mut acc = ScanAcc {
             results: Vec::new(),
             skipped: 0,
@@ -529,6 +577,7 @@ impl GitRepo {
                             &self.canonical_root,
                             &self.root.join(&rel),
                             index,
+                            MAX_FILE_BYTES,
                         ) {
                             Ok(bytes) => {
                                 if let Ok(oid) =
@@ -1083,6 +1132,22 @@ mod tests {
             .collect()
     }
 
+    /// #567: a file larger than the cap is refused before it is read.
+    #[test]
+    fn read_bytes_within_root_refuses_file_over_max_bytes() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("ok.py"), b"12345678").unwrap();
+        std::fs::write(root.join("big.py"), b"123456789").unwrap();
+        let read = |name: &str| {
+            read_bytes_within_root_with(&root, &root.join(name), &std::cell::OnceCell::new(), 8)
+        };
+        assert_eq!(read("ok.py").unwrap(), b"12345678");
+        let err = read("big.py").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(!is_path_escape(&err));
+    }
+
     /// #494: a FIFO must be refused without blocking on open/read.
     #[cfg(unix)]
     #[test]
@@ -1283,7 +1348,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         git2::Repository::init(tmp.path()).unwrap();
         let repo = GitRepo::new(tmp.path()).unwrap();
-        assert!(repo.scan().is_err());
+        let err = repo.scan().unwrap_err().to_string();
+        assert!(err.contains("no commits"), "{err}");
+        assert!(!err.contains("UnbornBranch"), "{err}");
+    }
+
+    #[test]
+    fn recent_diff_without_commits_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert_eq!(repo.recent_diff(3).unwrap(), "");
     }
 
     /// Commit a git tree nested `levels` directories deep (`d/d/.../d`), with a
@@ -1658,14 +1733,6 @@ mod tests {
         commit_files(tmp.path(), &[("a.rs", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert_eq!(repo.recent_diff(0).unwrap(), "");
-    }
-
-    #[test]
-    fn recent_diff_without_commits_errors() {
-        let tmp = TempDir::new().unwrap();
-        git2::Repository::init(tmp.path()).unwrap();
-        let repo = GitRepo::new(tmp.path()).unwrap();
-        assert!(repo.recent_diff(1).is_err());
     }
 
     #[test]
