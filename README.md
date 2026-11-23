@@ -113,6 +113,18 @@ Environment: `CONTEXTSMITH_EXPAND` = `bfs-capped` (default: cap 10 neighbours pe
 
 The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }`. `truncated` is `true` when the file was cut to fit the remaining budget.
 
+### Embedding service (opt-in `remote-embed` build)
+
+Only read when built with `--features remote-embed`. Without `EMBEDDING_SVC_URL` the build is BM25 only.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_SVC_URL` | unset (embeddings off) | Base URL of the embedding service (`POST {url}/embed/batch`). Empty or whitespace-only counts as unset |
+| `EMBEDDING_API_KEY` | none | Sent as the `X-API-Key` header |
+| `EMBEDDING_COLLECTION` | `context-smith` | Collection to use; it must be registered on the service |
+| `EMBEDDING_TIMEOUT_SECS` | `30` | Read timeout in seconds (the connect timeout is a fixed 5 s). Transient errors are retried up to 3 attempts per chunk |
+| `EMBEDDING_ALLOW_INSECURE` | unset | Set to `1` to allow plain `http://` to a non-loopback host (refused otherwise, because the API key and file contents would be sent unencrypted; prefer `https://`) |
+
 ## Architecture
 
 ```

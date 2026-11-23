@@ -101,7 +101,21 @@ contextsmith query --repo . --task "認証エラー" --format md --explain
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | インデックスパス上書き |
 | `--no-embed` | off | インデックスに埋め込みがあっても意味検索シードを使わず BM25 のみにする(`remote-embed` feature 付きビルドでのみ有効) |
 
+環境変数: `CONTEXTSMITH_EXPAND` = `bfs-capped`(既定: 1 ファイルが広げる先は最大 10 件、次数の小さい順) / `bfs`(従来の素の BFS) / `ppr`(個人化 PageRank、実験的)。依存スコアの広げ方を切り替える。
+
 JSON 出力は `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }` 形式。`truncated` は残り予算に収めるためファイルを切り詰めた場合に `true`。
+
+### 埋め込みサービス(opt-in の `remote-embed` ビルド)
+
+`--features remote-embed` 付きでビルドしたときだけ読まれる。`EMBEDDING_SVC_URL` が無ければ BM25 のみ。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `EMBEDDING_SVC_URL` | 未設定(埋め込みなし) | 埋め込みサービスのベース URL(`POST {url}/embed/batch`)。空・空白のみは未設定扱い |
+| `EMBEDDING_API_KEY` | なし | `X-API-Key` ヘッダで送る |
+| `EMBEDDING_COLLECTION` | `context-smith` | 使うコレクション。サービス側に登録済みであること |
+| `EMBEDDING_TIMEOUT_SECS` | `30` | 読み取りタイムアウト(秒)。接続タイムアウトは 5 秒固定。一時的なエラーはチャンクごとに最大 3 回まで試行 |
+| `EMBEDDING_ALLOW_INSECURE` | 未設定 | `1` でループバック以外への平文 `http://` を許可(未設定なら拒否。API キーとファイル本文が暗号化されずに送られるため。`https://` を推奨) |
 
 ## アーキテクチャ
 
