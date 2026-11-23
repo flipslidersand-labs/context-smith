@@ -329,7 +329,7 @@ impl GitRepo {
         &self.canonical_root
     }
 
-    /// Unified diff of the last n_commits commits (empty string if repo has no history).
+    /// Unified diff of the last n_commits commits (empty string if the repo has no commits).
     ///
     /// The accumulated patch is capped at `DIFF_MAX_BYTES` (512 KiB). Any content
     /// beyond that limit is dropped and a `[diff truncated]` marker is appended so
@@ -346,7 +346,12 @@ impl GitRepo {
 
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
-        let head_commit = repo.head()?.peel_to_commit()?;
+        let head_commit = match repo.head() {
+            Ok(h) => h.peel_to_commit()?,
+            // No commits yet: there is no history to diff.
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(String::new()),
+            Err(e) => return Err(e.into()),
+        };
 
         // 0 means "no diff". Without this, a root-only history would fall into the
         // empty-tree branch below and return the whole initial commit.
@@ -464,7 +469,14 @@ impl GitRepo {
     fn scan_limited(&self, max_depth: usize) -> Result<ScanAcc> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
-        let head = repo.head()?.peel_to_tree()?;
+        let head = match repo.head() {
+            Ok(h) => h.peel_to_tree()?,
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => anyhow::bail!(
+                "'{}' has no commits yet (HEAD is unborn); make a first commit before indexing",
+                self.root.display()
+            ),
+            Err(e) => return Err(e.into()),
+        };
         let mut acc = ScanAcc {
             results: Vec::new(),
             skipped: 0,
@@ -1283,7 +1295,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         git2::Repository::init(tmp.path()).unwrap();
         let repo = GitRepo::new(tmp.path()).unwrap();
-        assert!(repo.scan().is_err());
+        let err = repo.scan().unwrap_err().to_string();
+        assert!(err.contains("no commits"), "{err}");
+        assert!(!err.contains("UnbornBranch"), "{err}");
+    }
+
+    #[test]
+    fn recent_diff_without_commits_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        assert_eq!(repo.recent_diff(3).unwrap(), "");
     }
 
     /// Commit a git tree nested `levels` directories deep (`d/d/.../d`), with a
@@ -1658,14 +1680,6 @@ mod tests {
         commit_files(tmp.path(), &[("a.rs", "first\n")], &[]);
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert_eq!(repo.recent_diff(0).unwrap(), "");
-    }
-
-    #[test]
-    fn recent_diff_without_commits_errors() {
-        let tmp = TempDir::new().unwrap();
-        git2::Repository::init(tmp.path()).unwrap();
-        let repo = GitRepo::new(tmp.path()).unwrap();
-        assert!(repo.recent_diff(1).is_err());
     }
 
     #[test]
