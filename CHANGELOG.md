@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - The scan now checks that the file it opens is the file it validated (dev/ino, and the resolved path on Linux), so swapping a path for a symlink between the check and the open can no longer read files outside the repo. On Unix other than Linux, a directory swapped before the check's own lstat is still not detected (#543).
+- `ctx-select.sh` now refuses a cache root that is owned by another user or writable by group/others, and `SKILL.md` tells callers to single-quote the task text so shell metacharacters in copied issue text are not executed (#542).
+
+### Fixed
+- `CONTEXTSMITH_EXPAND` set to an empty value is now treated as unset instead of failing `select`, and an invalid value is reported even when the search has no hits (previously it was hidden behind "No matching files") (#531).
 
 ## [0.6.0] - 2026-11-23
 
@@ -38,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal duplication in the extractors, index builder and embedding `meta` access is removed: the six `extract_*` wrappers share one parser setup, `fts_path` rewrites and column migrations use one helper each, `delete_file_records` reuses `delete_content_records`, inserted symbol ids are reused instead of re-read, and `meta` reads/writes use one SQL path. Behavior is unchanged (#422).
 
 ### Fixed
+- `ctx-select.sh` rejects `--budget 0` as a usage error (exit 2, "must be a positive integer") instead of passing it to the CLI and failing with "query failed" (#532).
 - Empty or whitespace-only files no longer take a BM25 seed slot, so a matching file with content is no longer pushed out of the seeds (#536).
 - Indexing skips non-regular files (FIFO/device) instead of blocking on read; index Pass 1 and deps Pass 2 now commit in one transaction; the immutable read-only reopen after CANTOPEN prints a warning (#494).
 - A query embedding containing NaN/inf now prints a one-time warning before falling back to BM25-only ranking (#481).
