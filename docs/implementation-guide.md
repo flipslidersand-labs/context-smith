@@ -4,8 +4,8 @@
 
 ### 実装内容
 
-- `src/lib.rs` の `GitRepo` — `git2::Repository` でファイル一覧を取得(分割予定: #547)
-- HEAD ツリーを walk して `.rs` / `.py` / `.go` のパスと blob SHA を収集
+- `src/lib.rs` の `GitRepo` — `git2::Repository` でファイル一覧を取得
+- HEAD ツリーを walk して対応言語(Rust / Python / Go / TypeScript / JavaScript / Ruby)のパスと blob SHA を収集
 - `git2::Diff` で直近 N コミットの差分を取得
 
 ### 完成条件
@@ -22,9 +22,10 @@ contextsmith index --repo ./project
 
 ### 実装内容
 
-- `src/lib.rs` の `SymbolExtractor` — `tree-sitter` で各ファイルを解析(分割予定: #548)
+- `src/lib.rs` の `SymbolExtractor` — `tree-sitter` で各ファイルを解析
 - Rust: `fn`, `struct`, `impl`, `use` を抽出
 - Python: `def`, `class`, `import` を抽出
+- Go・TypeScript・JavaScript・Ruby も同様に抽出(対応表は README の Supported languages)
 - 抽出したシンボルを SQLite の `symbols` テーブルに保存
 
 ### 完成条件
@@ -46,7 +47,7 @@ contextsmith index --repo ./project
 ### 実装内容
 
 - `src/dep_builder.rs` — `use` / `import` 文を解析し `deps` テーブルに保存
-- 依存グラフは `deps` テーブルに保持し、SQL ベースの BFS (`bfs_expand`) で辿る
+- 依存グラフは `deps` テーブルに保持し、SQL ベースの BFS で辿る。既定は `src/expand.rs` の `bfs-capped`(1 ファイルあたり最大 10 近傍・次数の小さい順)で、`CONTEXTSMITH_EXPAND=bfs` で素の BFS(`bfs_expand`)に戻せる
 - タスク関連ファイルを起点に BFS で依存先を展開
 
 ### 完成条件
@@ -96,6 +97,7 @@ contextsmith build --task "認証エラー" --budget 30000 --out ./context.bundl
 
 ### 実装内容
 
+- **実装済みの形**: opt-in の `remote-embed` feature で、リモート埋め込みサービス(`EMBEDDING_SVC_URL`)を呼んでベクトル化し、BM25 と RRF で統合する(`src/embed.rs`)。以降の `fastembed-rs`・`hnswlib`/`usearch` は当初計画で、未実装
 - ローカル埋め込みモデル（`fastembed-rs`）でシンボルスニペットをベクトル化
 - `hnswlib` または `usearch` でベクトルインデックスを構築
 - BM25 スコアとベクトルスコアを RRF (Reciprocal Rank Fusion) で統合
