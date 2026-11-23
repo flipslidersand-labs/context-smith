@@ -24,9 +24,9 @@ pub enum ExpandMode {
     Ppr,
 }
 
-/// Parse a mode name; `None` (unset) means the default `bfs-capped`.
+/// Parse a mode name; `None` (unset) and a blank value mean the default `bfs-capped`.
 pub fn parse_mode(v: Option<&str>) -> Result<ExpandMode> {
-    match v {
+    match v.map(str::trim).filter(|s| !s.is_empty()) {
         Some("bfs") => Ok(ExpandMode::Bfs),
         None | Some("bfs-capped") => Ok(ExpandMode::BfsCapped),
         Some("ppr") => Ok(ExpandMode::Ppr),
@@ -286,6 +286,13 @@ mod tests {
         let mut k: Vec<i64> = m.keys().copied().collect();
         k.sort_unstable();
         k
+    }
+
+    #[test]
+    fn parse_mode_blank_is_default() {
+        // #531: `CONTEXTSMITH_EXPAND=` (set but empty) must behave like unset.
+        assert_eq!(parse_mode(Some("")).unwrap(), ExpandMode::BfsCapped);
+        assert_eq!(parse_mode(Some("  \t")).unwrap(), ExpandMode::BfsCapped);
     }
 
     #[test]
