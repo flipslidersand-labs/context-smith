@@ -199,3 +199,20 @@ fn failed_index_keeps_an_existing_index_db() {
         b"existing bytes"
     );
 }
+
+/// #599: the "no commits yet" error names the repo directory, which can hold
+/// control characters; they must be escaped, not sent to the terminal.
+#[cfg(unix)]
+#[test]
+fn unborn_head_error_does_not_print_raw_control_characters_from_the_repo_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("r\u{1b}]0;pwn\u{7}");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    let out = bin(&["index", "--repo", repo.to_str().unwrap()]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no commits"), "{err:?}");
+    assert!(!err.contains('\u{1b}') && !err.contains('\u{7}'), "{err:?}");
+    assert!(err.contains("\\x1b"), "{err:?}");
+}
