@@ -454,35 +454,57 @@ impl GitRepo {
     /// skipped because their path is not valid UTF-8 (each one is warned
     /// about individually; the scan continues, #308).
     pub(crate) fn scan_with_skipped(&self) -> Result<(Vec<ScanEntry>, usize)> {
+        let acc = self.scan_limited(MAX_SCAN_DEPTH)?;
+        Ok((acc.results, acc.skipped))
+    }
+
+    /// Walk HEAD descending at most `max_depth` directory levels below the root.
+    /// Split from [`scan_with_skipped`](Self::scan_with_skipped) so tests can use a
+    /// small limit.
+    fn scan_limited(&self, max_depth: usize) -> Result<ScanAcc> {
         let repo = git2::Repository::open(&self.root)
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head = repo.head()?.peel_to_tree()?;
-        let mut results = Vec::new();
-        let mut skipped = 0usize;
+        let mut acc = ScanAcc {
+            results: Vec::new(),
+            skipped: 0,
+            too_deep: 0,
+            max_depth,
+        };
         let index = std::cell::OnceCell::new();
-        self.scan_tree(&repo, &head, Vec::new(), &mut results, &mut skipped, &index)?;
-        Ok((results, skipped))
+        self.scan_tree(&repo, &head, Vec::new(), &mut acc, &index, 0)?;
+        Ok(acc)
     }
 
     /// Pre-order walk keeping the path as raw bytes so a non-UTF-8 name only
-    /// affects its own entries instead of aborting the whole walk.
+    /// affects its own entries instead of aborting the whole walk. Directories
+    /// deeper than `acc.max_depth` are skipped with a warning (#568).
     fn scan_tree(
         &self,
         repo: &git2::Repository,
         tree: &git2::Tree<'_>,
         prefix: Vec<u8>,
-        results: &mut Vec<(PathBuf, Language, String, i64)>,
-        skipped: &mut usize,
+        acc: &mut ScanAcc,
         index: &std::cell::OnceCell<Option<git2::Index>>,
+        depth: usize,
     ) -> Result<()> {
         for entry in tree.iter() {
             let mut full = prefix.clone();
             full.extend_from_slice(entry.name_bytes());
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => {
+                    if depth >= acc.max_depth {
+                        eprintln!(
+                            "warn: {}: directory nesting deeper than {}, subtree skipped",
+                            String::from_utf8_lossy(&full),
+                            acc.max_depth
+                        );
+                        acc.too_deep += 1;
+                        continue;
+                    }
                     full.push(b'/');
                     let sub = entry.to_object(repo)?.peel_to_tree()?;
-                    self.scan_tree(repo, &sub, full, results, skipped, index)?;
+                    self.scan_tree(repo, &sub, full, acc, index, depth + 1)?;
                 }
                 Some(git2::ObjectType::Blob) => {
                     let Ok(name) = String::from_utf8(full) else {
@@ -490,7 +512,7 @@ impl GitRepo {
                             "warn: skip non-UTF-8 path in {:?}",
                             String::from_utf8_lossy(&prefix)
                         );
-                        *skipped += 1;
+                        acc.skipped += 1;
                         continue;
                     };
                     let rel = PathBuf::from(name);
@@ -526,7 +548,7 @@ impl GitRepo {
                             Err(_) => sha = format!("unreadable:{sha}"),
                         }
                     }
-                    results.push((rel, lang, sha, size));
+                    acc.results.push((rel, lang, sha, size));
                 }
                 _ => {}
             }
@@ -537,6 +559,24 @@ impl GitRepo {
 
 /// (relative_path, language, blob_sha, size) as returned by [`GitRepo::scan`].
 pub(crate) type ScanEntry = (PathBuf, Language, String, i64);
+
+/// Maximum directory depth `scan_tree` recurses into. Real repos nest a few dozen
+/// levels; a hostile tree nested tens of thousands deep overflows the stack (#568).
+/// 256 keeps the recursion to ~256 frames (well under 1 MiB even in debug builds,
+/// far below the ~15000 levels that still worked), so it fits any thread stack.
+const MAX_SCAN_DEPTH: usize = 256;
+
+/// Mutable state threaded through `scan_tree`.
+struct ScanAcc {
+    results: Vec<ScanEntry>,
+    /// Entries skipped for a non-UTF-8 path.
+    skipped: usize,
+    /// Subtrees skipped for exceeding `max_depth` (each is also warned about; the
+    /// count is only read by tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    too_deep: usize,
+    max_depth: usize,
+}
 
 pub(crate) struct SymbolExtractor;
 
@@ -1244,6 +1284,72 @@ mod tests {
         git2::Repository::init(tmp.path()).unwrap();
         let repo = GitRepo::new(tmp.path()).unwrap();
         assert!(repo.scan().is_err());
+    }
+
+    /// Commit a git tree nested `levels` directories deep (`d/d/.../d`), with a
+    /// `f.txt` blob at every level, built bottom-up through the object database so
+    /// no working-tree path (and no PATH_MAX limit) is involved.
+    fn commit_deep_tree(dir: &Path, levels: usize) {
+        let repo = git2::Repository::init(dir).unwrap();
+        let blob = repo.blob(b"x").unwrap();
+        let mut child: Option<git2::Oid> = None;
+        for _ in 0..levels {
+            let mut tb = repo.treebuilder(None).unwrap();
+            tb.insert("f.txt", blob, 0o100644).unwrap();
+            if let Some(c) = child {
+                tb.insert("d", c, 0o040000).unwrap();
+            }
+            child = Some(tb.write().unwrap());
+        }
+        let tree = repo.find_tree(child.unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "deep", &tree, &[])
+            .unwrap();
+    }
+
+    /// #568: a tracked tree nested far deeper than any real repo must not
+    /// overflow the stack; the default limit applies.
+    #[test]
+    fn scan_survives_tree_nested_beyond_stack_limit() {
+        let tmp = TempDir::new().unwrap();
+        commit_deep_tree(tmp.path(), 20_000);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        // 1 MiB (half the default test-thread stack) shows the limit, not the
+        // stack size, is what keeps the recursion bounded.
+        let files = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || repo.scan_with_skipped().unwrap().0)
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(files.len(), MAX_SCAN_DEPTH + 1);
+    }
+
+    /// #568: with a small limit, files at or above it are kept, the subtree below
+    /// it is skipped exactly once, and the scan still succeeds.
+    #[test]
+    fn scan_limited_keeps_files_within_limit_and_counts_skipped_subtree() {
+        let tmp = TempDir::new().unwrap();
+        commit_deep_tree(tmp.path(), 10);
+        let repo = GitRepo::new(tmp.path()).unwrap();
+        let acc = repo.scan_limited(3).unwrap();
+        let mut paths: Vec<_> = acc.results.iter().map(|e| e.0.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("d/d/d/f.txt"),
+                PathBuf::from("d/d/f.txt"),
+                PathBuf::from("d/f.txt"),
+                PathBuf::from("f.txt"),
+            ]
+        );
+        assert_eq!(acc.too_deep, 1);
+
+        // A limit at least as deep as the tree skips nothing.
+        let acc = repo.scan_limited(10).unwrap();
+        assert_eq!(acc.results.len(), 10);
+        assert_eq!(acc.too_deep, 0);
     }
 
     #[test]
