@@ -60,8 +60,14 @@ pub(crate) fn build_deps_in_tx(
     file_paths: &HashMap<i64, PathBuf>,
     go_module: &[GoModule],
 ) -> Result<()> {
-    let path_to_id: HashMap<PathBuf, i64> =
-        file_paths.iter().map(|(id, p)| (p.clone(), *id)).collect();
+    // Files of unknown language (`data.json`, images, ...) are never import targets: they are
+    // dropped from candidates at select time, so an edge to one only wastes a `bfs_capped`
+    // K slot and inflates degrees (#530).
+    let path_to_id: HashMap<PathBuf, i64> = file_paths
+        .iter()
+        .filter(|(_, p)| Language::from_path(p) != Language::Unknown)
+        .map(|(id, p)| (p.clone(), *id))
+        .collect();
 
     // Pre-build Go directory index once — O(N) — so resolve_go can do O(1) lookups.
     let go_dir_index = build_go_dir_index(file_paths);
@@ -1961,6 +1967,44 @@ mod tests {
             .unwrap();
         // old row cleared, self-edge (a→a) and unknown file 9 skipped
         assert_eq!(edges, vec![(1, 2)]);
+    }
+
+    /// #530: a file of unknown language (e.g. `data.json`) must not become a dependency
+    /// node, so it cannot use up a `bfs_capped` K slot (all leaves tie at degree 1, ties
+    /// break by id) ahead of the real neighbour.
+    #[test]
+    fn unknown_lang_import_target_gets_no_edge_and_takes_no_k_slot() {
+        let conn = mem_db();
+        // File 100 (a.ts) imports 12 json files (ids 1..=12) and one real module (id 50).
+        let mut paths: HashMap<i64, PathBuf> = HashMap::new();
+        paths.insert(100, PathBuf::from("src/a.ts"));
+        paths.insert(50, PathBuf::from("src/real.ts"));
+        for i in 1..=12 {
+            paths.insert(i, PathBuf::from(format!("src/d{i}.json")));
+            conn.execute(
+                "INSERT INTO symbols VALUES (100, ?1, 'import')",
+                [format!("import d{i} from './d{i}.json'")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO symbols VALUES (100, \"import r from './real'\", 'import')",
+            [],
+        )
+        .unwrap();
+        build_deps(&conn, &paths, &[]).unwrap();
+
+        let edges: Vec<(i64, i64)> = conn
+            .prepare("SELECT from_file, to_file FROM deps")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(edges, vec![(100, 50)], "json targets must not get edges");
+
+        let s = crate::expand::bfs_capped(&conn, &[(100, 1.0)], 1).unwrap();
+        assert!(s.contains_key(&50), "real neighbour dropped: {s:?}");
     }
 
     #[test]
