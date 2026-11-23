@@ -213,14 +213,54 @@ fn read_bytes_within_root_with(
     if is_link && !is_tracked_in_index(canonical_root, &real, index) {
         return Err(std::io::Error::other(PathEscape));
     }
+    // `real` is canonical, so it must not itself be a symlink; if it is, it was
+    // swapped after the check above (#543). lstat so nothing is followed.
+    let meta = std::fs::symlink_metadata(&real)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::other(PathEscape));
+    }
     // Never open FIFOs / devices / sockets: open(2)/read would block (#494).
-    if !std::fs::metadata(&real)?.is_file() {
+    if !meta.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "not a regular file",
         ));
     }
-    std::fs::read(real)
+    let mut file = open_verified(&real, &meta)?;
+    let mut buf = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    std::io::Read::read_to_end(&mut file, &mut buf)?;
+    Ok(buf)
+}
+
+/// Opens `real` and confirms the opened file is the one `checked` (an lstat of
+/// `real` taken after the containment checks) describes. Closes the window in
+/// which a path component could be swapped for a symlink between the check and
+/// the open (#543). On Unix the opened fd's dev/ino must equal `checked`'s; on
+/// Linux the fd's resolved path (`/proc/self/fd`) must also equal `real`.
+/// Elsewhere this is a plain open (no TOCTOU hardening).
+fn open_verified(real: &Path, checked: &std::fs::Metadata) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(real)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.dev() != checked.dev() || opened.ino() != checked.ino() {
+            return Err(std::io::Error::other(PathEscape));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // Unavailable (no /proc): the dev/ino check above still applies.
+        if let Ok(resolved) = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())) {
+            if resolved != real {
+                return Err(std::io::Error::other(PathEscape));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = checked;
+    Ok(file)
 }
 
 impl GitRepo {
@@ -1023,6 +1063,50 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("read blocked on FIFO");
         assert!(res.is_err());
+    }
+
+    /// #543: the file checked by path must be the file actually opened. If the
+    /// checked path is swapped for a symlink (to outside the repo) after the
+    /// metadata was taken, the open is refused instead of following the link.
+    #[cfg(unix)]
+    #[test]
+    fn open_verified_refuses_file_swapped_for_symlink() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "SECRET").unwrap();
+        let target = root.join("a.py");
+        std::fs::write(&target, "x = 1\n").unwrap();
+
+        // Unswapped: opens and reads the checked file.
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        let mut f = open_verified(&target, &meta).unwrap();
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut f, &mut buf).unwrap();
+        assert_eq!(buf, "x = 1\n");
+
+        // Swapped between the check and the open.
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(&secret, &target).unwrap();
+        let err = open_verified(&target, &meta).unwrap_err();
+        assert!(is_path_escape(&err), "got {err:?}");
+    }
+
+    /// #543: a regular file replaced by a different regular file (new inode)
+    /// after the check is refused too.
+    #[cfg(unix)]
+    #[test]
+    fn open_verified_refuses_replaced_file() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target = root.join("a.py");
+        std::fs::write(&target, "x = 1\n").unwrap();
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        std::fs::write(root.join("b.py"), "y = 2\n").unwrap();
+        std::fs::rename(root.join("b.py"), &target).unwrap();
+        let err = open_verified(&target, &meta).unwrap_err();
+        assert!(is_path_escape(&err), "got {err:?}");
     }
 
     // ---- Language ----
