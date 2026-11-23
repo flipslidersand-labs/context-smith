@@ -166,6 +166,16 @@ pub struct IndexDb {
 /// Maximum bytes of a file body stored in `fts_body`.
 const FTS_BODY_MAX_BYTES: usize = 512 * 1024;
 
+/// Most symbols stored per file; the rest are dropped with a warning (#567).
+/// Provisional (about 25x the largest file seen in real repos).
+const MAX_SYMBOLS_PER_FILE: usize = 10_000;
+
+/// Keep at most `max` items of `v` (the first ones).
+fn cap_symbols<T>(mut v: Vec<T>, max: usize) -> Vec<T> {
+    v.truncate(max);
+    v
+}
+
 /// Cut `content` to at most `FTS_BODY_MAX_BYTES`, backing up to a UTF-8 char boundary.
 pub(crate) fn truncate_fts_body(content: &str) -> &str {
     if content.len() <= FTS_BODY_MAX_BYTES {
@@ -547,7 +557,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 9;
+pub const EXTRACT_VERSION: u32 = 10;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
@@ -693,6 +703,21 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                     stats.files_skipped += 1;
                     continue;
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
+                    // Same handling as non-UTF-8 content: keep the files row
+                    // and path FTS so the file stays findable by name, drop
+                    // content-derived rows, and retry on the next run (#567).
+                    eprintln!("warn: skipping content of {:?}: {e}", abs_path);
+                    db.delete_content_records(file_id)?;
+                    db.connection().execute(
+                        "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
+                        params![file_id],
+                    )?;
+                    db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+                    file_paths.remove(&file_id);
+                    stats.files_skipped += 1;
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("warn: skip {:?}: {e}", abs_path);
                     // Drop stale rows (symbols/FTS/deps/embeddings/files) so
@@ -714,7 +739,15 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             db.delete_symbols_for(file_id)?;
 
             // (b) Extract and insert new symbols.
-            let raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
+            let mut raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
+            if raw_syms.len() > MAX_SYMBOLS_PER_FILE {
+                eprintln!(
+                    "warn: {:?} has {} symbols; keeping the first {MAX_SYMBOLS_PER_FILE}",
+                    abs_path,
+                    raw_syms.len()
+                );
+                raw_syms = cap_symbols(raw_syms, MAX_SYMBOLS_PER_FILE);
+            }
             let lines: Vec<&str> = source.lines().collect();
             // (id, name) of non-import symbols, in insertion order, for fts_symbols.
             let mut fts_syms: Vec<(i64, String)> = Vec::new();
@@ -1963,6 +1996,80 @@ mod tests {
         );
         assert_eq!(
             count(&db, "SELECT COUNT(*) FROM files WHERE path='ok.rs'"),
+            1
+        );
+    }
+
+    #[test]
+    fn cap_symbols_truncates_to_max() {
+        let v = vec![1, 2, 3, 4, 5];
+        assert_eq!(cap_symbols(v.clone(), 2), vec![1, 2]);
+        assert_eq!(cap_symbols(v.clone(), 5), v);
+        assert_eq!(cap_symbols(v.clone(), 9), v);
+    }
+
+    /// #567: a file that grows past MAX_FILE_BYTES keeps its files / path-FTS
+    /// rows but loses every content-derived row, and is retried next run.
+    #[test]
+    fn build_index_drops_content_rows_when_file_exceeds_size_cap() {
+        let (tmp, repo) = repo_with(&[
+            ("a.rs", "pub fn stale_marker() {}\n"),
+            ("ok.rs", "fn ok() {}\n"),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE name='stale_marker'"
+            ),
+            1
+        );
+        // Sparse file: no real data is written.
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("a.rs"))
+            .unwrap();
+        f.set_len(crate::MAX_FILE_BYTES + 1).unwrap();
+        drop(f);
+        build_index(&repo, &db, false).unwrap();
+        assert_no_leak(&db, "stale_marker");
+        let a = "SELECT COUNT(*) FROM files WHERE path='a.rs'";
+        assert_eq!(count(&db, a), 1);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path='a.rs')"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_body WHERE file_id IN (SELECT id FROM files WHERE path='a.rs')"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_path WHERE file_id IN (SELECT id FROM files WHERE path='a.rs')"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM files WHERE path='a.rs' AND indexed_sha IS NULL"
+            ),
+            1
+        );
+        // Other files are untouched.
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM files WHERE path='ok.rs' AND indexed_sha IS NOT NULL"
+            ),
             1
         );
     }
