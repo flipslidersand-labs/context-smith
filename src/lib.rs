@@ -183,11 +183,20 @@ fn path_has_symlink_component(canonical_root: &Path, path: &Path) -> bool {
     true
 }
 
+/// Largest file (bytes) that is read and indexed; bigger files are refused with
+/// `ErrorKind::FileTooLarge` before any content is read (#567). Provisional.
+pub(crate) const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
 pub(crate) fn read_bytes_within_root(
     canonical_root: &Path,
     path: &Path,
 ) -> std::io::Result<Vec<u8>> {
-    read_bytes_within_root_with(canonical_root, path, &std::cell::OnceCell::new())
+    read_bytes_within_root_with(
+        canonical_root,
+        path,
+        &std::cell::OnceCell::new(),
+        MAX_FILE_BYTES,
+    )
 }
 
 /// Like [`read_bytes_within_root`], but reuses a lazily opened git index across
@@ -196,6 +205,7 @@ fn read_bytes_within_root_with(
     canonical_root: &Path,
     path: &Path,
     index: &std::cell::OnceCell<Option<git2::Index>>,
+    max_bytes: u64,
 ) -> std::io::Result<Vec<u8>> {
     let real = path.canonicalize()?;
     let denied = match real.strip_prefix(canonical_root) {
@@ -226,9 +236,27 @@ fn read_bytes_within_root_with(
             "not a regular file",
         ));
     }
-    let mut file = open_verified(&real, &meta)?;
+    // Refuse before reading: the whole file would otherwise be held in memory
+    // and then expanded into per-symbol rows (#567).
+    let too_large = || {
+        std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("file is larger than {max_bytes} bytes"),
+        )
+    };
+    if meta.len() > max_bytes {
+        return Err(too_large());
+    }
+    let file = open_verified(&real, &meta)?;
     let mut buf = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    std::io::Read::read_to_end(&mut file, &mut buf)?;
+    // `take` bounds the read even if the file grows after the size check.
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, max_bytes.saturating_add(1)),
+        &mut buf,
+    )?;
+    if buf.len() as u64 > max_bytes {
+        return Err(too_large());
+    }
     Ok(buf)
 }
 
@@ -529,6 +557,7 @@ impl GitRepo {
                             &self.canonical_root,
                             &self.root.join(&rel),
                             index,
+                            MAX_FILE_BYTES,
                         ) {
                             Ok(bytes) => {
                                 if let Ok(oid) =
@@ -1081,6 +1110,22 @@ mod tests {
             .filter(|(_, k, _)| *k == kind)
             .map(|(n, _, _)| n.as_str())
             .collect()
+    }
+
+    /// #567: a file larger than the cap is refused before it is read.
+    #[test]
+    fn read_bytes_within_root_refuses_file_over_max_bytes() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("ok.py"), b"12345678").unwrap();
+        std::fs::write(root.join("big.py"), b"123456789").unwrap();
+        let read = |name: &str| {
+            read_bytes_within_root_with(&root, &root.join(name), &std::cell::OnceCell::new(), 8)
+        };
+        assert_eq!(read("ok.py").unwrap(), b"12345678");
+        let err = read("big.py").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(!is_path_escape(&err));
     }
 
     /// #494: a FIFO must be refused without blocking on open/read.
