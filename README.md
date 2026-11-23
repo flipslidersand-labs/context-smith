@@ -139,7 +139,7 @@ contextsmith index          contextsmith build
       ▼
  .contextsmith/index.db (SQLite)
  ├── files        — path, language, blob SHA of the working-tree content (uncommitted edits are indexed; only files tracked in HEAD)
- ├── symbols      — function/struct/class names, line numbers, snippets
+ ├── symbols      — function/struct/class names and kinds
  ├── deps         — inter-file import dependency graph
  ├── meta         — repo_root, indexed_at
  ├── fts_path     — FTS5 (tokenized file paths, BM25 weight ×3)
