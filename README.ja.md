@@ -128,7 +128,7 @@ contextsmith index          contextsmith build
 ### スコアリングパイプライン
 
 1. **BM25 検索** — タスク文字列で `fts_path`（重み×3）・`fts_symbols`（重み×0.5、ファイルごとに最良の一致）・`fts_body`（重み×1）を UNION ALL で検索、上位 20 件を seed として取得。タスクが 9 語以上(重複除く)のときは、先に出現ファイル数が少ない順の上位 8 語に絞る(一般語が固有の語を埋もれさせないため)
-2. **依存グラフ BFS** — seed ファイルから bidirectional BFS（depth=2）でスコアを伝播（hop ごとに ×0.5 減衰）。既定では 1 ファイルが広げる先は最大 10 件で、次数の小さい順（`CONTEXTSMITH_EXPAND` で切替）
+2. **依存グラフ BFS** — seed ファイルから bidirectional BFS（depth=2）でスコアを伝播（hop ごとに ×0.5 減衰）。既定では 1 ファイルが広げる先は最大 10 件で、次数の小さい順（`CONTEXTSMITH_EXPAND` = `bfs-capped`（既定）/ `bfs`（従来の素の BFS）/ `ppr`（実験的）で切替。詳細は上の「クエリ」節）
 3. **greedy 配分** — スコア降順に token 数を積み上げ、budget を超えたら打ち切り
 4. **バンドル出力** — 選択ファイルを Markdown に展開し、直近 Git 差分とともに出力
 
