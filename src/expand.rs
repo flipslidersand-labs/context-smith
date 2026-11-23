@@ -136,7 +136,9 @@ fn dedup_seeds(seeds: &[(i64, f32)]) -> HashMap<i64, f32> {
 }
 
 /// BFS where each parent expands to at most `CAP_K` neighbours (lowest degree first, then id),
-/// and a neighbour's score is `parent * 0.5 / sqrt(max(1, deg(neighbour)))`.
+/// and a neighbour's score is `parent * 0.5 / sqrt(max(1, deg(neighbour)))`. Neighbours in the
+/// current frontier, or already scored at least as high as this parent would give, are skipped
+/// before the K cut so they do not use up its slots.
 pub fn bfs_capped(
     conn: &Connection,
     seeds: &[(i64, f32)],
@@ -162,10 +164,16 @@ pub fn bfs_capped(
             let Some(list) = nbrs.get(&parent) else {
                 continue;
             };
+            // Also drop neighbours whose score this parent cannot raise (#529): they would
+            // take a K slot but never enter `scores`/`next`, crowding out real neighbours.
             let mut picked: Vec<(usize, i64)> = list
                 .iter()
                 .filter(|n| !in_frontier.contains(n))
                 .map(|&n| (deg.get(&n).copied().unwrap_or(1), n))
+                .filter(|&(d, n)| match scores.get(&n) {
+                    Some(&prev) => ps * 0.5 / (d.max(1) as f32).sqrt() > prev,
+                    None => true,
+                })
                 .collect();
             picked.sort_unstable();
             picked.truncate(CAP_K);
@@ -348,6 +356,19 @@ mod tests {
         let conn = graph(&e);
         let s = bfs_capped(&conn, &[(1, 1.0)], 1).unwrap();
         assert_eq!(keys(&s), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn capped_already_scored_nodes_do_not_use_parent_k_slots() {
+        // #529: seed 1 - node 2 - leaves 3..=14. At depth 2, node 2's neighbours are the seed 1
+        // (already scored, whose score cannot rise) and 12 leaves. The seed must not take one
+        // of node 2's K slots, so 10 leaves (3..=12) are picked, not 9 (3..=11).
+        let mut e = vec![(1, 2)];
+        e.extend((3..=14).map(|i| (2, i)));
+        let conn = graph(&e);
+        let s = bfs_capped(&conn, &[(1, 1.0)], 2).unwrap();
+        assert_eq!(keys(&s), (1..=12).collect::<Vec<i64>>());
+        assert_eq!(s[&1], 1.0);
     }
 
     #[test]
