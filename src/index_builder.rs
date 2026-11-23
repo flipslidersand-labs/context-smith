@@ -309,6 +309,23 @@ impl IndexDb {
         &self.conn
     }
 
+    /// Path of the `files` row with this id, or `None` when no such row exists.
+    pub(crate) fn path_for_id(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .prepare_cached("SELECT path FROM files WHERE id = ?1")?
+            .query_row([id], |row| row.get(0))
+            .optional()
+    }
+
+    /// Like [`Self::path_for_id`], but `None` also for files of unknown language
+    /// (never selected as content).
+    pub(crate) fn indexed_path_for_id(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .prepare_cached("SELECT path FROM files WHERE id = ?1 AND lang != ?2")?
+            .query_row(params![id, Language::Unknown.as_str()], |row| row.get(0))
+            .optional()
+    }
+
     pub(crate) fn init_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS files (
@@ -323,9 +340,7 @@ impl IndexDb {
                 id      INTEGER PRIMARY KEY,
                 file_id INTEGER NOT NULL REFERENCES files(id),
                 name    TEXT NOT NULL,
-                kind    TEXT NOT NULL,
-                line    INTEGER NOT NULL,
-                snippet TEXT NOT NULL
+                kind    TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS deps (
                 from_file INTEGER NOT NULL REFERENCES files(id),
@@ -385,11 +400,11 @@ impl IndexDb {
             "SELECT f.id, f.path, f.blob_sha
              FROM files f
              LEFT JOIN embeddings e ON e.file_id = f.id
-             WHERE f.lang != 'unknown'
+             WHERE f.lang != ?1
                AND (e.file_id IS NULL OR e.content_sha IS NULL OR e.content_sha != f.blob_sha)",
         )?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map([Language::Unknown.as_str()], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -451,14 +466,8 @@ impl IndexDb {
     /// Insert a symbol and return its new rowid.
     pub(crate) fn insert_symbol(&self, sym: &Symbol) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO symbols (file_id, name, kind, line, snippet) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                sym.file_id,
-                sym.name,
-                sym.kind.as_str(),
-                sym.line,
-                sym.snippet
-            ],
+            "INSERT INTO symbols (file_id, name, kind) VALUES (?1, ?2, ?3)",
+            params![sym.file_id, sym.name, sym.kind.as_str()],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -557,7 +566,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 10;
+pub const EXTRACT_VERSION: u32 = 11;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
@@ -650,6 +659,20 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         if wipe_fts {
             db.connection().execute_batch(
                 "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
+            )?;
+            // A table from an older layout keeps its extra NOT NULL columns
+            // (`CREATE TABLE IF NOT EXISTS` leaves it alone), which would fail
+            // every insert. The rebuild repopulates all rows, so recreate it
+            // (#590). Inside the rebuild transaction, so a failure keeps the old one.
+            db.connection().execute_batch(
+                "DROP TABLE symbols;
+                 CREATE TABLE symbols (
+                     id      INTEGER PRIMARY KEY,
+                     file_id INTEGER NOT NULL REFERENCES files(id),
+                     name    TEXT NOT NULL,
+                     kind    TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);",
             )?;
         }
         // --- Cleanup: remove DB entries for files no longer in git ---
@@ -748,20 +771,14 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                 );
                 raw_syms = cap_symbols(raw_syms, MAX_SYMBOLS_PER_FILE);
             }
-            let lines: Vec<&str> = source.lines().collect();
             // (id, name) of non-import symbols, in insertion order, for fts_symbols.
             let mut fts_syms: Vec<(i64, String)> = Vec::new();
-            for (name, kind, line) in raw_syms {
-                let lo = line.saturating_sub(3) as usize;
-                let hi = (line as usize + 2).min(lines.len());
-                let snippet = lines[lo..hi].join("\n");
+            for (name, kind, _line) in raw_syms {
                 let is_import = kind.as_str() == "import";
                 let sym = Symbol {
                     file_id,
                     name,
                     kind,
-                    line,
-                    snippet,
                 };
                 let sym_id = db.insert_symbol(&sym)?;
                 if !is_import {
@@ -857,8 +874,6 @@ mod tests {
             file_id,
             name: name.to_string(),
             kind: SymbolKind::Function,
-            line: 3,
-            snippet: "fn x() {}".to_string(),
         }
     }
 
@@ -1183,6 +1198,34 @@ mod tests {
         assert!(mem_db().files_needing_embed().unwrap().is_empty());
     }
 
+    // ---- path_for_id / indexed_path_for_id ----
+
+    #[test]
+    fn path_lookup_by_id_hides_unknown_language_only_for_indexed() {
+        let db = mem_db();
+        let (known, _) = db
+            .upsert_file(Path::new("a.rs"), Language::Rust, "s1", 1)
+            .unwrap();
+        let (unknown, _) = db
+            .upsert_file(Path::new("data.bin"), Language::Unknown, "s2", 1)
+            .unwrap();
+        let missing = known.max(unknown) + 100;
+
+        assert_eq!(db.path_for_id(known).unwrap().as_deref(), Some("a.rs"));
+        assert_eq!(
+            db.path_for_id(unknown).unwrap().as_deref(),
+            Some("data.bin")
+        );
+        assert_eq!(db.path_for_id(missing).unwrap(), None);
+
+        assert_eq!(
+            db.indexed_path_for_id(known).unwrap().as_deref(),
+            Some("a.rs")
+        );
+        assert_eq!(db.indexed_path_for_id(unknown).unwrap(), None);
+        assert_eq!(db.indexed_path_for_id(missing).unwrap(), None);
+    }
+
     // ---- read-only open ----
 
     /// Build a WAL index for `a.rs` at `path`, then drop the connection.
@@ -1424,19 +1467,84 @@ mod tests {
         );
     }
 
+    fn symbols_columns(db: &IndexDb) -> Vec<String> {
+        let mut stmt = db
+            .connection()
+            .prepare("SELECT name FROM pragma_table_info('symbols') ORDER BY cid")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// #590: nothing reads `symbols.line` / `symbols.snippet`, so they are not stored.
     #[test]
-    fn build_index_snippet_covers_surrounding_lines() {
-        let src = "l1\nl2\nl3\nfn target() {}\nl5\nl6\nl7\nl8\n";
-        let (_tmp, repo) = repo_with(&[("a.rs", src)]);
+    fn build_index_symbols_table_has_no_line_or_snippet_columns() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "l1\nl2\nl3\nfn target() {}\nl5\n")]);
         let db = mem_db();
         build_index(&repo, &db, false).unwrap();
-        let snippet: String = db
-            .connection()
-            .query_row("SELECT snippet FROM symbols WHERE name='target'", [], |r| {
-                r.get(0)
-            })
+        assert_eq!(
+            symbols_columns(&db),
+            ["id", "file_id", "name", "kind"],
+            "symbols must not carry line / snippet"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='target'"),
+            1
+        );
+    }
+
+    /// #590: an index built with the old `symbols(line, snippet NOT NULL)` layout
+    /// (EXTRACT_VERSION 10) is rebuilt on the next `index`, not failed by the old table.
+    #[test]
+    fn build_index_rebuilds_v10_symbols_table_with_line_and_snippet() {
+        let (_tmp, repo) = repo_with(&[("a.rs", "fn target() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        db.connection()
+            .execute_batch(
+                "DROP TABLE symbols;
+                 CREATE TABLE symbols (
+                     id INTEGER PRIMARY KEY,
+                     file_id INTEGER NOT NULL REFERENCES files(id),
+                     name TEXT NOT NULL, kind TEXT NOT NULL,
+                     line INTEGER NOT NULL, snippet TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_symbols_file_id ON symbols(file_id);
+                 INSERT INTO symbols (file_id, name, kind, line, snippet)
+                     SELECT id, 'old_marker', 'function', 1, 'x' FROM files;",
+            )
             .unwrap();
-        assert_eq!(snippet, "l2\nl3\nfn target() {}\nl5\nl6");
+        db.upsert_meta(EXTRACT_VERSION_KEY, "10").unwrap();
+
+        build_index(&repo, &db, false).unwrap();
+
+        assert_eq!(symbols_columns(&db), ["id", "file_id", "name", "kind"]);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='old_marker'"),
+            0
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM symbols WHERE name='target'"),
+            1
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='idx_symbols_file_id'"
+            ),
+            1
+        );
+        let v: String = db
+            .connection()
+            .query_row(
+                "SELECT value FROM meta WHERE key='extract_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, EXTRACT_VERSION.to_string());
     }
 
     #[test]
@@ -1712,7 +1820,8 @@ mod tests {
         db.upsert_meta(EXTRACT_VERSION_KEY, "7").unwrap();
         db.connection()
             .execute_batch(
-                "CREATE TRIGGER fail_sym_insert BEFORE INSERT ON symbols
+                "CREATE TRIGGER fail_sym_insert BEFORE UPDATE OF indexed_sha ON files
+                 WHEN NEW.indexed_sha IS NOT NULL
                  BEGIN SELECT RAISE(ABORT, 'forced failure'); END;",
             )
             .unwrap();
