@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paths in `query --format md` output (the `task.md` list and `<!-- path -->`), the `meta.repo_root` index warning and the unreadable/empty-match errors no longer print raw control characters (ESC, BEL, DEL, C1, U+2028/2029); they are shown as `\x1b`-style escapes, so a crafted file name cannot retitle the terminal, erase lines or write the clipboard (#566).
 
 ### Fixed
+- `bfs-capped` expansion no longer lets already-scored neighbours (e.g. the seed) use up a parent's K=10 slots at depth 2, which dropped real neighbours; scores and ranking can change, bench re-measure is tracked in #591 (#529).
 - A file holding only whitespace is no longer bundled: `select` now treats it as empty (it used to come back as a match with `used_tokens: 1`), also when it sits next to files with content. With `remote-embed`, vector seeds go through the same readable / non-blank filter as BM25 seeds, and a whitespace-only BM25 hit no longer rides along with a vector hit (#564).
 - Files of unknown language (e.g. a `data.json` imported from TS/JS) no longer get dependency edges, so they no longer use up the `bfs-capped` per-file neighbour slots or inflate degrees ahead of real neighbours; dependencies are rebuilt on the next `index` run (#530).
 - `index` on a repo with no commits now fails with a short "has no commits yet" message instead of git2's raw `UnbornBranch` error, and `recent_diff` returns an empty string there as documented (#565).
