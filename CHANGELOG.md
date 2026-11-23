@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `ctx-select.sh` now refuses a cache root that is owned by another user or writable by group/others, and `SKILL.md` tells callers to single-quote the task text so shell metacharacters in copied issue text are not executed (#542).
+
 ### Fixed
 - `CONTEXTSMITH_EXPAND` set to an empty value is now treated as unset instead of failing `select`, and an invalid value is reported even when the search has no hits (previously it was hidden behind "No matching files") (#531).
 
