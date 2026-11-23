@@ -1,5 +1,7 @@
 # context-smith
 
+Release type: `library`
+
 **English**: [README.md](./README.md) | **日本語**: このページ
 
 **AI context compiler** — Git リポジトリのファイルをタスクの説明に照らして順位づけし(BM25 + 依存グラフ)、トークン予算内に収まるコンテキストバンドルを生成する CLI ツール。
