@@ -53,6 +53,8 @@ to share it with your team. Only open an `index.db` from a source you trust: con
 | `--out <PATH>` | `.contextsmith/index.db` | Override the output location |
 | `--force` | off | Force a full re-index even for files whose content has not changed |
 
+`index.db` stores file contents. On Unix a new `index.db` is created with mode 0600, but the parent directory keeps your umask and an existing file keeps its mode, so put `--out` in a directory only you can use.
+
 ### 2. Generate a context bundle
 
 ```bash
@@ -110,6 +112,18 @@ contextsmith query --repo . --task "auth error" --format md --explain
 Environment: `CONTEXTSMITH_EXPAND` = `bfs-capped` (default: cap 10 neighbours per file, low-degree first) / `bfs` (previous plain BFS) / `ppr` (personalized PageRank ranking, experimental) selects how dependency scores are spread.
 
 The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }`. `truncated` is `true` when the file was cut to fit the remaining budget.
+
+### Embedding service (opt-in `remote-embed` build)
+
+Only read when built with `--features remote-embed`. Without `EMBEDDING_SVC_URL` the build is BM25 only.
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBEDDING_SVC_URL` | unset (embeddings off) | Base URL of the embedding service (`POST {url}/embed/batch`). Empty or whitespace-only counts as unset |
+| `EMBEDDING_API_KEY` | none | Sent as the `X-API-Key` header |
+| `EMBEDDING_COLLECTION` | `context-smith` | Collection to use; it must be registered on the service |
+| `EMBEDDING_TIMEOUT_SECS` | `30` | Read timeout in seconds (the connect timeout is a fixed 5 s). Transient errors are retried up to 3 attempts per chunk |
+| `EMBEDDING_ALLOW_INSECURE` | unset | Set to `1` to allow plain `http://` to a non-loopback host (refused otherwise, because the API key and file contents would be sent unencrypted; prefer `https://`) |
 
 ## Architecture
 
