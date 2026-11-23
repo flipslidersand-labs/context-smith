@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `index` on a repo with no commits now fails with a short "has no commits yet" message instead of git2's raw `UnbornBranch` error, and `recent_diff` returns an empty string there as documented (#565).
 - A repo whose HEAD tree is nested tens of thousands of directories deep no longer overflows the stack and aborts the scan; directories deeper than 256 levels are skipped with a `warn:` line (#568).
 - `CONTEXTSMITH_EXPAND` set to an empty value is now treated as unset instead of failing `select`, and an invalid value is reported even when the search has no hits (previously it was hidden behind "No matching files") (#531).
+- A file with an unresolved merge conflict (no stage-0 entry in the git index) is no longer dropped from the bundle as unreadable; it is read from the working tree, conflict markers included. Files removed with `git rm --cached` are still refused. The "could not be read" error no longer says re-running `contextsmith index` fixes it, and points at the `warn: skip` lines instead (#563).
 
 ## [0.6.0] - 2026-11-23
 
