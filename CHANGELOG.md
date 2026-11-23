@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opening `index.db` now sets `trusted_schema=OFF` and DEFENSIVE, and refuses a DB that holds a trigger, a view, or a known table name that is not a table, asking to delete and re-index (#541).
 
 ### Fixed
+- A repo whose HEAD tree is nested tens of thousands of directories deep no longer overflows the stack and aborts the scan; directories deeper than 256 levels are skipped with a `warn:` line (#568).
 - `CONTEXTSMITH_EXPAND` set to an empty value is now treated as unset instead of failing `select`, and an invalid value is reported even when the search has no hits (previously it was hidden behind "No matching files") (#531).
 
 ## [0.6.0] - 2026-11-23
