@@ -76,6 +76,67 @@ fn immutable_uri(path: &Path) -> Option<String> {
     Some(format!("file:{escaped}?immutable=1"))
 }
 
+/// Table names `init_schema` creates with `CREATE ... IF NOT EXISTS`.
+const KNOWN_TABLES: [&str; 8] = [
+    "files",
+    "symbols",
+    "deps",
+    "meta",
+    "embeddings",
+    "fts_path",
+    "fts_symbols",
+    "fts_body",
+];
+
+/// An index.db may come from an untrusted clone. Right after opening, turn off
+/// `trusted_schema` and enable DEFENSIVE, then refuse a DB whose schema holds a
+/// trigger or view, or a known table name that is not a table (a view named
+/// `files` would slip past `CREATE TABLE IF NOT EXISTS`). Never recreates the DB.
+fn harden_and_check(conn: &Connection, path: &Path) -> Result<()> {
+    use rusqlite::config::DbConfig;
+    // Best effort: the schema check below is what rejects a bad DB.
+    if conn
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
+        .is_err()
+    {
+        let _ = conn.execute_batch("PRAGMA trusted_schema=OFF;");
+    }
+    let _ = conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true);
+
+    let names = KNOWN_TABLES
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT type, name FROM sqlite_master
+         WHERE type IN ('trigger','view')
+            OR (lower(name) IN ({names}) AND type != 'table')
+         ORDER BY rowid LIMIT 1"
+    );
+    // Reading sqlite_master also forces a lazy (read-only) open to touch the file.
+    let found = conn
+        .query_row(&sql, [], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .optional()
+        .map_err(|e| {
+            let e = anyhow::Error::new(e);
+            if is_lock_error(&e) {
+                anyhow::anyhow!(locked_message(path, &format!("{e:#}")))
+            } else {
+                e.context(format!("Failed to read SQLite schema at {:?}", path))
+            }
+        })?;
+    if let Some((kind, name)) = found {
+        anyhow::bail!(
+            "Index DB has unexpected schema object ({kind} `{name}`). Delete {} and re-run 'contextsmith index'.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 #[non_exhaustive]
 pub struct IndexDb {
     conn: Connection,
@@ -142,18 +203,8 @@ impl IndexDb {
              PRAGMA busy_timeout=5000;",
         )
         .with_context(|| "Failed to apply SQLite PRAGMAs")?;
-        // Opening read-only is lazy; touch the schema so a non-SQLite file fails here.
-        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .map_err(|e| {
-            let e = anyhow::Error::new(e);
-            if is_lock_error(&e) {
-                anyhow::anyhow!(locked_message(path, &format!("{e:#}")))
-            } else {
-                e.context(format!("Failed to read SQLite schema at {:?}", path))
-            }
-        })?;
+        // Also touches the schema, so a non-SQLite file fails here.
+        harden_and_check(&conn, path)?;
         Ok(IndexDb { conn })
     }
 
@@ -171,6 +222,8 @@ impl IndexDb {
     fn open_inner(path: &Path, check: bool) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
+        // Before any write (journal_mode=WAL) so a planted schema cannot run.
+        harden_and_check(&conn, path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -2190,5 +2243,87 @@ mod tests {
             ),
             1
         );
+    }
+
+    // ---- #541: untrusted index.db hardening ----
+
+    fn trusted_schema_on(db: &IndexDb) -> bool {
+        use rusqlite::config::DbConfig;
+        db.connection()
+            .db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA)
+            .unwrap()
+    }
+
+    /// A valid index at `<tmp>/index.db`, closed again.
+    fn valid_index_file() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        let db = IndexDb::open(&path).unwrap();
+        db.init_schema().unwrap();
+        drop(db);
+        (tmp, path)
+    }
+
+    #[test]
+    fn open_rejects_db_with_planted_trigger() {
+        let (_tmp, path) = valid_index_file();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER planted AFTER INSERT ON files
+                 BEGIN INSERT OR REPLACE INTO meta(key, value) VALUES ('pwned', '1'); END;",
+            )
+            .unwrap();
+        for result in [IndexDb::open(&path), IndexDb::open_for_read(&path)] {
+            let err = result.err().expect("planted trigger must be rejected");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("trigger `planted`"), "{msg}");
+            assert!(msg.contains("Delete"), "{msg}");
+        }
+        let conn = Connection::open(&path).unwrap();
+        let pwned: i64 = conn
+            .query_row("SELECT count(*) FROM meta WHERE key='pwned'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pwned, 0);
+    }
+
+    #[test]
+    fn open_for_read_rejects_view_shadowing_a_known_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE real_files (id INTEGER); CREATE VIEW files AS SELECT * FROM real_files;")
+            .unwrap();
+        for result in [IndexDb::open_for_read(&path), IndexDb::open(&path)] {
+            let err = result.err().expect("view must be rejected");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("view `files`"), "{msg}");
+            assert!(msg.contains("Delete"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn open_rejects_known_table_name_that_is_not_a_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (a); CREATE INDEX symbols ON t(a);")
+            .unwrap();
+        let msg = format!("{:#}", IndexDb::open(&path).err().expect("rejected"));
+        assert!(msg.contains("index `symbols`"), "{msg}");
+    }
+
+    #[test]
+    fn valid_index_opens_hardened_in_both_modes() {
+        let (_tmp, path) = valid_index_file();
+        let rw = IndexDb::open(&path).unwrap();
+        assert!(!trusted_schema_on(&rw));
+        drop(rw);
+        let ro = IndexDb::open_for_read(&path).unwrap();
+        assert!(!trusted_schema_on(&ro));
     }
 }

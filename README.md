@@ -45,7 +45,7 @@ Generates a SQLite index at `./my-project/.contextsmith/index.db`. The file list
 symbols, dependencies, and the BM25 full-text index all live in a single file.
 
 For small repositories (rule of thumb: source under 10 MB) you can commit `index.db`
-to share it with your team.
+to share it with your team. Only open an `index.db` from a source you trust: contextsmith refuses one that contains triggers or views, but delete a file you did not build yourself.
 
 | Option | Default | Description |
 |---|---|---|
