@@ -12,7 +12,7 @@ Ask context-smith which files to read first.
 ```
 
 - `<task words...>`: describe the task the way an issue title would, e.g. `poetry source add fails with KeyError`. Words that name a module or a class help most.
-- `--budget` (default 16000 tokens) bounds the total size of the files listed; `--top` (default 15) limits the rows printed.
+- `--budget` (integer >= 1, default 16000 tokens) bounds the total size of the files listed; `--top` (default 15) limits the rows printed.
 - Output: one row per file, `rank  score  tokens  path`. Read the top few, then use your normal search for the rest.
 - The index is kept in `~/.cache/contextsmith/`; the repository is never written to. The first call on a repository takes about a second per 500 files; later calls are incremental.
 
