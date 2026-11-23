@@ -44,7 +44,7 @@ contextsmith query --repo ./project --task "認証エラーを調査" --format j
 context.bundle/
 ├── task.md               # タスク説明 + 選択したファイル一覧 + 直近の Git 差分(`## Recent Diff`)
 ├── relevant-code/        # 選択したファイルの内容(ファイルごとに 1 つの .md)
-└── citations.json        # 各ファイルのスコアとトークン数。末尾に `(recent diff)` の項目
+└── citations.json        # 各ファイルのスコアとトークン数。直近の差分があるときだけ、末尾に `(recent diff)` の項目
 ```
 
 `dependency-graph.json`・`recent-diffs/`・`schema-summary.md`・`related-issues.md` は**未実装**(出力されない)。
