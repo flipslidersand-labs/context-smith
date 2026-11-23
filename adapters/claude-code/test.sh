@@ -3,6 +3,16 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 sel=$here/ctx-select.sh
+
+# Check the binary first: a stale one makes ctx-select.sh exit 2/3 and floods the run with unrelated FAILs.
+# Same minimum as MIN_VERSION in ctx-select.sh.
+min_version=0.4.1
+bin=${CONTEXTSMITH_BIN:-contextsmith}
+bin_version=$("$bin" --version 2>/dev/null | awk '{print $2}')
+if [ -z "$bin_version" ] || [ "$(printf '%s\n%s\n' "$min_version" "$bin_version" | sort -V | head -n1)" != "$min_version" ]; then
+  echo "test.sh: '$bin' is missing, has no usable --version, or is older than $min_version (got: ${bin_version:-none}); set CONTEXTSMITH_BIN=target/debug/contextsmith" >&2
+  exit 2
+fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 export CTX_SELECT_CACHE=$tmp/cache
 fail=0
