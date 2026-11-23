@@ -53,6 +53,8 @@ to share it with your team. Only open an `index.db` from a source you trust: con
 | `--out <PATH>` | `.contextsmith/index.db` | Override the output location |
 | `--force` | off | Force a full re-index even for files whose content has not changed |
 
+`index.db` stores file contents. On Unix a new `index.db` is created with mode 0600, but the parent directory keeps your umask and an existing file keeps its mode, so put `--out` in a directory only you can use.
+
 ### 2. Generate a context bundle
 
 ```bash

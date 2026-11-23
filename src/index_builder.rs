@@ -137,6 +137,27 @@ fn harden_and_check(conn: &Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// index.db holds file bodies, so a new one must not follow the umask (002 gives
+/// 0644). Create it empty with mode 0600 before SQLite opens it, so there is no
+/// window where it is group/other-readable; SQLite gives -wal/-shm the same mode.
+/// `create_new` leaves an existing file (and its mode) alone and never follows a
+/// symlink. Other errors are ignored: `Connection::open` reports them.
+#[cfg(unix)]
+fn precreate_owner_only(path: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path);
+}
+
+#[cfg(not(unix))]
+fn precreate_owner_only(_path: &Path) {}
+
 #[non_exhaustive]
 pub struct IndexDb {
     conn: Connection,
@@ -220,6 +241,7 @@ impl IndexDb {
     }
 
     fn open_inner(path: &Path, check: bool) -> Result<Self> {
+        precreate_owner_only(path);
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open SQLite at {:?}", path))?;
         // Before any write (journal_mode=WAL) so a planted schema cannot run.
@@ -1175,6 +1197,40 @@ mod tests {
             eprintln!("skipping: file permissions are not enforced (running as root?)");
         }
         skip
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_creates_new_index_db_owner_only() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        let db = IndexDb::open(&path).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        // -wal/-shm inherit the main file's mode; none may be wider.
+        for ext in ["index.db-wal", "index.db-shm"] {
+            let side = tmp.path().join(ext);
+            if side.exists() {
+                assert_eq!(mode_of(&side) & 0o077, 0, "{ext}");
+            }
+        }
+        drop(db);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_keeps_mode_of_existing_index_db() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("index.db");
+        drop(IndexDb::open(&path).unwrap());
+        chmod(&path, 0o644);
+        drop(IndexDb::open(&path).unwrap());
+        assert_eq!(mode_of(&path), 0o644);
     }
 
     #[test]
