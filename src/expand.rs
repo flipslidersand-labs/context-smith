@@ -1,7 +1,7 @@
 //! Dependency-graph expansion strategies, selected by `CONTEXTSMITH_EXPAND` (#293).
 //!
 //! `bfs-capped` (default since the #293 bench) caps each file's neighbours so hub files do not
-//! collect score. `bfs` is the earlier plain [`bfs_expand`]; `ppr` is experimental.
+//! collect score. `bfs` is the earlier plain [`bfs_expand`].
 
 use crate::dep_builder::bfs_expand;
 use anyhow::Result;
@@ -12,16 +12,12 @@ use std::collections::{HashMap, HashSet};
 pub const EXPAND_ENV: &str = "CONTEXTSMITH_EXPAND";
 
 const CAP_K: usize = 10;
-const PPR_ALPHA: f32 = 0.85;
-const PPR_MAX_ITER: usize = 50;
-const PPR_TOL: f32 = 1e-6;
 const CHUNK: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpandMode {
     Bfs,
     BfsCapped,
-    Ppr,
 }
 
 /// Parse a mode name; `None` (unset) and a blank value mean the default `bfs-capped`.
@@ -29,9 +25,8 @@ pub fn parse_mode(v: Option<&str>) -> Result<ExpandMode> {
     match v.map(str::trim).filter(|s| !s.is_empty()) {
         Some("bfs") => Ok(ExpandMode::Bfs),
         None | Some("bfs-capped") => Ok(ExpandMode::BfsCapped),
-        Some("ppr") => Ok(ExpandMode::Ppr),
         Some(other) => {
-            anyhow::bail!("unknown {EXPAND_ENV} value '{other}' (expected bfs, bfs-capped or ppr)")
+            anyhow::bail!("unknown {EXPAND_ENV} value '{other}' (expected bfs or bfs-capped)")
         }
     }
 }
@@ -54,7 +49,6 @@ pub fn expand(
     match mode {
         ExpandMode::Bfs => bfs_expand(conn, seeds, depth),
         ExpandMode::BfsCapped => bfs_capped(conn, seeds, depth),
-        ExpandMode::Ppr => ppr(conn, seeds, depth),
     }
 }
 
@@ -136,7 +130,9 @@ fn dedup_seeds(seeds: &[(i64, f32)]) -> HashMap<i64, f32> {
 }
 
 /// BFS where each parent expands to at most `CAP_K` neighbours (lowest degree first, then id),
-/// and a neighbour's score is `parent * 0.5 / sqrt(max(1, deg(neighbour)))`.
+/// and a neighbour's score is `parent * 0.5 / sqrt(max(1, deg(neighbour)))`. Neighbours in the
+/// current frontier, or already scored at least as high as this parent would give, are skipped
+/// before the K cut so they do not use up its slots.
 pub fn bfs_capped(
     conn: &Connection,
     seeds: &[(i64, f32)],
@@ -162,10 +158,16 @@ pub fn bfs_capped(
             let Some(list) = nbrs.get(&parent) else {
                 continue;
             };
+            // Also drop neighbours whose score this parent cannot raise (#529): they would
+            // take a K slot but never enter `scores`/`next`, crowding out real neighbours.
             let mut picked: Vec<(usize, i64)> = list
                 .iter()
                 .filter(|n| !in_frontier.contains(n))
                 .map(|&n| (deg.get(&n).copied().unwrap_or(1), n))
+                .filter(|&(d, n)| match scores.get(&n) {
+                    Some(&prev) => ps * 0.5 / (d.max(1) as f32).sqrt() > prev,
+                    None => true,
+                })
                 .collect();
             picked.sort_unstable();
             picked.truncate(CAP_K);
@@ -188,81 +190,6 @@ pub fn bfs_capped(
         frontier = next;
     }
     Ok(scores)
-}
-
-/// Personalized PageRank over the undirected deps graph, restricted to the plain-BFS candidate
-/// set (so only the ranking changes). Non-seeds score `0.5 * max_seed * ppr / max_nonseed_ppr`.
-pub fn ppr(conn: &Connection, seeds: &[(i64, f32)], depth: u8) -> Result<HashMap<i64, f32>> {
-    let seed_scores = dedup_seeds(seeds);
-    let cand = bfs_expand(conn, seeds, depth)?;
-    let mut nodes: Vec<i64> = cand.keys().copied().collect();
-    nodes.sort_unstable();
-    let idx: HashMap<i64, usize> = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-    let n = nodes.len();
-
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (node, list) in neighbors(conn, &nodes)? {
-        adj[idx[&node]] = list.iter().filter_map(|m| idx.get(m).copied()).collect();
-    }
-
-    // Personalization: normalised seed scores (uniform over seeds if none is positive).
-    let mut p = vec![0.0f32; n];
-    let pos_sum: f32 = seed_scores
-        .values()
-        .filter(|s| s.is_finite() && **s > 0.0)
-        .sum();
-    for (&id, &s) in &seed_scores {
-        p[idx[&id]] = if pos_sum > 0.0 {
-            if s.is_finite() && s > 0.0 {
-                s / pos_sum
-            } else {
-                0.0
-            }
-        } else {
-            1.0 / seed_scores.len() as f32
-        };
-    }
-
-    let mut r = p.clone();
-    for _ in 0..PPR_MAX_ITER {
-        let mut next = vec![0.0f32; n];
-        let mut dangling = 0.0f32;
-        for i in 0..n {
-            if adj[i].is_empty() {
-                dangling += r[i];
-            } else {
-                let share = r[i] / adj[i].len() as f32;
-                for &j in &adj[i] {
-                    next[j] += share;
-                }
-            }
-        }
-        let mut diff = 0.0f32;
-        for i in 0..n {
-            next[i] = PPR_ALPHA * (next[i] + dangling * p[i]) + (1.0 - PPR_ALPHA) * p[i];
-            diff += (next[i] - r[i]).abs();
-        }
-        r = next;
-        if diff < PPR_TOL {
-            break;
-        }
-    }
-
-    let max_seed = seed_scores.values().copied().fold(0.0f32, f32::max);
-    let max_non = nodes
-        .iter()
-        .filter(|id| !seed_scores.contains_key(id))
-        .map(|id| r[idx[id]])
-        .fold(0.0f32, f32::max);
-    let mut out = HashMap::new();
-    for &id in &nodes {
-        if let Some(&s) = seed_scores.get(&id) {
-            out.insert(id, s);
-        } else if max_non > 0.0 {
-            out.insert(id, 0.5 * max_seed * r[idx[&id]] / max_non);
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -303,9 +230,16 @@ mod tests {
             parse_mode(Some("bfs-capped")).unwrap(),
             ExpandMode::BfsCapped
         );
-        assert_eq!(parse_mode(Some("ppr")).unwrap(), ExpandMode::Ppr);
         let e = parse_mode(Some("nope")).unwrap_err().to_string();
         assert!(e.contains("nope") && e.contains(EXPAND_ENV), "{e}");
+    }
+
+    #[test]
+    fn parse_mode_ppr_is_unknown() {
+        // #533: `ppr` was removed after the bench rejected it (ADR-005).
+        let e = parse_mode(Some("ppr")).unwrap_err().to_string();
+        assert!(e.contains("ppr") && e.contains(EXPAND_ENV), "{e}");
+        assert!(e.contains("expected bfs or bfs-capped"), "{e}");
     }
 
     #[test]
@@ -348,6 +282,19 @@ mod tests {
         let conn = graph(&e);
         let s = bfs_capped(&conn, &[(1, 1.0)], 1).unwrap();
         assert_eq!(keys(&s), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn capped_already_scored_nodes_do_not_use_parent_k_slots() {
+        // #529: seed 1 - node 2 - leaves 3..=14. At depth 2, node 2's neighbours are the seed 1
+        // (already scored, whose score cannot rise) and 12 leaves. The seed must not take one
+        // of node 2's K slots, so 10 leaves (3..=12) are picked, not 9 (3..=11).
+        let mut e = vec![(1, 2)];
+        e.extend((3..=14).map(|i| (2, i)));
+        let conn = graph(&e);
+        let s = bfs_capped(&conn, &[(1, 1.0)], 2).unwrap();
+        assert_eq!(keys(&s), (1..=12).collect::<Vec<i64>>());
+        assert_eq!(s[&1], 1.0);
     }
 
     #[test]
@@ -433,43 +380,5 @@ mod tests {
         assert!((d2[&2] - want).abs() < 1e-4);
         // Nothing improved on hop 2, so the frontier is empty and further depth changes nothing.
         assert_eq!(bfs_capped(&conn, &seeds, 5).unwrap(), d2);
-    }
-
-    #[test]
-    fn ppr_candidate_set_matches_bfs_and_bounds_scores() {
-        let conn = hub_graph();
-        let seeds = [(1, 8.0)];
-        let b = bfs_expand(&conn, &seeds, 2).unwrap();
-        let p = ppr(&conn, &seeds, 2).unwrap();
-        assert_eq!(keys(&p), keys(&b));
-        assert_eq!(p[&1], 8.0);
-        assert!(p
-            .iter()
-            .all(|(&k, &v)| k == 1 || (v > 0.0 && v <= 4.0 + 1e-5)));
-    }
-
-    #[test]
-    fn ppr_suppresses_hub_relative_to_bfs() {
-        // Two seeds both point at hub H(100) which has many links; seed 1 also has leaf 2.
-        let mut e = vec![(1, 100), (1, 2), (3, 100)];
-        for i in 200..260 {
-            e.push((i, 100));
-        }
-        let conn = graph(&e);
-        let seeds = [(1, 8.0), (3, 1.0)];
-        let b = bfs_expand(&conn, &seeds, 2).unwrap();
-        let p = ppr(&conn, &seeds, 2).unwrap();
-        // BFS: hub gets 4.0 (same as leaf). PPR: far-away 2-hop nodes (200..) rank below the leaf.
-        assert!((b[&100] - b[&2]).abs() < 1e-6);
-        assert!(p[&200] < p[&2]);
-    }
-
-    #[test]
-    fn ppr_ignores_self_loops_and_handles_isolated_seed() {
-        let conn = graph(&[(1, 1)]);
-        let p = ppr(&conn, &[(1, 3.0)], 2).unwrap();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[&1], 3.0);
-        assert!(ppr(&conn, &[], 2).unwrap().is_empty());
     }
 }

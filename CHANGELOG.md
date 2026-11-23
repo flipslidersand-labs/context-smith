@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `index.db` no longer stores `symbols.line` and `symbols.snippet` (nothing read them, and they made the DB much larger). `EXTRACT_VERSION` is 11 (was 10): an existing index is rebuilt in full on the next `index` (the old `symbols` table is recreated), so re-index once after upgrading.
 
+### Removed
+- `CONTEXTSMITH_EXPAND=ppr` (personalized PageRank, experimental) is removed after the bench rejected it (ADR-005); the value is now rejected as unknown like any other. `bfs-capped` (default) and `bfs` are unchanged (#533).
+
 ### Fixed
+- `bfs-capped` expansion no longer lets already-scored neighbours (e.g. the seed) use up a parent's K=10 slots at depth 2, which dropped real neighbours; scores and ranking can change, bench re-measure is tracked in #591 (#529).
 - A file holding only whitespace is no longer bundled: `select` now treats it as empty (it used to come back as a match with `used_tokens: 1`), also when it sits next to files with content. With `remote-embed`, vector seeds go through the same readable / non-blank filter as BM25 seeds, and a whitespace-only BM25 hit no longer rides along with a vector hit (#564).
 - Files of unknown language (e.g. a `data.json` imported from TS/JS) no longer get dependency edges, so they no longer use up the `bfs-capped` per-file neighbour slots or inflate degrees ahead of real neighbours; dependencies are rebuilt on the next `index` run (#530).
 - `index` on a repo with no commits now fails with a short "has no commits yet" message instead of git2's raw `UnbornBranch` error, and `recent_diff` returns an empty string there as documented (#565).

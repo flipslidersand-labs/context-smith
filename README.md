@@ -109,7 +109,7 @@ contextsmith query --repo . --task "auth error" --format md --explain
 | `--index <PATH>` | `{repo}/.contextsmith/index.db` | Index path override |
 | `--no-embed` | off | Disable semantic (embedding) seeds even when the index has them; BM25 only (no effect unless built with the `remote-embed` feature) |
 
-Environment: `CONTEXTSMITH_EXPAND` = `bfs-capped` (default: cap 10 neighbours per file, low-degree first) / `bfs` (previous plain BFS) / `ppr` (personalized PageRank ranking, experimental) selects how dependency scores are spread.
+Environment: `CONTEXTSMITH_EXPAND` = `bfs-capped` (default: cap 10 neighbours per file, low-degree first) / `bfs` (previous plain BFS) selects how dependency scores are spread.
 
 The JSON output is `{ task, budget, used_tokens, files: [{ path, score, tokens, truncated }] }`. `truncated` is `true` when the file was cut to fit the remaining budget.
 
