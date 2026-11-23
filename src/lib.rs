@@ -140,8 +140,16 @@ pub(crate) fn read_within_root(canonical_root: &Path, path: &Path) -> std::io::R
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-/// True if `real` (canonical, inside `canonical_root`) is a stage-0 entry in the
-/// repo's index. Fails closed on any error.
+/// True if `rel` has an entry at any stage (0 = normal, 1-3 = unresolved merge
+/// conflict) in `idx`. A conflicted file has no stage-0 entry but is still
+/// tracked by git, so it must count; a file removed with `git rm --cached` has
+/// no entry at any stage and does not (#563, #395).
+pub(crate) fn in_git_index(idx: &git2::Index, rel: &Path) -> bool {
+    (0..=3).any(|stage| idx.get_path(rel, stage).is_some())
+}
+
+/// True if `real` (canonical, inside `canonical_root`) is an entry (any stage,
+/// see [`in_git_index`]) in the repo's index. Fails closed on any error.
 fn is_tracked_in_index(
     canonical_root: &Path,
     real: &Path,
@@ -162,7 +170,7 @@ fn is_tracked_in_index(
                 .ok()
         })
         .as_ref()
-        .is_some_and(|idx| idx.get_path(Path::new(rel), 0).is_some())
+        .is_some_and(|idx| in_git_index(idx, Path::new(rel)))
 }
 
 /// True if `path` or any ancestor below the repo root is a symlink. Walks up,
@@ -338,11 +346,11 @@ impl GitRepo {
     }
 
     /// Like [`GitRepo::read_tracked`], but additionally refuses a path that is
-    /// not a stage-0 entry in `index`, so a path taken from an untrusted
+    /// not an entry (any stage, see [`in_git_index`]) in `index`, so a path taken from an untrusted
     /// index.db cannot expose untracked files such as `.env` (#395). Uncommitted
     /// edits to tracked files are still readable.
     pub(crate) fn read_indexed(&self, index: &git2::Index, rel: &Path) -> std::io::Result<String> {
-        if index.get_path(rel, 0).is_none() {
+        if !in_git_index(index, rel) {
             return Err(std::io::Error::other(PathEscape));
         }
         self.read_tracked(rel)

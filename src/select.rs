@@ -304,7 +304,7 @@ fn select_inner(
     // an empty success that looks like "no match" (#286).
     if candidates.is_empty() && !unreadable.is_empty() {
         anyhow::bail!(
-            "matching files could not be read ({}); re-run `contextsmith index` to refresh the index",
+            "matching files could not be read ({}); see the \"warn: skip\" lines above. Re-running `contextsmith index` helps only if these files changed since indexing.",
             unreadable
                 .iter()
                 .map(|p| escape_control(p))
