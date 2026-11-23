@@ -4,7 +4,7 @@
 
 ### 実装内容
 
-- `src/git_walker.rs` — `git2::Repository` でファイル一覧を取得
+- `src/lib.rs` の `GitRepo` — `git2::Repository` でファイル一覧を取得(分割予定: #547)
 - HEAD ツリーを walk して `.rs` / `.py` / `.go` のパスと blob SHA を収集
 - `git2::Diff` で直近 N コミットの差分を取得
 
@@ -22,7 +22,7 @@ contextsmith index --repo ./project
 
 ### 実装内容
 
-- `src/symbol_extractor.rs` — `tree-sitter` で各ファイルを解析
+- `src/lib.rs` の `SymbolExtractor` — `tree-sitter` で各ファイルを解析(分割予定: #548)
 - Rust: `fn`, `struct`, `impl`, `use` を抽出
 - Python: `def`, `class`, `import` を抽出
 - 抽出したシンボルを SQLite の `symbols` テーブルに保存
