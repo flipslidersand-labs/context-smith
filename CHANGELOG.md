@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The scan now checks that the file it opens is the file it validated (dev/ino, and the resolved path on Linux), so swapping a path for a symlink between the check and the open can no longer read files outside the repo. On Unix other than Linux, a directory swapped before the check's own lstat is still not detected (#543).
 - `ctx-select.sh` now refuses a cache root that is owned by another user or writable by group/others, and `SKILL.md` tells callers to single-quote the task text so shell metacharacters in copied issue text are not executed (#542).
 - Opening `index.db` now sets `trusted_schema=OFF` and DEFENSIVE, and refuses a DB that holds a trigger, a view, or a known table name that is not a table, asking to delete and re-index (#541).
+- Files over 4 MiB (`MAX_FILE_BYTES`) are no longer read: the file stays findable by path, its content is not indexed, and a warning is printed. At most 10,000 symbols (`MAX_SYMBOLS_PER_FILE`) are kept per file. Both limits are provisional. `EXTRACT_VERSION` is now 10, so an existing index is rebuilt on the next `index` run (#567).
 
 ### Fixed
 - `CONTEXTSMITH_EXPAND` set to an empty value is now treated as unset instead of failing `select`, and an invalid value is reported even when the search has no hits (previously it was hidden behind "No matching files") (#531).
