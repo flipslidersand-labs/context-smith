@@ -45,6 +45,8 @@ check "network.py ranks first" "$(printf '%s\n' "$out2" | sed -n '2p' | awk '{pr
 "$sel" --top abc "$repo" invoice >/dev/null 2>&1; check "non-numeric --top -> exit 2" "$?" 2
 "$sel" --top -1 "$repo" invoice >/dev/null 2>&1; check "negative --top -> exit 2" "$?" 2
 "$sel" --budget 1x "$repo" invoice >/dev/null 2>&1; check "non-numeric --budget -> exit 2" "$?" 2
+"$sel" --budget 0 "$repo" invoice >"$tmp/b0.out" 2>&1; check "--budget 0 -> exit 2" "$?" 2
+check "--budget 0 is rejected as a usage error, not a query failure" "$(grep -c 'must be a positive integer' "$tmp/b0.out"; grep -c 'query failed' "$tmp/b0.out")" "$(printf '1\n0')"
 
 printf '#!/bin/sh\necho "contextsmith 0.4.0"\n' > "$tmp/old"; chmod +x "$tmp/old"
 CONTEXTSMITH_BIN=$tmp/old "$sel" "$repo" invoice >/dev/null 2>&1; check "old version -> exit 3" "$?" 3

@@ -23,7 +23,8 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-case $budget in ''|*[!0-9]*) die 2 "--budget must be a non-negative integer (got: $budget)" ;; esac
+case $budget in ''|*[!0-9]*) die 2 "--budget must be a positive integer (got: $budget)" ;; esac
+case $budget in *[!0]*) ;; *) die 2 "--budget must be a positive integer (got: $budget)" ;; esac  # all zeros
 case $top in ''|*[!0-9]*) die 2 "--top must be a non-negative integer (got: $top)" ;; esac
 [ $# -ge 2 ] || die 2 "usage: ctx-select.sh [--budget N] [--top N] <repo> <task words...>"
 repo_arg=$1; shift
