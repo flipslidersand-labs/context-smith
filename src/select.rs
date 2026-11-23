@@ -112,12 +112,7 @@ fn build_seeds(
                 Err(e) => return (bm25, SeedMode::FallbackBm25(e.to_string())),
             };
             if let Some(embedder) = embedder {
-                // Vector seeds go through the same readable / non-blank filter as BM25 (#564).
-                let usable =
-                    |id: i64| matches!(classify_seed(repo, git_index, conn, id), Ok(Seed::Usable));
-                match crate::embed::fuse_seeds_with_status(
-                    conn, &embedder, task, &bm25, seed_count, &usable,
-                ) {
+                match fuse_filtered(repo, git_index, conn, &embedder, task, &bm25, seed_count) {
                     Ok((seeds, fused)) => {
                         let mode = if fused {
                             SeedMode::Fused
@@ -134,6 +129,36 @@ fn build_seeds(
     #[cfg(not(feature = "remote-embed"))]
     let _ = (repo, git_index, conn, task, no_embed, seed_count);
     (bm25, SeedMode::Bm25)
+}
+
+/// RRF-fuse BM25 seeds with vector seeds. Vector seeds go through the same readable / non-blank
+/// filter as BM25 (#564), and whitespace-only BM25 hits (which `readable_bm25` passes through
+/// when nothing readable exists) are kept out of the fusion so they cannot ride along with a
+/// real vector hit. When fusion does not run or leaves nothing, `bm25` is returned unchanged
+/// so the caller still reports "all matches are empty".
+#[cfg(feature = "remote-embed")]
+fn fuse_filtered(
+    repo: &GitRepo,
+    git_index: &git2::Index,
+    conn: &rusqlite::Connection,
+    embedder: &dyn crate::embed::Embedder,
+    task: &str,
+    bm25: &[(i64, f32)],
+    seed_count: usize,
+) -> anyhow::Result<(Vec<(i64, f32)>, bool)> {
+    let class = |id: i64| classify_seed(repo, git_index, conn, id);
+    let usable = |id: i64| matches!(class(id), Ok(Seed::Usable));
+    let lexical: Vec<(i64, f32)> = bm25
+        .iter()
+        .copied()
+        .filter(|&(id, _)| !matches!(class(id), Ok(Seed::Blank)))
+        .collect();
+    let (seeds, fused) =
+        crate::embed::fuse_seeds_with_status(conn, embedder, task, &lexical, seed_count, &usable)?;
+    if !fused || seeds.is_empty() {
+        return Ok((bm25.to_vec(), fused));
+    }
+    Ok((seeds, fused))
 }
 
 /// Run the selection pipeline for a task: BM25 (optionally RRF-fused with
@@ -418,4 +443,107 @@ fn dedup_by_real_path(repo: &GitRepo, candidates: Vec<Candidate>) -> Vec<Candida
         })
         .map(|(_, c)| c)
         .collect()
+}
+
+#[cfg(all(test, feature = "remote-embed"))]
+mod fused_tests {
+    use super::*;
+    use crate::embed::{vec_to_blob, EmbedMode, Embedder};
+    use crate::index_builder::build_index;
+    use std::path::Path;
+
+    struct Fixed(Vec<f32>);
+    impl Embedder for Fixed {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| self.0.clone()).collect())
+        }
+    }
+
+    fn setup(files: &[(&str, &str)]) -> (tempfile::TempDir, GitRepo, IndexDb) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = git2::Repository::init(&dir).unwrap();
+        let sig = git2::Signature::now("t", "t@t.com").unwrap();
+        let mut index = git.index().unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+            index.add_path(Path::new(name)).unwrap();
+        }
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let repo = GitRepo::new(&dir).unwrap();
+        let db = IndexDb::open(&tmp.path().join("index.db")).unwrap();
+        build_index(&repo, &db, false).unwrap();
+        (tmp, repo, db)
+    }
+
+    fn id_of(db: &IndexDb, path: &str) -> i64 {
+        db.connection()
+            .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn store_vector(db: &IndexDb, path: &str, v: &[f32]) {
+        db.connection()
+            .execute(
+                "INSERT INTO embeddings (file_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![id_of(db, path), vec_to_blob(v)],
+            )
+            .unwrap();
+    }
+
+    /// #564: BM25 only hits a whitespace-only file while the vector side has a real file; the
+    /// blank file must not ride along into the fused seeds.
+    #[test]
+    fn fused_seeds_exclude_whitespace_only_bm25_hit() {
+        let (_t, repo, db) = setup(&[
+            ("frobnicator.py", "\n   \n\t\n"),
+            ("real.py", "def unrelated(): pass\n"),
+        ]);
+        store_vector(&db, "frobnicator.py", &[0.0, 1.0]);
+        store_vector(&db, "real.py", &[1.0, 0.0]);
+        let git_index = repo.open_index().unwrap();
+        let mut skipped = Vec::new();
+        let bm25 = readable_bm25(&repo, &git_index, &db, "frobnicator", 5, &mut skipped).unwrap();
+        assert_eq!(bm25.len(), 1, "BM25 hits only the blank file");
+
+        let (seeds, fused) = fuse_filtered(
+            &repo,
+            &git_index,
+            db.connection(),
+            &Fixed(vec![1.0, 0.0]),
+            "frobnicator",
+            &bm25,
+            5,
+        )
+        .unwrap();
+        assert!(fused);
+        let ids: Vec<i64> = seeds.iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids, vec![id_of(&db, "real.py")]);
+    }
+
+    /// With nothing usable on either side the BM25 hits are returned so the caller reports
+    /// "all matches are empty" rather than "No matching files found".
+    #[test]
+    fn fused_seeds_fall_back_to_bm25_when_all_blank() {
+        let (_t, repo, db) = setup(&[("frobnicator.py", "\n  \n")]);
+        store_vector(&db, "frobnicator.py", &[1.0, 0.0]);
+        let git_index = repo.open_index().unwrap();
+        let mut skipped = Vec::new();
+        let bm25 = readable_bm25(&repo, &git_index, &db, "frobnicator", 5, &mut skipped).unwrap();
+        let (seeds, _) = fuse_filtered(
+            &repo,
+            &git_index,
+            db.connection(),
+            &Fixed(vec![1.0, 0.0]),
+            "frobnicator",
+            &bm25,
+            5,
+        )
+        .unwrap();
+        assert_eq!(seeds, bm25);
+    }
 }
