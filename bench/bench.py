@@ -24,10 +24,10 @@ Two metrics for `cs` (kw/rnd only ever include whole files, so they are unaffect
 """
 import json, os, random, re, shutil, sqlite3, subprocess, sys, time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 from metrics import budget_coverage, file_prf
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ["REPO"]  # a dedicated clone: this script runs `git checkout -f` and writes .contextsmith/ in it
 CS = os.path.abspath(os.environ.get("CSBIN", os.path.join(HERE, "..", "target", "release", "contextsmith")))
 BUDGETS = (4000, 8000, 16000)
@@ -49,10 +49,13 @@ CANDS = os.environ.get("CANDS", os.path.join(HERE, f"cands-{os.path.basename(os.
 cands = json.load(open(CANDS))[:LIMIT]
 if not MODE.endswith("title") and not all("body" in c for c in cands):
     sys.exit("this candidate file has no issue bodies: use TASKMODE=title, or refetch with fetch_cands.py --with-body")
-res = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
-cost = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
-f1s = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}  # file F1: returned set vs gold
-cov = {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}  # share of gold tokens inside the bundle
+def per_budget_method():
+    return {b: {m: [] for m in ("cs", "kw", "rnd")} for b in BUDGETS}
+
+
+res, cost = per_budget_method(), per_budget_method()
+f1s = per_budget_method()  # file F1: returned set vs gold
+cov = per_budget_method()  # share of gold tokens inside the bundle
 errs, skipped, t0, corpus = 0, 0, time.time(), []
 
 for c in cands:
@@ -76,23 +79,20 @@ for c in cands:
     corpus.append(sum(est(s) for s in files.values()))
     base = c["title"] if MODE.endswith("title") else (c["title"] + "\n" + c["body"]).strip()
     task = base
+    low = {}  # lowercased file contents, read once and shared by the rare-word filter and the kw score
+    for p in files:
+        try:
+            low[p] = open(f"{REPO}/{p}", encoding="utf-8", errors="ignore").read().lower()
+        except OSError:
+            low[p] = ""
     if MODE.startswith("rare"):  # keep the K rarest task words (by # files containing them), K=8
-        low = {}
-        for p in files:
-            try:
-                low[p] = open(f"{REPO}/{p}", encoding="utf-8", errors="ignore").read().lower()
-            except OSError:
-                low[p] = ""
         ws = sorted({w for w in re.findall(r"[a-z_][a-z0-9_]{2,}", base.lower())})
         df = {w: sum(1 for t in low.values() if w in t) for w in ws}
         task = " ".join(sorted((w for w in ws if df[w] > 0), key=lambda w: df[w])[:8]) or base
     words = {w for w in re.findall(r"[a-z_][a-z0-9_]{2,}", task.lower())}
     score = {}
     for p in files:
-        try:
-            txt = open(f"{REPO}/{p}", encoding="utf-8", errors="ignore").read().lower()
-        except OSError:
-            txt = ""
+        txt = low[p]
         score[p] = sum(1 for w in words if w in txt) + 3 * sum(1 for w in words if w in p.lower())
     for b in BUDGETS:
         q = run(CS, "query", "--repo", REPO, "--task", task, "--format", "json", "--budget", str(b))
