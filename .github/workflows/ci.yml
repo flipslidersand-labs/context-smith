@@ -50,7 +50,7 @@ jobs:
   # reusable は feature 切替を渡せないため、system SQLite 構成だけローカルに残す
   test-no-default:
     name: test (no-default-features / system SQLite)
-    # 公開リポ: repo-compass ADR-010 の標準形 (既定値なし)。変数は ubuntu-latest (GitHub-hosted) で固定
+    # 公開リポ: org の runner 方針の標準形 (既定値なし)。変数は ubuntu-latest (GitHub-hosted) で固定
     runs-on: ${{ vars.GATE_RUNNER }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -76,7 +76,7 @@ jobs:
 
   adapter:
     name: adapter (Claude Code skill)
-    # 公開リポ: repo-compass ADR-010 の標準形。変数は ubuntu-latest (GitHub-hosted) で固定
+    # 公開リポ: org の runner 方針の標準形。変数は ubuntu-latest (GitHub-hosted) で固定
     runs-on: ${{ vars.GATE_RUNNER }}
     # rust の完了を待たない: adapter は自前で release ビルドするので依存は無い (#197)
     steps:
