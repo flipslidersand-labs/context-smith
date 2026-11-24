@@ -302,6 +302,17 @@ impl GitRepo {
         &self.root
     }
 
+    /// Fail with the "no commits yet" error if HEAD is unborn, before anything is
+    /// created. Other `HEAD` failures are left for the scan to report.
+    pub fn ensure_has_commits(&self) -> Result<()> {
+        match git2::Repository::open(&self.root).and_then(|r| r.head().map(|_| ())) {
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+                Err(unborn_head_error(&self.root))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The canonicalized repository root (symlinks resolved).
     pub fn canonical_root(&self) -> &Path {
         &self.canonical_root
@@ -449,10 +460,9 @@ impl GitRepo {
             .with_context(|| format!("Failed to open git repo at {:?}", self.root))?;
         let head = match repo.head() {
             Ok(h) => h.peel_to_tree()?,
-            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => anyhow::bail!(
-                "'{}' has no commits yet (HEAD is unborn); make a first commit before indexing",
-                path_kind::escape_control(&self.root.to_string_lossy())
-            ),
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+                return Err(unborn_head_error(&self.root))
+            }
             Err(e) => return Err(e.into()),
         };
         let mut acc = ScanAcc {
@@ -484,11 +494,7 @@ impl GitRepo {
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => {
                     if depth >= acc.max_depth {
-                        eprintln!(
-                            "warn: {}: directory nesting deeper than {}, subtree skipped",
-                            String::from_utf8_lossy(&full),
-                            acc.max_depth
-                        );
+                        eprintln!("{}", too_deep_warning(&full, acc.max_depth));
                         acc.too_deep += 1;
                         continue;
                     }
@@ -676,12 +682,36 @@ impl SymbolExtractor {
 /// nests well below this.
 const MAX_WALK_DEPTH: usize = 500;
 
+/// The "no commits yet" error. The root is a directory name, so control
+/// characters are escaped before it reaches a terminal (#566).
+fn unborn_head_error(root: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "'{}' has no commits yet (HEAD is unborn); make a first commit before indexing",
+        path_kind::escape_control(&root.to_string_lossy())
+    )
+}
+
+/// `path` is a name from the scanned repo, so control characters are escaped
+/// before it reaches a terminal (#566).
+fn truncation_warning(path: &Path) -> String {
+    format!(
+        "warn: {}: nesting deeper than {MAX_WALK_DEPTH}, deeper nodes skipped",
+        path_kind::escape_control(&path.to_string_lossy())
+    )
+}
+
+/// `path` is a raw directory path from the scanned repo (maybe not UTF-8), so
+/// control characters are escaped before it reaches a terminal (#599).
+fn too_deep_warning(path: &[u8], max_depth: usize) -> String {
+    format!(
+        "warn: {}: directory nesting deeper than {max_depth}, subtree skipped",
+        path_kind::escape_control(&String::from_utf8_lossy(path))
+    )
+}
+
 fn warn_if_truncated(path: &Path, truncated: bool) {
     if truncated {
-        eprintln!(
-            "warn: {}: nesting deeper than {MAX_WALK_DEPTH}, deeper nodes skipped",
-            path.display()
-        );
+        eprintln!("{}", truncation_warning(path));
     }
 }
 
@@ -1329,6 +1359,34 @@ mod tests {
         let acc = repo.scan_limited(10).unwrap();
         assert_eq!(acc.results.len(), 10);
         assert_eq!(acc.too_deep, 0);
+    }
+
+    /// #599: a path from the scanned repo must not reach stderr with raw control
+    /// characters (ESC, BEL), even in the nesting-depth warning.
+    #[test]
+    fn truncation_warning_escapes_control_characters_in_the_path() {
+        let msg = truncation_warning(Path::new("d\u{1b}[2J/a\u{7}b.rs"));
+        assert!(!msg.chars().any(path_kind::is_ctrl), "{msg:?}");
+        assert!(msg.contains("d\\x1b[2J/a\\x07b.rs"), "{msg:?}");
+        assert!(msg.contains("nesting deeper than"), "{msg:?}");
+    }
+
+    /// #599: the scan's nesting-depth warning names a repo directory, so its
+    /// control characters must be escaped too.
+    #[test]
+    fn too_deep_warning_escapes_control_characters_in_the_path() {
+        let msg = too_deep_warning(b"d\x1b[2J/a\x07b", 256);
+        assert!(!msg.chars().any(path_kind::is_ctrl), "{msg:?}");
+        assert!(msg.contains("d\\x1b[2J/a\\x07b"), "{msg:?}");
+        assert!(msg.contains("directory nesting deeper than 256"), "{msg:?}");
+    }
+
+    #[test]
+    fn unborn_head_error_escapes_control_characters_in_the_root() {
+        let msg = unborn_head_error(Path::new("/r\u{1b}]0;x\u{7}")).to_string();
+        assert!(!msg.chars().any(path_kind::is_ctrl), "{msg:?}");
+        assert!(msg.contains("/r\\x1b]0;x\\x07"), "{msg:?}");
+        assert!(msg.contains("has no commits yet"), "{msg:?}");
     }
 
     #[test]
