@@ -216,3 +216,43 @@ fn unborn_head_error_does_not_print_raw_control_characters_from_the_repo_path() 
     assert!(!err.contains('\u{1b}') && !err.contains('\u{7}'), "{err:?}");
     assert!(err.contains("\\x1b"), "{err:?}");
 }
+
+/// #599: the scan's "directory nesting deeper than ..." warning names a repo
+/// directory; a control character in its name must not reach stderr raw.
+#[cfg(unix)]
+#[test]
+fn nesting_depth_warning_does_not_print_raw_control_characters_from_a_repo_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Build the commit through the object database (no 300-level working tree).
+    let g = git2::Repository::init(tmp.path()).unwrap();
+    let blob = g.blob(b"pub fn a() {}\n").unwrap();
+    let mut child: Option<git2::Oid> = None;
+    for _ in 0..300 {
+        let mut tb = g.treebuilder(None).unwrap();
+        tb.insert("f.rs", blob, 0o100644).unwrap();
+        if let Some(c) = child {
+            tb.insert("n", c, 0o040000).unwrap();
+        }
+        child = Some(tb.write().unwrap());
+    }
+    let mut top = g.treebuilder(None).unwrap();
+    top.insert("lib.rs", blob, 0o100644).unwrap();
+    top.insert("\u{1b}[2Jz", child.unwrap(), 0o040000).unwrap();
+    let tree = g.find_tree(top.write().unwrap()).unwrap();
+    let sig = git2::Signature::now("t", "t@example.com").unwrap();
+    g.commit(Some("HEAD"), &sig, &sig, "deep", &tree, &[])
+        .unwrap();
+
+    let db = tmp.path().join("out/index.db");
+    let out = bin(&[
+        "index",
+        "--repo",
+        tmp.path().to_str().unwrap(),
+        "--out",
+        db.to_str().unwrap(),
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("directory nesting deeper than"), "{err:?}");
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(err.contains("\\x1b[2Jz/"), "{err:?}");
+}

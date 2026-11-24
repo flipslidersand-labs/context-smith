@@ -494,11 +494,7 @@ impl GitRepo {
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => {
                     if depth >= acc.max_depth {
-                        eprintln!(
-                            "warn: {}: directory nesting deeper than {}, subtree skipped",
-                            String::from_utf8_lossy(&full),
-                            acc.max_depth
-                        );
+                        eprintln!("{}", too_deep_warning(&full, acc.max_depth));
                         acc.too_deep += 1;
                         continue;
                     }
@@ -701,6 +697,15 @@ fn truncation_warning(path: &Path) -> String {
     format!(
         "warn: {}: nesting deeper than {MAX_WALK_DEPTH}, deeper nodes skipped",
         path_kind::escape_control(&path.to_string_lossy())
+    )
+}
+
+/// `path` is a raw directory path from the scanned repo (maybe not UTF-8), so
+/// control characters are escaped before it reaches a terminal (#599).
+fn too_deep_warning(path: &[u8], max_depth: usize) -> String {
+    format!(
+        "warn: {}: directory nesting deeper than {max_depth}, subtree skipped",
+        path_kind::escape_control(&String::from_utf8_lossy(path))
     )
 }
 
@@ -1364,6 +1369,16 @@ mod tests {
         assert!(!msg.chars().any(path_kind::is_ctrl), "{msg:?}");
         assert!(msg.contains("d\\x1b[2J/a\\x07b.rs"), "{msg:?}");
         assert!(msg.contains("nesting deeper than"), "{msg:?}");
+    }
+
+    /// #599: the scan's nesting-depth warning names a repo directory, so its
+    /// control characters must be escaped too.
+    #[test]
+    fn too_deep_warning_escapes_control_characters_in_the_path() {
+        let msg = too_deep_warning(b"d\x1b[2J/a\x07b", 256);
+        assert!(!msg.chars().any(path_kind::is_ctrl), "{msg:?}");
+        assert!(msg.contains("d\\x1b[2J/a\\x07b"), "{msg:?}");
+        assert!(msg.contains("directory nesting deeper than 256"), "{msg:?}");
     }
 
     #[test]
