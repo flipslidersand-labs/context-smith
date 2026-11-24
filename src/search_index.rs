@@ -114,7 +114,7 @@ const MAX_TOP_N: usize = 1000;
 pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(i64, f32)>> {
     let sanitized = sanitize_fts_query(query);
     // Guard: an empty MATCH expression is a SQLite FTS5 syntax error.
-    if sanitized.trim().is_empty() {
+    if sanitized.is_empty() {
         bail!(
             "task string is empty or contains only punctuation — please provide at least one word"
         );

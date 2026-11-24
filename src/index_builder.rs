@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::dep_builder;
-use crate::{GitRepo, Language, Symbol, SymbolExtractor};
+use crate::{GitRepo, Language, Symbol, SymbolExtractor, SymbolKind};
 
 /// Message shown when the index DB is locked by another process.
 pub(crate) fn locked_message(path: &Path, detail: &str) -> String {
@@ -507,7 +507,6 @@ impl IndexDb {
 
     /// Read a `meta` value on any connection.
     pub(crate) fn get_meta_on(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
-        use rusqlite::OptionalExtension;
         Ok(conn
             .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
                 r.get(0)
@@ -579,7 +578,7 @@ impl IndexDb {
         // (id, name) of non-import symbols, in insertion order, for fts_symbols.
         let mut fts_syms: Vec<(i64, String)> = Vec::new();
         for (name, kind, _line) in raw_syms {
-            let is_import = kind.as_str() == "import";
+            let is_import = kind == SymbolKind::Import;
             let sym = Symbol {
                 file_id,
                 name,

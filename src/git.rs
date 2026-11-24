@@ -411,7 +411,7 @@ impl GitRepo {
     /// unreadable in the working tree gets an `unreadable:`-prefixed sha so it is
     /// never treated as unchanged.
     #[cfg(test)]
-    pub(crate) fn scan(&self) -> Result<Vec<(PathBuf, Language, String, i64)>> {
+    pub(crate) fn scan(&self) -> Result<Vec<ScanEntry>> {
         Ok(self.scan_with_skipped()?.0)
     }
 
