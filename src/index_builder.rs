@@ -515,19 +515,99 @@ impl IndexDb {
             .optional()?)
     }
 
+    /// Delete a file's symbol rows and their `fts_symbols` rows (the latter
+    /// are keyed by `symbols.id`, so they must go first).
+    fn delete_symbol_rows(&self, file_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
+            params![file_id],
+        )?;
+        self.delete_symbols_for(file_id)
+    }
+
     /// Delete everything derived from a file's content (symbols, symbol/body
     /// FTS, deps, embeddings) but keep its files row and path FTS row.
     fn delete_content_records(&self, file_id: i64) -> Result<()> {
+        self.delete_symbol_rows(file_id)?;
         for sql in [
-            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
             "DELETE FROM fts_body    WHERE rowid = ?1",
-            "DELETE FROM symbols     WHERE file_id = ?1",
             "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
             "DELETE FROM embeddings WHERE file_id = ?1",
         ] {
             self.conn.execute(sql, params![file_id])?;
         }
         Ok(())
+    }
+
+    /// Content cannot be indexed (non-UTF-8, too large): drop the
+    /// content-derived rows but keep the files row and a path FTS row so the
+    /// file stays findable by name (#308). `indexed_sha` is reset to NULL so a
+    /// later restore to the same blob, or the next run, re-indexes it (#448).
+    fn drop_content_keep_path(&self, file_id: i64, rel_path: &Path) -> Result<()> {
+        self.delete_content_records(file_id)?;
+        self.conn.execute(
+            "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
+            params![file_id],
+        )?;
+        self.replace_fts_path(file_id, &rel_path.to_string_lossy())
+    }
+
+    /// Rewrite a file's symbols and symbol/path/body FTS rows from `source`,
+    /// then stamp `indexed_sha`. Deps are resolved afterwards for all files
+    /// (pass 2) and embeddings are left to the embedding pass. Returns the
+    /// number of symbols stored.
+    fn reindex_file_content(
+        &self,
+        file_id: i64,
+        rel_path: &Path,
+        lang: Language,
+        source: &str,
+        abs_path: &Path,
+    ) -> Result<usize> {
+        self.delete_symbol_rows(file_id)?;
+
+        let mut raw_syms = SymbolExtractor::extract(rel_path, source, lang)?;
+        if raw_syms.len() > MAX_SYMBOLS_PER_FILE {
+            eprintln!(
+                "warn: {:?} has {} symbols; keeping the first {MAX_SYMBOLS_PER_FILE}",
+                abs_path,
+                raw_syms.len()
+            );
+            raw_syms = cap_symbols(raw_syms, MAX_SYMBOLS_PER_FILE);
+        }
+        let symbols_total = raw_syms.len();
+        // (id, name) of non-import symbols, in insertion order, for fts_symbols.
+        let mut fts_syms: Vec<(i64, String)> = Vec::new();
+        for (name, kind, _line) in raw_syms {
+            let is_import = kind.as_str() == "import";
+            let sym = Symbol {
+                file_id,
+                name,
+                kind,
+            };
+            let sym_id = self.insert_symbol(&sym)?;
+            if !is_import {
+                fts_syms.push((sym_id, sym.name));
+            }
+        }
+
+        self.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+        for (sym_id, name) in fts_syms {
+            self.conn.execute(
+                "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
+                params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
+            )?;
+        }
+
+        self.conn
+            .execute("DELETE FROM fts_body WHERE rowid = ?1", params![file_id])?;
+        self.conn.execute(
+            "INSERT INTO fts_body (rowid, file_id, content) VALUES (?1, ?1, ?2)",
+            params![file_id, truncate_fts_body(source)],
+        )?;
+
+        self.mark_indexed(file_id)?;
+        Ok(symbols_total)
     }
 
     /// Replace the path FTS row for a file with the tokenized `rel_path`.
@@ -698,34 +778,21 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         let abs_path = repo.root().join(rel_path);
         let source = match repo.read_tracked(rel_path) {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                // Content is not UTF-8: drop stale symbol/body/dep/embedding
-                // rows (#286) but keep the files row and a path FTS row so
-                // the file stays findable by name (#308). indexed_sha is
-                // reset to NULL so a later restore to the same blob is
-                // re-indexed instead of skipped (#448).
-                eprintln!("warn: unreadable content {:?}: {e}", abs_path);
-                db.delete_content_records(file_id)?;
-                db.connection().execute(
-                    "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
-                    params![file_id],
-                )?;
-                db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
-                file_paths.remove(&file_id);
-                stats.files_skipped += 1;
-                continue;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
-                // Same handling as non-UTF-8 content: keep the files row
-                // and path FTS so the file stays findable by name, drop
-                // content-derived rows, and retry on the next run (#567).
-                eprintln!("warn: skipping content of {:?}: {e}", abs_path);
-                db.delete_content_records(file_id)?;
-                db.connection().execute(
-                    "UPDATE files SET indexed_sha = NULL WHERE id = ?1",
-                    params![file_id],
-                )?;
-                db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::FileTooLarge
+                ) =>
+            {
+                // Non-UTF-8 content (#286, #308, #448) or a file over the size
+                // cap (#567): keep the files row and path FTS, drop the
+                // content-derived rows, retry on the next run.
+                if e.kind() == std::io::ErrorKind::InvalidData {
+                    eprintln!("warn: unreadable content {:?}: {e}", abs_path);
+                } else {
+                    eprintln!("warn: skipping content of {:?}: {e}", abs_path);
+                }
+                db.drop_content_keep_path(file_id, rel_path)?;
                 file_paths.remove(&file_id);
                 stats.files_skipped += 1;
                 continue;
@@ -742,60 +809,8 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
             }
         };
 
-        // (a) Clear stale symbol rows (fts_symbols rows are keyed by
-        // symbols.id, so they must go first).
-        db.connection().execute(
-            "DELETE FROM fts_symbols WHERE rowid IN (SELECT id FROM symbols WHERE file_id = ?1)",
-            params![file_id],
-        )?;
-        db.delete_symbols_for(file_id)?;
-
-        // (b) Extract and insert new symbols.
-        let mut raw_syms = SymbolExtractor::extract(rel_path, &source, *lang)?;
-        if raw_syms.len() > MAX_SYMBOLS_PER_FILE {
-            eprintln!(
-                "warn: {:?} has {} symbols; keeping the first {MAX_SYMBOLS_PER_FILE}",
-                abs_path,
-                raw_syms.len()
-            );
-            raw_syms = cap_symbols(raw_syms, MAX_SYMBOLS_PER_FILE);
-        }
-        // (id, name) of non-import symbols, in insertion order, for fts_symbols.
-        let mut fts_syms: Vec<(i64, String)> = Vec::new();
-        for (name, kind, _line) in raw_syms {
-            let is_import = kind.as_str() == "import";
-            let sym = Symbol {
-                file_id,
-                name,
-                kind,
-            };
-            let sym_id = db.insert_symbol(&sym)?;
-            if !is_import {
-                fts_syms.push((sym_id, sym.name));
-            }
-            stats.symbols_total += 1;
-        }
-
-        // (c) Replace FTS rows for this file.
-        db.replace_fts_path(file_id, &rel_path.to_string_lossy())?;
-
-        for (sym_id, name) in fts_syms {
-            db.connection().execute(
-                "INSERT INTO fts_symbols (rowid, file_id, name) VALUES (?1, ?2, ?3)",
-                params![sym_id, file_id, crate::tokenizer::tokenize_code(&name)],
-            )?;
-        }
-
-        db.connection()
-            .execute("DELETE FROM fts_body WHERE rowid = ?1", params![file_id])?;
-        let truncated = truncate_fts_body(&source);
-        db.connection().execute(
-            "INSERT INTO fts_body (rowid, file_id, content) VALUES (?1, ?1, ?2)",
-            params![file_id, truncated],
-        )?;
-
-        // (d) Stamp indexed_sha so this file is skipped next time.
-        db.mark_indexed(file_id)?;
+        stats.symbols_total +=
+            db.reindex_file_content(file_id, rel_path, *lang, &source, &abs_path)?;
         stats.files_indexed += 1;
     }
     // --- Pass 2: resolve imports → deps table, in the same transaction so
