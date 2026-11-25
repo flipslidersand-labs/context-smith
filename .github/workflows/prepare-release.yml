@@ -1,7 +1,7 @@
 name: Prepare release
 
 # release policy: the only human step is merging the release PR.
-#  - push to main      : release-please opens/updates a release PR as a draft (merge-queue only
+#  - push to master    : release-please opens/updates a release PR as a draft (merge-queue only
 #                        picks up ready PRs). It bumps Cargo.toml / Cargo.lock and CHANGELOG.md.
 #  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
 #                        Release, then `publish` uploads the crate to crates.io with trusted
@@ -17,7 +17,7 @@ name: Prepare release
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 permissions: {}
