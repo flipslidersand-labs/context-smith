@@ -752,6 +752,11 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         }
     }
 
+    // Content comes only from paths in the git index: a path still in HEAD but
+    // dropped from the index (`git rm --cached`) is untracked, and its working-tree
+    // text must not be copied into a database that may be shared (#619).
+    let git_index = repo.open_index()?;
+
     // --- Pass 1: upsert files + incremental symbol / FTS update ---
     for (rel_path, lang, blob_sha, size) in &files {
         stats.files_total += 1;
@@ -775,7 +780,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         }
 
         let abs_path = repo.root().join(rel_path);
-        let source = match repo.read_tracked(rel_path) {
+        let source = match repo.read_indexed(&git_index, rel_path) {
             Ok(s) => s,
             Err(e)
                 if matches!(
@@ -1653,6 +1658,50 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols WHERE name='b'"), 0);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_path"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
+    }
+
+    /// `git rm --cached`: drop `rel` from the git index only; HEAD and the working
+    /// tree are left alone.
+    fn untrack_from_index(root: &std::path::Path, rel: &str) {
+        let r = git2::Repository::open(root).unwrap();
+        let mut idx = r.index().unwrap();
+        idx.remove_path(std::path::Path::new(rel)).unwrap();
+        idx.write().unwrap();
+    }
+
+    #[test]
+    fn build_index_does_not_store_body_of_file_removed_from_git_index() {
+        let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        untrack_from_index(tmp.path(), "b.rs");
+        // Still in HEAD, no longer tracked: content written now must not reach index.db.
+        std::fs::write(
+            tmp.path().join("b.rs"),
+            "fn b() { let t = \"SECRETTOKENXYZ\"; }\n",
+        )
+        .unwrap();
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_body WHERE content LIKE '%SECRETTOKENXYZ%'"
+            ),
+            0
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols WHERE name='b'"), 0);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM files"), 1);
+    }
+
+    #[test]
+    fn build_index_drops_rows_of_file_later_removed_from_git_index() {
+        let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols WHERE name='b'"), 1);
+        untrack_from_index(tmp.path(), "b.rs");
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols WHERE name='b'"), 0);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 1);
     }
 
