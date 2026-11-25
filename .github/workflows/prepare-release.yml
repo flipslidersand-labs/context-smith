@@ -1,6 +1,6 @@
 name: Prepare release
 
-# release policy: the only human step is merging the release PR.
+# release policy: the only human step is marking the release PR ready and merging it.
 #  - push to master    : release-please opens/updates a release PR as a draft (merge-queue only
 #                        picks up ready PRs). It bumps Cargo.toml / Cargo.lock only: CHANGELOG.md
 #                        is hand-written (Keep a Changelog) and release-please would insert its
@@ -76,6 +76,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          token: ${{ steps.app.outputs.token }}
           persist-credentials: false
       - name: Roll ## [Unreleased] into the new version
         env:
@@ -84,14 +85,24 @@ jobs:
           BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
         run: |
           ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ -n "$ver" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
           python3 - "$ver" "$(date -u +%F)" <<'PY'
-          import sys
+          import re, sys
           ver, day = sys.argv[1:3]
           p = "CHANGELOG.md"
           s = open(p, encoding="utf-8").read()
           if f"## [{ver}]" in s or "## [Unreleased]\n" not in s:
               sys.exit(0)  # already rolled, or no Unreleased heading: leave as is
           s = s.replace("## [Unreleased]\n", f"## [Unreleased]\n\n## [{ver}] - {day}\n", 1)
+          # Link references: point [Unreleased] at the new tag and add [ver] from the old one.
+          m = re.search(r"^\[Unreleased\]: (\S+)/compare/v(\S+?)\.\.\.HEAD$", s, re.M)
+          if m:
+              base, prev = m.groups()
+              s = s.replace(
+                  m.group(0),
+                  f"[Unreleased]: {base}/compare/v{ver}...HEAD\n[{ver}]: {base}/compare/v{prev}...v{ver}",
+                  1,
+              )
           open(p, "w", encoding="utf-8").write(s)
           PY
           if git diff --quiet -- CHANGELOG.md; then echo "nothing to roll"; exit 0; fi
