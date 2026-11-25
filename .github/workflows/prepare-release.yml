@@ -2,7 +2,10 @@ name: Prepare release
 
 # release policy: the only human step is merging the release PR.
 #  - push to master    : release-please opens/updates a release PR as a draft (merge-queue only
-#                        picks up ready PRs). It bumps Cargo.toml / Cargo.lock and CHANGELOG.md.
+#                        picks up ready PRs). It bumps Cargo.toml / Cargo.lock only: CHANGELOG.md
+#                        is hand-written (Keep a Changelog) and release-please would insert its
+#                        section above `## [Unreleased]`, duplicating it, so skip-changelog is on.
+#                        Rename `## [Unreleased]` to the new version in the release PR.
 #  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
 #                        Release, then `publish` uploads the crate to crates.io with trusted
 #                        publishing (OIDC, no long-lived token).
