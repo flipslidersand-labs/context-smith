@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `remote-embed`, plain `http://` to a non-loopback `EMBEDDING_SVC_URL` is now refused (embeddings are skipped and BM25 is used, with the reason shown) unless `EMBEDDING_ALLOW_INSECURE=1`; the variable now allows the send instead of silencing a warning (#540).
 
 ### Security
+- `index` no longer reads a file that is in `HEAD` but not in the git index (`git rm --cached`): its working-tree text is not copied into `index.db`, and rows kept from an earlier run are dropped on the next `index` (#619).
 - A new `index.db` (e.g. from `index --out`) is now created with mode 0600 on Unix instead of following the umask, since it holds file contents; the mode of an existing `index.db` is left unchanged (#569).
 - The scan now checks that the file it opens is the file it validated (dev/ino, and the resolved path on Linux), so swapping a path for a symlink between the check and the open can no longer read files outside the repo. On Unix other than Linux, a directory swapped before the check's own lstat is still not detected (#543).
 - `ctx-select.sh` now refuses a cache root that is owned by another user or writable by group/others, and `SKILL.md` tells callers to single-quote the task text so shell metacharacters in copied issue text are not executed (#542).

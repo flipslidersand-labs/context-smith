@@ -385,8 +385,10 @@ fn conflicted_file_is_selected() {
     assert!(hit.content.contains("<<<<<<<"), "{}", hit.content);
 }
 
-/// #563 / #395: a file removed from the git index (`git rm --cached`) is still
-/// refused, and the error must not point at re-indexing as the only fix.
+/// #563 / #395: a file removed from the git index (`git rm --cached`) after the
+/// index was built is still refused at select time, and the error must not point
+/// at re-indexing as the only fix. (Building the index *after* the removal never
+/// stores the file at all: #619, see `index_builder` tests.)
 #[test]
 fn rm_cached_file_is_refused_with_accurate_message() {
     let tmp = tempfile::tempdir().unwrap();
@@ -396,9 +398,9 @@ fn rm_cached_file_is_refused_with_accurate_message() {
     std::fs::write(dir.join("lib.rs"), "pub fn alpha_unique() {}\n").unwrap();
     git(&dir, &["add", "lib.rs"]);
     git(&dir, &["commit", "-q", "-m", "init"]);
-    git(&dir, &["rm", "-q", "--cached", "lib.rs"]);
 
     let (repo, db) = index_dir(tmp.path(), &dir);
+    git(&dir, &["rm", "-q", "--cached", "lib.rs"]);
     let e = select_candidates(&repo, &db, "alpha_unique", &opts()).unwrap_err();
     let m = e.to_string();
     assert!(m.contains("could not be read (lib.rs)"), "{m}");

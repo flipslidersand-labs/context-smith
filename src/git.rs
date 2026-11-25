@@ -491,7 +491,18 @@ impl GitRepo {
                         .and_then(|odb| odb.read_header(entry.id()))
                         .map(|(size, _)| size as i64)
                         .unwrap_or(0);
-                    if lang != Language::Unknown {
+                    if lang != Language::Unknown
+                        && !is_tracked_in_index(
+                            &self.canonical_root,
+                            &self.canonical_root.join(&rel),
+                            index,
+                        )
+                    {
+                        // In HEAD but not in the git index (`git rm --cached`): never hash
+                        // or read the working-tree file. The sentinel makes the build step
+                        // re-check, be refused, and drop any rows kept from before (#619).
+                        sha = format!("unreadable:{sha}");
+                    } else if lang != Language::Unknown {
                         match read_bytes_within_root_with(
                             &self.canonical_root,
                             &self.root.join(&rel),
