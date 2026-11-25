@@ -5,7 +5,8 @@ name: Prepare release
 #                        picks up ready PRs). It bumps Cargo.toml / Cargo.lock only: CHANGELOG.md
 #                        is hand-written (Keep a Changelog) and release-please would insert its
 #                        section above `## [Unreleased]`, duplicating it, so skip-changelog is on.
-#                        Rename `## [Unreleased]` to the new version in the release PR.
+#                        The `changelog` job then renames `## [Unreleased]` to the new version on
+#                        the release PR branch (a failure there does not block `publish`).
 #  - release PR merged : release-please creates the tag (v<version>) and a published GitHub
 #                        Release, then `publish` uploads the crate to crates.io with trusted
 #                        publishing (OIDC, no long-lived token).
@@ -37,6 +38,8 @@ jobs:
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
+      prs_created: ${{ steps.rp.outputs.prs_created }}
+      pr: ${{ steps.rp.outputs.pr }}
     steps:
       - name: GitHub App token
         id: app
@@ -55,6 +58,46 @@ jobs:
           token: ${{ steps.app.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  changelog:
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true'
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: GitHub App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          persist-credentials: false
+      - name: Roll ## [Unreleased] into the new version
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          python3 - "$ver" "$(date -u +%F)" <<'PY'
+          import sys
+          ver, day = sys.argv[1:3]
+          p = "CHANGELOG.md"
+          s = open(p, encoding="utf-8").read()
+          if f"## [{ver}]" in s or "## [Unreleased]\n" not in s:
+              sys.exit(0)  # already rolled, or no Unreleased heading: leave as is
+          s = s.replace("## [Unreleased]\n", f"## [Unreleased]\n\n## [{ver}] - {day}\n", 1)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+          if git diff --quiet -- CHANGELOG.md; then echo "nothing to roll"; exit 0; fi
+          git -c user.name="release-bot" -c user.email="release-bot@users.noreply.github.com" \
+            commit -m "chore: roll CHANGELOG [Unreleased] into ${ver}" CHANGELOG.md
+          git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"
 
   publish:
     needs: release-please
