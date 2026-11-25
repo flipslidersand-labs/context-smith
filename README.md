@@ -209,9 +209,13 @@ cargo fmt --all --check
 
 ### Release flow
 
-1. Bump `version` in `Cargo.toml` and update [CHANGELOG.md](./CHANGELOG.md).
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Publish: `cargo publish` (requires a crates.io token via `cargo login`; the account email must be verified).
+Releases are cut by [`prepare-release.yml`](./.github/workflows/prepare-release.yml) (release-please). Merging the release PR is the only manual step.
+
+1. Merge PRs to `master` with [Conventional Commits](https://www.conventionalcommits.org/) titles, and add a line under `## [Unreleased]` in [CHANGELOG.md](./CHANGELOG.md) for each user-visible change.
+2. release-please keeps a draft release PR open that bumps `version` in `Cargo.toml` and `Cargo.lock` (`feat` is a minor bump, `fix` a patch bump; while the version is 0.x a breaking change (`feat!` / `BREAKING CHANGE:`) is also a minor bump, not 1.0.0). The workflow renames `## [Unreleased]` to the new version on that PR's branch.
+3. Mark the release PR ready and merge it. The workflow tags `vX.Y.Z`, publishes the GitHub Release and runs `cargo publish --locked` through crates.io trusted publishing (no stored token).
+
+`0.6.0` is tagged and published by hand, and the workflow needs a GitHub App and a crates.io trusted publisher first (see [#611](https://github.com/flipslidersand-labs/context-smith/issues/611)–[#613](https://github.com/flipslidersand-labs/context-smith/issues/613)). Not yet run end to end ([#614](https://github.com/flipslidersand-labs/context-smith/issues/614)).
 
 See [CHANGELOG.md](./CHANGELOG.md) for release history.
 
