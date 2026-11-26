@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CONTEXTSMITH_EXPAND=ppr` (personalized PageRank, experimental) is removed after the bench rejected it (ADR-005); the value is now rejected as unknown like any other. `bfs-capped` (default) and `bfs` are unchanged (#533).
 
 ### Fixed
+- Re-running `select` over an existing bundle now writes each file via a temp file and `rename`, so a failed write (e.g. disk full) no longer destroys the previous `task.md` / `relevant-code/*.md` / `citations.json`, and an existing file keeps its permissions instead of being widened to the umask default (#617).
 - `index` in a repo with no commits no longer leaves an empty `index.db` (or the `--out` parent directory) behind; `query` now says "Index not found" instead of "No matching files found" (#586).
 - `bfs-capped` expansion no longer lets already-scored neighbours (e.g. the seed) use up a parent's K=10 slots at depth 2, which dropped real neighbours; scores and ranking can change, bench re-measure is tracked in #591 (#529).
 - A file holding only whitespace is no longer bundled: `select` now treats it as empty (it used to come back as a match with `used_tokens: 1`), also when it sits next to files with content. With `remote-embed`, vector seeds go through the same readable / non-blank filter as BM25 seeds, and a whitespace-only BM25 hit no longer rides along with a vector hit (#564).

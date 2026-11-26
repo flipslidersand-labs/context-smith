@@ -398,26 +398,44 @@ fn bail_if_symlink(meta: &std::fs::Metadata, shown: &Path, hint: &str) -> Result
 
 /// Write `contents` to `path`, refusing if `path` is a symlink (dangling or not).
 ///
-/// An existing regular file is removed first and the new one is opened with `create_new`
-/// (`O_EXCL`), which fails instead of following a link swapped in after the check.
+/// The contents go to a sibling temp file (opened with `create_new`, i.e. `O_EXCL`, so a
+/// link planted at the temp name is never followed), which is then renamed over `path`.
+/// `rename` replaces a link at `path` instead of following it, and a failed write (disk
+/// full, ...) leaves the previous file intact. An existing file's permissions are kept.
 /// Remaining limitations: a concurrent attacker can still win a race on the parent
 /// directory, and hard links are not detected (both need a local writer).
 fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        bail_if_symlink(&meta, path, "")?;
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+    let existing = match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            bail_if_symlink(&meta, path, "")?;
+            Some(meta)
         }
+        Err(_) => None,
+    };
+    let name = path
+        .file_name()
+        .context("bundle output path has no file name")?
+        .to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        if let Some(meta) = &existing {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    f.write_all(contents.as_bytes())?;
-    Ok(())
+    result
 }
 
 /// Written bundle summary.
@@ -857,6 +875,32 @@ mod tests {
         std::fs::write(&p, "old old old").unwrap();
         write_file_no_symlink(&p, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_no_symlink_keeps_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("task.md");
+        std::fs::write(&p, "old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_file_no_symlink(&p, "new").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must not widen permissions (#617)");
+    }
+
+    #[test]
+    fn write_file_no_symlink_leaves_no_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("f.txt");
+        write_file_no_symlink(&p, "one").unwrap();
+        write_file_no_symlink(&p, "two").unwrap();
+        let names: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["f.txt".to_string()], "temp file left behind");
     }
 
     #[test]
