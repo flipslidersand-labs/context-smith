@@ -1670,6 +1670,108 @@ mod tests {
         idx.write().unwrap();
     }
 
+    /// Length `truncate_fts_body` must return for `s`, computed without
+    /// `is_char_boundary`: the longest whole-char prefix of at most the cap.
+    fn expected_cut_len(s: &str) -> usize {
+        s.char_indices()
+            .map(|(i, c)| i + c.len_utf8())
+            .take_while(|&end| end <= FTS_BODY_MAX_BYTES)
+            .last()
+            .unwrap_or(0)
+    }
+
+    fn assert_truncated_to(s: &str, expected_len: usize) {
+        let out = truncate_fts_body(s);
+        assert_eq!(out.len(), expected_len);
+        assert!(out.len() <= FTS_BODY_MAX_BYTES);
+        assert!(s.starts_with(out));
+        assert!(s.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn truncate_fts_body_keeps_ascii_of_exactly_the_cap() {
+        let s = "a".repeat(FTS_BODY_MAX_BYTES);
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES);
+    }
+
+    #[test]
+    fn truncate_fts_body_cuts_ascii_one_byte_over_the_cap() {
+        let s = "a".repeat(FTS_BODY_MAX_BYTES + 1);
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES);
+    }
+
+    #[test]
+    fn truncate_fts_body_keeps_short_and_empty_input() {
+        assert_eq!(truncate_fts_body(""), "");
+        assert_eq!(truncate_fts_body("日本語"), "日本語");
+    }
+
+    #[test]
+    fn truncate_fts_body_backs_up_when_multibyte_char_straddles_the_cap() {
+        // A run of `ch` starting at byte `start`, long enough to pass the cap.
+        // Every start offset around the cap is covered, so the cut lands on
+        // each possible position inside the char (and on both boundaries).
+        for ch in ['é', '日', '😀'] {
+            let w = ch.len_utf8();
+            for start in (FTS_BODY_MAX_BYTES - w)..=(FTS_BODY_MAX_BYTES + 1) {
+                let mut s = "a".repeat(start);
+                s.push_str(&ch.to_string().repeat(3));
+                assert_truncated_to(&s, expected_cut_len(&s));
+            }
+        }
+        // The 3-byte char starting 1 / 2 bytes before the cap loses 1 / 2 bytes of it.
+        let mut s = "a".repeat(FTS_BODY_MAX_BYTES - 1);
+        s.push('日');
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES - 1);
+        let mut s = "a".repeat(FTS_BODY_MAX_BYTES - 2);
+        s.push('日');
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES - 2);
+        // The 4-byte char starting 1 / 2 / 3 bytes before the cap loses 1 / 2 / 3 bytes.
+        for back in 1..=3 {
+            let mut s = "a".repeat(FTS_BODY_MAX_BYTES - back);
+            s.push('😀');
+            assert_truncated_to(&s, FTS_BODY_MAX_BYTES - back);
+        }
+    }
+
+    #[test]
+    fn truncate_fts_body_handles_text_made_only_of_multibyte_chars() {
+        // 512 KiB is not a multiple of 3, so the cut always falls inside a '日'.
+        assert_ne!(FTS_BODY_MAX_BYTES % 3, 0);
+        let s = "日".repeat(FTS_BODY_MAX_BYTES / 3 + 2);
+        assert!(s.len() > FTS_BODY_MAX_BYTES);
+        let expected = expected_cut_len(&s);
+        assert_eq!(expected, FTS_BODY_MAX_BYTES / 3 * 3);
+        assert_truncated_to(&s, expected);
+
+        let s = "😀".repeat(FTS_BODY_MAX_BYTES / 4 + 2);
+        assert_truncated_to(&s, expected_cut_len(&s));
+    }
+
+    #[test]
+    fn build_index_truncates_fts_body_of_large_file_at_char_boundary() {
+        // 600 KiB Rust file: one line comment whose '日' straddles the cap.
+        let head = "fn big() {}\n// ";
+        let mut src = String::from(head);
+        src.push_str(&"x".repeat(FTS_BODY_MAX_BYTES - 1 - head.len()));
+        src.push('日');
+        src.push_str(&"y".repeat(600 * 1024 - src.len()));
+        assert!(src.len() > FTS_BODY_MAX_BYTES);
+
+        let (_tmp, repo) = repo_with(&[("big.rs", &src)]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+
+        let body: String = db
+            .connection()
+            .query_row("SELECT content FROM fts_body", [], |r| r.get(0))
+            .unwrap();
+        // '日' starts 1 byte before the cap, so it is dropped whole.
+        assert_eq!(body.len(), FTS_BODY_MAX_BYTES - 1);
+        assert!(src.starts_with(&body));
+        assert!(body.ends_with('x'));
+    }
+
     #[test]
     fn build_index_does_not_store_body_of_file_removed_from_git_index() {
         let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
