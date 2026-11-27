@@ -11,6 +11,9 @@ fn git(dir: &Path, args: &[&str]) {
     let st = Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .expect("run git");
     assert!(st.success(), "git {args:?} failed");
@@ -64,6 +67,9 @@ fn index(repo: &Path, extra: &[&str]) -> Summary {
     let out: Output = Command::new(env!("CARGO_BIN_EXE_contextsmith"))
         .args(["index", "--repo", repo.to_str().unwrap()])
         .args(extra)
+        .env_remove("GIT_DIR")
+        .env_remove("EMBEDDING_SVC_URL")
+        .env_remove("EMBEDDING_API_KEY")
         .output()
         .expect("run contextsmith");
     assert!(
