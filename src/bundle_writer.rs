@@ -1269,8 +1269,11 @@ mod tests {
 
     #[test]
     fn shrink_selection_sets_original_tokens_of_whole_file_it_cuts() {
-        // A file that was whole before gets its size from the cut itself, and a
-        // truncated sibling keeps its inherited value.
+        // A file that was whole before gets its size from the cut itself (b). The
+        // truncated sibling (a) still fits after the shrink, so `allocate` leaves its
+        // original_tokens alone; the `prev.truncated` carry-over is not what the `a`
+        // asserts exercise. That is pinned by
+        // `shrink_selection_keeps_original_tokens_of_already_truncated_file`.
         let sel = vec![
             truncated_cand("src/a.rs", &"a".repeat(400), 5000), // 100 tokens, high score
             cand("src/b.rs", 0.5, &"b".repeat(400)),            // 100 tokens, whole
