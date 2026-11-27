@@ -1744,8 +1744,12 @@ mod tests {
         assert_eq!(expected, FTS_BODY_MAX_BYTES / 3 * 3);
         assert_truncated_to(&s, expected);
 
+        // 512 KiB is a multiple of 4, so 4-byte chars end exactly on the cap.
+        assert_eq!(FTS_BODY_MAX_BYTES % 4, 0);
         let s = "😀".repeat(FTS_BODY_MAX_BYTES / 4 + 2);
-        assert_truncated_to(&s, expected_cut_len(&s));
+        let expected = expected_cut_len(&s);
+        assert_eq!(expected, FTS_BODY_MAX_BYTES);
+        assert_truncated_to(&s, expected);
     }
 
     #[test]
