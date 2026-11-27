@@ -662,6 +662,17 @@ pub fn build_index(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexSta
 }
 
 fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexStats> {
+    build_index_with_scan(repo, db, force, || repo.scan_with_skipped())
+}
+
+/// [`build_index_inner`] with the working-tree scan injected, so a test can
+/// change a file between the scan (which hashes it) and the content read.
+fn build_index_with_scan(
+    repo: &GitRepo,
+    db: &IndexDb,
+    force: bool,
+    scan: impl FnOnce() -> Result<(Vec<crate::git::ScanEntry>, usize)>,
+) -> Result<IndexStats> {
     db.init_schema()?;
 
     // An index built by a different extractor version (or a pre-versioning
@@ -697,7 +708,7 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
         db.reset_indexed_sha()?;
     }
 
-    let (files, path_skipped) = repo.scan_with_skipped()?;
+    let (files, path_skipped) = scan()?;
     let mut stats = IndexStats::default();
     // Non-UTF-8 paths cannot be stored; they count as seen-but-skipped (#308).
     stats.files_total += path_skipped;
@@ -812,6 +823,24 @@ fn build_index_inner(repo: &GitRepo, db: &IndexDb, force: bool) -> Result<IndexS
                 continue;
             }
         };
+
+        // The scan hashed the file earlier; if it changed since, `source` is not
+        // what `blob_sha` describes. Stamping it `indexed_sha` would make every
+        // later run skip the file as up to date, so keep the path row, drop the
+        // content rows and retry next run (#617).
+        let read_sha = git2::Oid::hash_object(git2::ObjectType::Blob, source.as_bytes())
+            .map(|oid| oid.to_string())
+            .ok();
+        if read_sha.as_deref() != Some(blob_sha.as_str()) {
+            eprintln!(
+                "warn: {:?} changed while indexing; retrying next run",
+                abs_path
+            );
+            db.drop_content_keep_path(file_id, rel_path)?;
+            file_paths.remove(&file_id);
+            stats.files_skipped += 1;
+            continue;
+        }
 
         stats.symbols_total +=
             db.reindex_file_content(file_id, rel_path, *lang, &source, &abs_path)?;
@@ -1533,6 +1562,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v, EXTRACT_VERSION.to_string());
+    }
+
+    /// #617: the scan hashes a file, the content is read later. If the file
+    /// changes in between, the new text must not be stored under the old hash.
+    #[test]
+    fn build_index_does_not_stamp_changed_content_with_scanned_hash() {
+        let (tmp, repo) = repo_with(&[("a.rs", "pub fn alpha_fn() {}\n")]);
+        let db = mem_db();
+        let racy = || {
+            let scanned = repo.scan_with_skipped();
+            std::fs::write(tmp.path().join("a.rs"), "pub fn beta_fn() {}\n").unwrap();
+            scanned
+        };
+        build_index_with_scan(&repo, &db, false, racy).unwrap();
+        let (blob_sha, indexed_sha): (String, Option<String>) = db
+            .connection()
+            .query_row("SELECT blob_sha, indexed_sha FROM files", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_ne!(
+            indexed_sha.as_deref(),
+            Some(blob_sha.as_str()),
+            "beta_fn text was recorded as indexed under the alpha_fn hash"
+        );
+
+        // Put the scanned content back: the next run must index it, not skip it
+        // as "already indexed" and leave beta_fn behind.
+        std::fs::write(tmp.path().join("a.rs"), "pub fn alpha_fn() {}\n").unwrap();
+        build_index(&repo, &db, false).unwrap();
+        let names: Vec<String> = db
+            .connection()
+            .prepare("SELECT name FROM symbols ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(names, vec!["alpha_fn".to_string()]);
     }
 
     #[test]
