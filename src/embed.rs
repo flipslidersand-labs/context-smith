@@ -253,6 +253,9 @@ fn populate_embeddings_inner(
 /// consume ~300 MB in a single allocation. The heap keeps peak memory
 /// proportional to `top_n`, not to the total number of stored embeddings.
 ///
+/// Vectors made from an older version of the file (`content_sha` differs from
+/// `files.blob_sha`) are not ranked.
+///
 /// **Upper bound**: `top_n` is capped internally at `SEARCH_VECTORS_MAX` so
 /// callers cannot accidentally request unbounded results. Use
 /// `fuse_seeds`, which sets `top_n * 3`, for higher-recall RRF pre-filtering.
@@ -287,7 +290,15 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
     let effective_n = top_n.min(SEARCH_VECTORS_MAX);
     let mut heap: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(effective_n + 1);
 
-    let mut stmt = conn.prepare("SELECT file_id, vector FROM embeddings")?;
+    // A vector whose `content_sha` differs from the file's current `blob_sha`
+    // was made from older text: leave it out until the next embed replaces it
+    // (#617). A NULL `content_sha` (`--force` marks vectors stale but usable) or
+    // a missing `files` row is not judged.
+    let mut stmt = conn.prepare(
+        "SELECT e.file_id, e.vector
+         FROM embeddings e LEFT JOIN files f ON f.id = e.file_id
+         WHERE e.content_sha IS NULL OR f.id IS NULL OR e.content_sha = f.blob_sha",
+    )?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let fid: i64 = row.get(0)?;
@@ -786,6 +797,45 @@ mod tests {
         .unwrap();
         let hits = search_vectors(&conn, &[1.0, 0.1], 10).unwrap();
         assert_eq!(hits[0].0, 1, "closest vector should rank first");
+    }
+
+    /// #617: a vector made from an older version of the file (its `content_sha`
+    /// differs from the file's current `blob_sha`) must not be ranked. Rows with
+    /// no `content_sha` (marked stale by `--force`, still usable until replaced)
+    /// and rows without a `files` row are not judged here.
+    #[test]
+    fn search_vectors_skips_vector_of_edited_file() {
+        let conn = mem_db();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, lang, blob_sha) VALUES
+                 (1, 'edited.rs', 'rust', 'new'),
+                 (2, 'same.rs', 'rust', 'same'),
+                 (3, 'forced.rs', 'rust', 'x');",
+        )
+        .unwrap();
+        // The stale vector of file 1 is the closest to the query.
+        for (id, v, sha) in [
+            (1i64, [1.0f32, 0.0], Some("old")),
+            (2, [0.8, 0.6], Some("same")),
+            (3, [0.6, 0.8], None),
+            (4, [0.0, 1.0], Some("no-files-row")),
+        ] {
+            conn.execute(
+                "INSERT INTO embeddings (file_id, vector, content_sha) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, vec_to_blob(&v), sha],
+            )
+            .unwrap();
+        }
+        let ids: Vec<i64> = search_vectors(&conn, &[1.0, 0.0], 10)
+            .unwrap()
+            .iter()
+            .map(|h| h.0)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![2, 3, 4],
+            "file 1's vector is from before its edit"
+        );
     }
 
     #[test]
