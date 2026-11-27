@@ -1,0 +1,29 @@
+name: Dependency audit
+
+# advisories / licenses / bans / sources, configured in deny.toml (#620).
+# Not a required check: a new advisory can appear without any change here, so it
+# also runs weekly instead of only when dependency files change.
+on:
+  pull_request:
+    branches: [master]
+    paths: [Cargo.toml, Cargo.lock, deny.toml, .github/workflows/deny.yml]
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    # 公開リポ: org の runner 方針の標準形 (既定値なし)。変数は ubuntu-latest (GitHub-hosted) で固定
+    runs-on: ${{ vars.GATE_RUNNER }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check
+          arguments: --all-features
