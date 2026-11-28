@@ -25,6 +25,38 @@ pub fn escape_control(s: &str) -> String {
     out
 }
 
+/// Replace raw terminal control characters with visible escapes, leaving backslashes alone.
+/// For a whole line of text that may embed an error's `Display` output (a git, I/O or HTTP error
+/// can carry a ref name or a server string). Unlike [`escape_control`] it does not double `\`,
+/// because parts of the line are often already escaped (`{:?}` of a path, `escape_control`), and
+/// escaping those twice would turn `\x1b` into `\\x1b`. Same character set and spelling as
+/// `sanitize_for_terminal` in `src/main.rs` (the bin cannot call a `pub(crate)` item, so the two
+/// are kept in step by hand; keep them identical).
+pub(crate) fn sanitize_for_terminal(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\u{00}'..='\u{1f}' | '\u{7f}'..='\u{9f}' => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            '\u{2028}' | '\u{2029}' => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Print one warning line to stderr with control characters escaped once. Pass the whole line,
+/// prefix included (`warn:`, `warning:`, `semantic:`); nothing is added.
+pub(crate) fn warn(line: &str) {
+    eprintln!("{}", sanitize_for_terminal(line));
+}
+
 /// Score multiplier for test and fixture files (see [`path_score_factor`]).
 pub const TEST_PATH_FACTOR: f32 = 0.5;
 
@@ -72,6 +104,30 @@ pub(crate) fn is_ctrl(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_for_terminal_escapes_every_control_and_keeps_backslashes() {
+        let all: String = ('\u{0}'..='\u{9f}')
+            .filter(|c| c.is_control())
+            .chain(['\u{2028}', '\u{2029}'])
+            .collect();
+        let out = sanitize_for_terminal(&all);
+        assert!(!out.chars().any(is_ctrl), "{out:?}");
+        assert_eq!(
+            sanitize_for_terminal("a\u{1b}[2Jb\u{9b}c\r\nd\u{2028}"),
+            "a\\x1b[2Jb\\x9bc\\r\\nd\\u{2028}"
+        );
+        // Text that is already escaped passes through unchanged (no `\\x1b`).
+        let hostile = "d\u{1b}[2J/a\u{9b}b";
+        let already = escape_control(hostile);
+        assert_eq!(sanitize_for_terminal(&already), already);
+        let dbg = format!("{hostile:?}");
+        assert_eq!(sanitize_for_terminal(&dbg), dbg);
+        assert_eq!(
+            sanitize_for_terminal("plain \u{e9} text"),
+            "plain \u{e9} text"
+        );
+    }
 
     #[test]
     fn escape_control_leaves_plain_and_non_ascii_text() {
