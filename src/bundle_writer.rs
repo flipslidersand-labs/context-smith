@@ -438,6 +438,35 @@ fn write_file_no_symlink(path: &Path, contents: &str) -> Result<()> {
     result
 }
 
+/// Remove `*.md` files in `rc_dir` that this run did not write (leftovers of a previous
+/// run, #192/#218). Regular files and symlinks only, no recursion; `remove_file` deletes
+/// a symlink itself, never its target. Also removes leftover temp files. Runs after all writes so that a failed write
+/// leaves the previous bundle intact instead of an empty directory.
+fn remove_stale_md(
+    rc_dir: &Path,
+    written: &std::collections::HashSet<std::ffi::OsString>,
+) -> Result<()> {
+    let clean_err = |p: &Path| format!("failed to clean {}", p.display());
+    for entry in std::fs::read_dir(rc_dir).with_context(|| clean_err(rc_dir))? {
+        let entry = entry.with_context(|| clean_err(rc_dir))?;
+        let path = entry.path();
+        let ft = entry.file_type().with_context(|| clean_err(&path))?;
+        let name = entry.file_name();
+        let stale_md = (ft.is_file() || ft.is_symlink())
+            && path.extension().is_some_and(|e| e == "md")
+            && !written.contains(&name);
+        // `.<slug>.md.tmp-<pid>` left by a killed run (SIGKILL, power loss): this run's own
+        // temp files are already renamed away or removed. A concurrent run's live temp
+        // file would be removed too, but concurrent runs into one dir are unsupported.
+        let name = name.to_string_lossy();
+        let stale_tmp = ft.is_file() && name.starts_with('.') && name.contains(".md.tmp-");
+        if stale_md || stale_tmp {
+            std::fs::remove_file(&path).with_context(|| clean_err(&path))?;
+        }
+    }
+    Ok(())
+}
+
 /// Written bundle summary.
 #[derive(Debug, Clone, Copy)]
 pub struct BundleStats {
@@ -473,19 +502,10 @@ pub fn write_bundle(
     std::fs::create_dir_all(out_dir)?;
     let rc_dir = out_dir.join("relevant-code");
     // Refuse to follow a symlinked relevant-code/ (never delete outside out_dir).
+    // Stale files from a previous run are removed only after everything is written (see
+    // `remove_stale_md`), so a failed write leaves the previous bundle in place.
     if let Ok(meta) = std::fs::symlink_metadata(&rc_dir) {
         bail_if_symlink(&meta, &rc_dir, "")?;
-        // Remove stale *.md from a previous run (regular files only, no recursion).
-        let clean_err = |p: &Path| format!("failed to clean {}", p.display());
-        for entry in std::fs::read_dir(&rc_dir).with_context(|| clean_err(&rc_dir))? {
-            let entry = entry.with_context(|| clean_err(&rc_dir))?;
-            let path = entry.path();
-            let ft = entry.file_type().with_context(|| clean_err(&path))?;
-            // Symlinked .md: remove_file deletes the link itself, never the target.
-            if (ft.is_file() || ft.is_symlink()) && path.extension().is_some_and(|e| e == "md") {
-                std::fs::remove_file(&path).with_context(|| clean_err(&path))?;
-            }
-        }
     }
     std::fs::create_dir_all(&rc_dir)?;
 
@@ -502,6 +522,8 @@ pub fn write_bundle(
     // relevant-code/{slug}.md per file — track seen slugs to resolve collisions
     let mut slug_counts: HashMap<String, usize> = HashMap::new();
     let mut used_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut written: std::collections::HashSet<std::ffi::OsString> =
+        std::collections::HashSet::new();
     for (c, file_md) in selected.iter().zip(&file_mds) {
         let base_slug = base_slug(&c.path.to_string_lossy());
         // Advance the per-base counter until the (uppercased, case-folded) slug is unused,
@@ -516,7 +538,16 @@ pub fn write_bundle(
             }
         };
 
-        write_file_no_symlink(&rc_dir.join(format!("{slug}.md")), file_md)?;
+        let file_name = format!("{slug}.md");
+        let target = rc_dir.join(&file_name);
+        // A symlinked .md left in relevant-code/ is generated-directory debris (#218):
+        // drop the link itself (never its target) so the new file can take its name.
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+            std::fs::remove_file(&target)
+                .with_context(|| format!("failed to clean {}", target.display()))?;
+        }
+        write_file_no_symlink(&target, file_md)?;
+        written.insert(file_name.into());
     }
 
     // citations.json
@@ -541,6 +572,8 @@ pub fn write_bundle(
     }
     let json = serde_json::to_string_pretty(&citations)?;
     write_file_no_symlink(&out_dir.join("citations.json"), &json)?;
+
+    remove_stale_md(&rc_dir, &written)?;
 
     Ok(BundleStats {
         used,
@@ -750,6 +783,60 @@ mod tests {
             out.join("other.md").exists(),
             "outside relevant-code must remain"
         );
+    }
+
+    #[test]
+    fn write_bundle_failed_write_keeps_previous_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        write_bundle(
+            "t1",
+            1000,
+            &[cand("src/old.rs", 0.9, "old")],
+            "",
+            &out,
+            false,
+        )
+        .unwrap();
+        // A directory at the new file's name makes the rename of the new file fail
+        // (no chmod: CI may run as root).
+        std::fs::create_dir_all(rc.join("src_new_rs.md")).unwrap();
+
+        let r = write_bundle(
+            "t2",
+            1000,
+            &[cand("src/new.rs", 0.9, "new")],
+            "",
+            &out,
+            false,
+        );
+
+        assert!(r.is_err(), "write into a blocked name must fail");
+        assert!(
+            std::fs::read_to_string(rc.join("src_old_rs.md"))
+                .unwrap()
+                .contains("old"),
+            "previous bundle must survive a failed write"
+        );
+    }
+
+    #[test]
+    fn write_bundle_removes_leftover_temp_files_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("bundle");
+        let rc = out.join("relevant-code");
+        std::fs::create_dir_all(&rc).unwrap();
+        std::fs::write(rc.join(".src_old_rs.md.tmp-4242"), "partial").unwrap();
+        std::fs::write(rc.join(".hidden.txt"), "x").unwrap();
+        std::fs::write(rc.join("notes.md.tmp-1"), "x").unwrap();
+
+        write_bundle("t", 1000, &[cand("src/a.rs", 0.9, "a")], "", &out, false).unwrap();
+
+        assert!(!rc.join(".src_old_rs.md.tmp-4242").exists());
+        assert!(rc.join(".hidden.txt").exists(), "other dotfiles remain");
+        assert!(rc.join("notes.md.tmp-1").exists(), "not a dot-temp name");
+        assert!(rc.join("src_a_rs.md").exists());
     }
 
     #[cfg(unix)]
