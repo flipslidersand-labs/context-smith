@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The "has no commits yet" error from `index` no longer prints raw control characters in the repo path; they are shown as `\x1b`-style escapes (#585).
 - The nesting-depth warning (`warn: <path>: nesting deeper than ...`) and the `index` "has no commits yet" check in the CLI now escape control characters in the path too, so a crafted directory name can no longer write raw escape sequences to stderr (#599).
 - Names read from an `index.db` (e.g. a trigger name in the "unexpected schema object" error) no longer reach stderr as raw control characters: `main` now escapes every error message once (`\x1b`-style, backslashes left as they are). `query --format json` now writes DEL, C1 and U+2028/2029 inside strings as `\u009b`-style escapes; the parsed values are unchanged (#648).
+- The `warn:`, `warning:` and `semantic:` lines on stderr that embed an error's text (a git error naming a ref, an unreadable-file error, an embedding-service error) now escape control characters once, like the final error line; paths shown with `{:?}` were already safe (#652).
 
 ### Added
 - `GitRepo::ensure_has_commits` (public) returns the same "has no commits yet" error as `index` for a repo whose HEAD is unborn, so callers can check before creating any output (#599).
@@ -35,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CONTEXTSMITH_EXPAND=ppr` (personalized PageRank, experimental) is removed after the bench rejected it (ADR-005); the value is now rejected as unknown like any other. `bfs-capped` (default) and `bfs` are unchanged (#533).
 
 ### Fixed
+- Japanese (and other CJK) text in a task now matches: unicode61 does not split CJK, so a run such as `修正する`, or an identifier followed by Japanese (`auth_userの修正`), was one unmatched token. The task is split at script boundaries and searched as the run plus its 2-character pairs against a new `fts_cjk` table; tasks without CJK rank exactly as before. The index is rebuilt once (`EXTRACT_VERSION` 12). An older index still answers, with a note to re-run `index` (#631).
 - Re-running `select` over an existing bundle now writes each file via a temp file and `rename`, so a failed write (e.g. disk full) no longer destroys the previous `task.md` / `relevant-code/*.md` / `citations.json`, and an existing file keeps its permissions instead of being widened to the umask default (#617).
 - `index` in a repo with no commits no longer leaves an empty `index.db` (or the `--out` parent directory) behind; `query` now says "Index not found" instead of "No matching files found" (#586).
 - `bfs-capped` expansion no longer lets already-scored neighbours (e.g. the seed) use up a parent's K=10 slots at depth 2, which dropped real neighbours; scores and ranking can change, bench re-measure is tracked in #591 (#529).
@@ -52,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `select_candidates` with `SelectOptions::new(0)` now fails with "budget must be >= 1" (as `seed_count == 0` already did) instead of returning an empty selection; the CLI `--budget` already refused 0 (#629).
 - With `remote-embed`, changing the embedding model (or its vector dimension) no longer deletes the stored vectors before the new model has embedded anything: they are replaced together with the first new batch, so a failing first request (network or auth error) keeps the old semantic index (#644).
 - With `remote-embed`, `query` no longer reports vector fusion when every stored vector is from an older version of its file; it falls back to BM25 and says so (#644).
+- `bench/fetch_cands.py --with-body` now also replaces non-ASCII home-directory names (`/home/josé` used to leak its last character) and Windows `C:\Users\<name>` / `C:/Users/<name>` paths, and keeps the sentence punctuation after a name; a name with a space is still cut at the space (#641).
 
 ## [0.6.0] - 2026-11-23
 

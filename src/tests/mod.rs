@@ -61,12 +61,12 @@ pub fn add(a: i32, b: i32) -> i32 { a + b }
     let syms =
         SymbolExtractor::extract(std::path::Path::new("test.rs"), src, Language::Rust).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"MyStruct"), "expected struct MyStruct");
     assert!(names.contains(&"new"), "expected fn new");
     assert!(names.contains(&"add"), "expected fn add");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(kinds.contains(&&SymbolKind::Import), "expected use import");
     assert!(kinds.contains(&&SymbolKind::Struct));
     assert!(kinds.contains(&&SymbolKind::Function));
@@ -93,12 +93,12 @@ func main() {
     let syms =
         SymbolExtractor::extract(std::path::Path::new("main.go"), src, Language::Go).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"NewPoint"), "expected func NewPoint");
     assert!(names.contains(&"main"), "expected func main");
     assert!(names.contains(&"Point"), "expected type Point");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(kinds.contains(&&SymbolKind::Import));
     assert!(kinds.contains(&&SymbolKind::Function));
 }
@@ -118,7 +118,7 @@ def standalone():
     let syms =
         SymbolExtractor::extract(std::path::Path::new("test.py"), src, Language::Python).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"MyClass"), "expected class MyClass");
     assert!(names.contains(&"method"), "expected def method");
     assert!(names.contains(&"standalone"), "expected def standalone");
@@ -148,7 +148,7 @@ const arrow = (x: number): number => x + 1;
     let syms = SymbolExtractor::extract(std::path::Path::new("svc.ts"), src, Language::TypeScript)
         .unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"User"), "expected interface User");
     assert!(names.contains(&"Id"), "expected type alias Id");
     assert!(names.contains(&"Service"), "expected class Service");
@@ -156,7 +156,7 @@ const arrow = (x: number): number => x + 1;
     assert!(names.contains(&"standalone"), "expected fn standalone");
     assert!(names.contains(&"arrow"), "expected arrow-fn const arrow");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(kinds.contains(&&SymbolKind::Import), "expected es import");
     assert!(kinds.contains(&&SymbolKind::Class));
     assert!(kinds.contains(&&SymbolKind::Struct), "interface -> struct");
@@ -177,13 +177,13 @@ const handler = () => {};
     let syms = SymbolExtractor::extract(std::path::Path::new("app.js"), src, Language::JavaScript)
         .unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"Widget"), "expected class Widget");
     assert!(names.contains(&"render"), "expected method render");
     assert!(names.contains(&"main"), "expected fn main");
     assert!(names.contains(&"handler"), "expected arrow-fn handler");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(
         kinds.contains(&&SymbolKind::Import),
         "expected require import"
@@ -315,12 +315,12 @@ pub type Result<T> = std::result::Result<T, String>;
     let syms =
         SymbolExtractor::extract(std::path::Path::new("test.rs"), src, Language::Rust).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"Color"), "expected enum Color");
     assert!(names.contains(&"Shape"), "expected trait Shape");
     assert!(names.contains(&"Result"), "expected type alias Result");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(
         kinds.contains(&&SymbolKind::Struct),
         "enum/type should be Struct kind"
@@ -353,13 +353,13 @@ end
     let syms =
         SymbolExtractor::extract(std::path::Path::new("parser.rb"), src, Language::Ruby).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"Parser"), "expected class Parser");
     assert!(names.contains(&"Util"), "expected module Util");
     assert!(names.contains(&"initialize"), "expected method initialize");
     assert!(names.contains(&"parse"), "expected method parse");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(
         kinds.contains(&&SymbolKind::Import),
         "expected require as Import"
@@ -421,4 +421,91 @@ fn bm25_path_weight_boosts_matching_filename() {
         auth_score > util_score,
         "auth.rs (path match) should outscore util.rs: {auth_score} vs {util_score}"
     );
+}
+
+/// Query-text string (files, task) -> the `(path, score)` list `search_bm25` returns.
+fn ranked_paths(db: &IndexDb, task: &str) -> Vec<(String, f32)> {
+    use crate::search_index::search_bm25;
+    let conn = db.connection();
+    search_bm25(conn, task, 10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, score)| {
+            let path: String = conn
+                .query_row("SELECT path FROM files WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap();
+            (path, score)
+        })
+        .collect()
+}
+
+/// Corpus with ASCII-only files and files holding Japanese text.
+const MIXED_CORPUS: &[(&str, &str)] = &[
+    (
+        "src/auth.rs",
+        "pub fn authenticate(token: &str) -> bool { true }\n",
+    ),
+    (
+        "src/util.rs",
+        "pub fn helper_authenticate_call() {}\n// auth helper\n",
+    ),
+    (
+        "src/session.rs",
+        "fn start_session() {}\n// 認証エラーを修正する\n// auth session\n",
+    ),
+    (
+        "docs/notes.py",
+        "# メモ\n# 認証の処理を auth_user で確認する。認証エラーを修正する\n",
+    ),
+];
+
+/// #631 characterization: a task without CJK text must rank and score exactly as it did
+/// before CJK support was added, even though the index also holds Japanese text. Expected
+/// values were recorded from the code before the change.
+#[test]
+fn bm25_ascii_task_ranking_is_unchanged_by_cjk_files() {
+    let (_tmp, db) = build_index_for(MIXED_CORPUS);
+    let render = |task: &str| -> Vec<String> {
+        ranked_paths(&db, task)
+            .iter()
+            .map(|(p, s)| format!("{p}={s:.5}"))
+            .collect()
+    };
+    assert_eq!(
+        render("auth authenticate session"),
+        [
+            "src/session.rs=4.50000",
+            "src/auth.rs=3.00000",
+            "src/util.rs=0.00000",
+            "docs/notes.py=0.00000"
+        ]
+    );
+    assert_eq!(
+        render("auth_user helper"),
+        ["src/util.rs=1.50000", "docs/notes.py=0.76715"]
+    );
+}
+
+/// #631: an ASCII identifier followed by Japanese text in the task used to become one token
+/// that matched nothing.
+#[test]
+fn bm25_task_with_identifier_glued_to_japanese_finds_the_identifier() {
+    let (_tmp, db) = build_index_for(&[("src/lib.rs", "fn auth_user() {}\n")]);
+    let got = ranked_paths(&db, "auth_userの修正");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "src/lib.rs");
+}
+
+/// #631: unicode61 keeps a run of kana/han as one token, so only the whole run matched.
+#[test]
+fn bm25_japanese_task_matches_inside_a_japanese_comment() {
+    let (_tmp, db) = build_index_for(&[
+        ("src/lib.rs", "fn a() {}\n// 認証エラーを修正する\n"),
+        ("src/other.rs", "fn b() {}\n"),
+    ]);
+    for task in ["エラー", "修正する", "認証エラーを修正する", "修正"] {
+        let got = ranked_paths(&db, task);
+        let paths: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs"], "task {task:?}");
+    }
 }

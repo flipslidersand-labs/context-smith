@@ -37,6 +37,80 @@ pub fn tokenize_code(name: &str) -> String {
     format!("{} {}", original, parts.join(" "))
 }
 
+/// True for a character FTS5's unicode61 would glue into one long token although it is a
+/// separate word to a reader: kana, han, hangul and half-width kana (#631). Full-width
+/// Latin/digits are deliberately excluded, and nothing is normalized, so ASCII terms (and
+/// the ranking of tasks made of them) are untouched.
+pub(crate) fn is_cjk(c: char) -> bool {
+    c.is_alphanumeric()
+        && matches!(
+            c as u32,
+            0x1100..=0x11FF // hangul jamo
+            | 0x3005..=0x3007 // iteration mark, closing mark, ideographic zero
+            | 0x3040..=0x30FF // hiragana, katakana (includes the long-vowel mark)
+            | 0x3130..=0x318F // hangul compatibility jamo
+            | 0x31F0..=0x31FF // katakana phonetic extensions
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK unified ideographs
+            | 0xAC00..=0xD7AF // hangul syllables
+            | 0xF900..=0xFAFF // CJK compatibility ideographs
+            | 0xFF66..=0xFF9F // half-width katakana
+            | 0x20000..=0x3134F // CJK extensions B and later
+        )
+}
+
+/// Split `s` into maximal runs of CJK / non-CJK characters, in order. The flag is true for
+/// a CJK run. Shared by the query and index sides so they cannot disagree on a run.
+pub(crate) fn split_cjk_runs(s: &str) -> Vec<(bool, &str)> {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    let mut current: Option<bool> = None;
+    for (i, c) in s.char_indices() {
+        let cjk = is_cjk(c);
+        match current {
+            Some(prev) if prev != cjk => {
+                runs.push((prev, &s[start..i]));
+                start = i;
+            }
+            _ => {}
+        }
+        current = Some(cjk);
+    }
+    if let Some(prev) = current {
+        runs.push((prev, &s[start..]));
+    }
+    runs
+}
+
+/// Terms of one CJK run for an FTS5 token stream: the run itself if it is one character,
+/// otherwise every pair of adjacent characters (bigrams).
+pub(crate) fn cjk_grams(run: &str) -> Vec<String> {
+    let chars: Vec<char> = run.chars().collect();
+    match chars.len() {
+        0 => Vec::new(),
+        1 => vec![run.to_string()],
+        _ => chars.windows(2).map(|w| w.iter().collect()).collect(),
+    }
+}
+
+/// Space-joined grams of every CJK run in `body`; empty when `body` has no CJK text.
+/// Stored in `fts_cjk`, which the query side searches with the same [`cjk_grams`].
+pub(crate) fn cjk_index_text(body: &str) -> String {
+    let mut out = String::new();
+    for (cjk, run) in split_cjk_runs(body) {
+        if !cjk {
+            continue;
+        }
+        for g in cjk_grams(run) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&g);
+        }
+    }
+    out
+}
+
 /// Split a camelCase or snake_case identifier into subwords.
 fn split_identifier(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
@@ -78,6 +152,49 @@ fn split_identifier(s: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cjk_ranges() {
+        for c in ['あ', 'ー', 'ア', '々', '修', '한', 'ｱ', 'ﾞ', '\u{20000}'] {
+            assert!(is_cjk(c), "{c:?}");
+        }
+        // full-width Latin/digits, punctuation and ASCII are not CJK
+        for c in [
+            '\u{3099}', 'Ａ', '１', '、', '。', '「', '・', 'a', '1', '_', ' ',
+        ] {
+            assert!(!is_cjk(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn cjk_runs_split_on_script_boundaries() {
+        assert_eq!(
+            split_cjk_runs("auth_userの修正"),
+            [(false, "auth_user"), (true, "の修正")]
+        );
+        assert_eq!(split_cjk_runs("abc"), [(false, "abc")]);
+        assert!(split_cjk_runs("").is_empty());
+    }
+
+    #[test]
+    fn cjk_grams_of_a_run() {
+        assert_eq!(cjk_grams("の"), ["の"]);
+        assert_eq!(cjk_grams("修正"), ["修正"]);
+        assert_eq!(cjk_grams("修正する"), ["修正", "正す", "する"]);
+        assert!(cjk_grams("").is_empty());
+    }
+
+    #[test]
+    fn cjk_index_text_has_grams_of_every_run_and_is_empty_for_ascii() {
+        assert_eq!(
+            cjk_index_text("fn auth_user() {}\n// 認証エラー and 修正"),
+            "認証 証エ エラ ラー 修正"
+        );
+        assert_eq!(cjk_index_text("fn auth_user() {}"), "");
+        assert_eq!(cjk_index_text(""), "");
+        // full-width Latin is not CJK
+        assert_eq!(cjk_index_text("ＡＢＣ"), "");
+    }
 
     #[test]
     fn camel_case() {

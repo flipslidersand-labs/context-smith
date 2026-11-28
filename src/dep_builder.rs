@@ -1,8 +1,7 @@
-use crate::expand::{dedup_seeds, placeholders, CHUNK};
 use crate::Language;
 use anyhow::Result;
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Return true if the file name matches Go generated/test file patterns that
@@ -837,180 +836,10 @@ fn resolve_go_package(
     vec![]
 }
 
-/// BFS-expand from seed files through the deps graph (bidirectional, score decay × 0.5/hop).
-///
-/// # Batch query strategy (#91)
-/// Instead of calling `query_neighbors` once per node (N×2 queries per depth level),
-/// each BFS depth level collects the entire frontier and issues 2 SQL queries
-/// per chunk of `CHUNK` ids (one `IN` for outgoing edges, one `IN` for
-/// incoming edges), i.e. 2 × ceil(frontier / chunk) per level. This keeps round-trips
-/// proportional to frontier/chunk rather than O(frontier), avoiding the N+1 problem of the original per-node approach.
-pub fn bfs_expand(
-    conn: &Connection,
-    seeds: &[(i64, f32)],
-    max_depth: u8,
-) -> Result<HashMap<i64, f32>> {
-    let mut scores = dedup_seeds(seeds);
-
-    // Build the frontier from the deduplicated max scores so duplicate seeds cannot
-    // overwrite each other (last-wins) when collected into a map below. (#274)
-    let mut frontier: Vec<(i64, f32)> = scores.iter().map(|(&id, &s)| (id, s)).collect();
-
-    for _depth in 0..max_depth {
-        if frontier.is_empty() {
-            break;
-        }
-
-        // Collect all node IDs in this frontier for batch IN-clause queries.
-        let ids: Vec<i64> = frontier.iter().map(|&(id, _)| id).collect();
-        let frontier_scores: HashMap<i64, f32> = frontier.iter().copied().collect();
-
-        // Batch-fetch every (parent, neighbour) edge of the frontier in 2 queries per chunk.
-        let edges = query_neighbors_batch(conn, &ids)?;
-
-        // Each neighbour gets the decayed score of its own best parent. (It used to get the
-        // decayed score of the best node in the whole frontier, so every neighbour of any
-        // seed outranked the weaker seeds. #135)
-        let mut best: HashMap<i64, f32> = HashMap::new();
-        for (parent, neighbor) in edges {
-            let decayed = frontier_scores[&parent] * 0.5;
-            let e = best.entry(neighbor).or_insert(f32::NEG_INFINITY);
-            if decayed > *e {
-                *e = decayed;
-            }
-        }
-
-        let mut next_frontier: Vec<(i64, f32)> = Vec::new();
-        for (neighbor_id, decayed) in best {
-            let prev = scores.entry(neighbor_id).or_insert(0.0);
-            if decayed > *prev {
-                *prev = decayed;
-                next_frontier.push((neighbor_id, decayed));
-            }
-        }
-
-        frontier = next_frontier;
-    }
-
-    Ok(scores)
-}
-
-/// Batch-fetch the edges that leave or enter a set of node IDs in 2 SQL queries per
-/// chunk of `CHUNK` ids (one outgoing, one incoming), returned as `(parent, neighbour)` pairs where `parent` is the
-/// node from `ids` and `neighbour` is the node on the other end, never itself in `ids`.
-///
-/// This replaces the per-node `query_neighbors` call, eliminating the N+1 pattern
-/// that issued 2N queries for a frontier of N nodes. (#91) Keeping the parent lets the caller
-/// decay each neighbour from its own parent's score. (#135)
-fn query_neighbors_batch(conn: &Connection, ids: &[i64]) -> Result<Vec<(i64, i64)>> {
-    if ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut edges: HashSet<(i64, i64)> = HashSet::new();
-    // Chunk the ids so each statement stays far below SQLite's bound-variable limit
-    // (32766); the HashSet merges and de-duplicates results across chunks. (#273)
-    for chunk in ids.chunks(CHUNK) {
-        let placeholders = placeholders(chunk.len());
-        // Outgoing: parent → X, then incoming: X → parent.
-        for sql in [
-            format!(
-                "SELECT from_file, to_file FROM deps WHERE from_file IN ({})",
-                placeholders
-            ),
-            format!(
-                "SELECT to_file, from_file FROM deps WHERE to_file IN ({})",
-                placeholders
-            ),
-        ] {
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let params_refs: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-            let rows = stmt.query_map(params_refs.as_slice(), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                edges.insert(row?);
-            }
-        }
-    }
-
-    // Exclude the input ids themselves so the BFS does not re-visit them.
-    let id_set: HashSet<i64> = ids.iter().copied().collect();
-    Ok(edges
-        .into_iter()
-        .filter(|(_, n)| !id_set.contains(n))
-        .collect())
-}
-
-#[cfg(test)]
-mod bfs_tests {
-    use super::*;
-
-    /// In-memory graph with the given `from -> to` import edges.
-    fn graph(edges: &[(i64, i64)]) -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE deps (from_file INTEGER NOT NULL, to_file INTEGER NOT NULL);",
-        )
-        .unwrap();
-        for (a, b) in edges {
-            conn.execute("INSERT INTO deps VALUES (?1, ?2)", [a, b])
-                .unwrap();
-        }
-        conn
-    }
-
-    #[test]
-    fn neighbour_gets_half_of_its_own_parent_score_not_the_best_seed() {
-        // #135: file 3 is only linked to the weak seed 2. It used to get half of the *best*
-        // seed's score (5.0) and outrank real seeds; it must get half of seed 2's (0.5).
-        let conn = graph(&[(2, 3)]);
-        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 1).unwrap();
-        assert!((s[&3] - 0.5).abs() < 1e-6, "got {}", s[&3]);
-        assert!((s[&1] - 10.0).abs() < 1e-6 && (s[&2] - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn incoming_edge_counts_too() {
-        // 3 imports seed 2: the edge is 3 -> 2, so 3 is a neighbour via an incoming edge.
-        let conn = graph(&[(3, 2)]);
-        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 1).unwrap();
-        assert!((s[&3] - 0.5).abs() < 1e-6, "got {}", s[&3]);
-    }
-
-    #[test]
-    fn neighbour_of_two_seeds_takes_the_higher_decayed_score() {
-        let conn = graph(&[(1, 3), (2, 3)]);
-        let s = bfs_expand(&conn, &[(1, 10.0), (2, 4.0)], 1).unwrap();
-        assert!((s[&3] - 5.0).abs() < 1e-6, "got {}", s[&3]);
-    }
-
-    #[test]
-    fn score_halves_again_on_the_second_hop() {
-        let conn = graph(&[(1, 2), (2, 3)]);
-        let s = bfs_expand(&conn, &[(1, 8.0)], 2).unwrap();
-        assert!(
-            (s[&2] - 4.0).abs() < 1e-6 && (s[&3] - 2.0).abs() < 1e-6,
-            "{s:?}"
-        );
-    }
-
-    #[test]
-    fn seeds_linked_to_each_other_keep_their_own_scores() {
-        // Expansion only scores files outside the current frontier; it never rewrites a seed.
-        let conn = graph(&[(1, 2)]);
-        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 2).unwrap();
-        assert!(
-            (s[&1] - 10.0).abs() < 1e-6 && (s[&2] - 1.0).abs() < 1e-6,
-            "{s:?}"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expand::bfs_expand;
 
     fn ids(paths: &[(&str, i64)]) -> HashMap<PathBuf, i64> {
         paths
@@ -2102,48 +1931,6 @@ mod tests {
         assert_eq!(r[&1], 1.0);
         assert_eq!(r[&2], 0.5);
         assert_eq!(r[&3], 0.5);
-    }
-
-    #[test]
-    fn query_neighbors_batch_empty_ids_returns_empty() {
-        let conn = mem_db();
-        insert_edges(&conn, &[(1, 2)]);
-        assert!(query_neighbors_batch(&conn, &[]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn query_neighbors_batch_returns_both_directions_and_excludes_inputs() {
-        let conn = mem_db();
-        insert_edges(&conn, &[(1, 2), (3, 1), (1, 4), (1, 5)]);
-        let mut e = query_neighbors_batch(&conn, &[1, 4]).unwrap();
-        e.sort();
-        // (1,4) is internal to the input set and dropped.
-        assert_eq!(e, vec![(1, 2), (1, 3), (1, 5)]);
-    }
-
-    #[test]
-    fn query_neighbors_batch_handles_ids_over_sqlite_variable_limit() {
-        let conn = mem_db();
-        let n: i64 = 40_000; // > SQLite's 32766 bound-variable limit
-        let tx = conn.unchecked_transaction().unwrap();
-        {
-            let mut stmt = conn
-                .prepare("INSERT INTO deps (from_file, to_file) VALUES (?1, ?2)")
-                .unwrap();
-            for i in 1..=n {
-                if i % 2 == 0 {
-                    stmt.execute([i, 100_000 + i]).unwrap();
-                } else {
-                    stmt.execute([100_000 + i, i]).unwrap();
-                }
-            }
-        }
-        tx.commit().unwrap();
-        let ids: Vec<i64> = (1..=n).collect();
-        let e = query_neighbors_batch(&conn, &ids).unwrap();
-        assert_eq!(e.len(), n as usize);
-        assert!(e.contains(&(n, 100_000 + n)));
-        assert!(e.contains(&(1, 100_001)));
     }
 
     #[test]
