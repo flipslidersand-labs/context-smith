@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A file with an unresolved merge conflict (no stage-0 entry in the git index) is no longer dropped from the bundle as unreadable; it is read from the working tree, conflict markers included. Files removed with `git rm --cached` are still refused. The "could not be read" error no longer says re-running `contextsmith index` fixes it, and points at the `warn: skip` lines instead (#563).
 - Re-running `select` over an existing bundle now deletes the previous `relevant-code/*.md` only after the new files are written, so a failed write (e.g. disk full) no longer leaves a bundle with both the old and the new files missing (#645).
 - `select` now also removes `.<name>.md.tmp-<pid>` temp files that a killed run (SIGKILL, power loss) left in `relevant-code/` (#645).
+- A tracked file replaced by a FIFO between the scan's check and its open no longer makes `index` hang: files are now opened with `O_NONBLOCK` (Unix) and the opened file is then checked to be a regular file (#617).
+- If a file changes between the scan hashing it and `index` reading its text, the text is no longer recorded as indexed under the old hash (which made later runs skip the file); the content rows are dropped and the file is retried on the next `index` (#617).
+- With `remote-embed`, a stored vector made from an older version of a file (its `content_sha` differs from the file's current `blob_sha`) is no longer ranked in semantic search, so a failed re-embed after an edit no longer leaves pre-edit content in the results (#617).
 - `select_candidates` with `SelectOptions::new(0)` now fails with "budget must be >= 1" (as `seed_count == 0` already did) instead of returning an empty selection; the CLI `--budget` already refused 0 (#629).
 
 ## [0.6.0] - 2026-11-23
