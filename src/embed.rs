@@ -463,6 +463,12 @@ pub fn fuse_seeds_with_status(
     // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
     let vec_candidates = top_n.saturating_mul(3);
     let mut vector = search_vectors(conn, &query_vec, vec_candidates)?;
+    // Every stored vector was left out (all from older versions of their files):
+    // no vector ranking took part, so this is BM25 only (#644).
+    if vector.is_empty() && vec_candidates > 0 {
+        eprintln!("warn: no usable stored vector (all are stale); using BM25 seeds only");
+        return Ok((bm25.to_vec(), false));
+    }
     vector.retain(|&(id, _)| usable(id));
     Ok((rrf_fuse(&[bm25, &vector], 60.0, top_n), true))
 }
@@ -1026,6 +1032,34 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// #644: when every stored vector is from an older version of its file, none
+    /// is ranked, so fusion did not happen and must not be reported.
+    #[test]
+    fn fuse_seeds_with_status_not_fused_when_all_vectors_are_stale() {
+        let conn = mem_db();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, lang, blob_sha) VALUES (1, 'a.rs', 'rust', 'new');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO embeddings (file_id, vector, content_sha) VALUES (1, ?1, 'old')",
+            [vec_to_blob(&[1.0, 0.0])],
+        )
+        .unwrap();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let (out, fused) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![1.0, 0.0]),
+            "t",
+            &bm25,
+            10,
+            &|_| true,
+        )
+        .unwrap();
+        assert!(!fused);
+        assert_eq!(out, bm25);
     }
 
     #[test]
