@@ -48,6 +48,7 @@ CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
 -- 2 文字ずつ(1 文字ならそのまま)空白区切りにして格納する。CJK を含まないファイルは行を作らない。
 -- クエリ側は CJK の連続と、その bigram を OR で検索する(tokenizer.rs の cjk_grams を両側で共有)。
 CREATE VIRTUAL TABLE fts_cjk USING fts5(file_id UNINDEXED, content);
+-- fts_cjk の追加で EXTRACT_VERSION が上がるため、既存の索引は次の index で 1 回再構築される。
 
 -- 各テーブルの重みは src/search_index.rs の W_PATH / W_SYMBOLS / W_BODY を参照
 ```

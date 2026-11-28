@@ -137,7 +137,7 @@ contextsmith index          contextsmith build
  ├── fts_path     — FTS5 (トークン化したファイルパス、BM25 weight ×3)
  ├── fts_symbols  — FTS5 (pre-tokenized、シンボル 1 件 1 行、BM25 weight ×0.5)
  ├── fts_body     — FTS5 (ファイル本文、BM25 weight ×1)
-└── fts_cjk      — FTS5 (日本語・中国語・韓国語の 2 文字ずつの組(bigram)のみ、BM25 weight ×1。CJK を含まないファイルは行なし)
+ └── fts_cjk      — FTS5 (日本語・中国語・韓国語の 2 文字ずつの組(bigram)のみ、BM25 weight ×1。CJK を含まないファイルは行なし)
 ```
 
 ### スコアリングパイプライン
