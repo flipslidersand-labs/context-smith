@@ -29,8 +29,25 @@ def is_source(path, lang):
     return bool(re.search(inc, path)) and not re.search(exc, path)
 
 
+# A home-directory prefix followed by one path component. The prefix is /home/ or /Users/ (not
+# anchored, so "/usr/home/x" is also scrubbed: over-scrubbing is the safe side for a privacy
+# filter), or a Windows drive path C:\Users\ / C:/Users/ (any slash run, "Users" in any case).
+# The name is any run of characters up to a path separator or whitespace, so non-ASCII names are
+# covered. Both classes are flat single quantifiers, so matching stays linear on any input.
+# A name with a space ("john smith") is cut at the space: where it ends cannot be told from the text.
+_HOME_RE = re.compile(r"(?P<pre>/(?:home|Users)/|[A-Za-z]:[\\/]+(?i:users)[\\/]+)(?P<name>[^/\\\s]+)")
+_TRAILING_PUNCT = ".,;:!?)]}'\"`>。、，！？）」』】"  # sentence punctuation after a name is not part of it
+
+
 def private_paths_scrubbed(text):  # third-party home directories in issue bodies are not ours to republish
-    return re.sub(r"/(?:home|Users)/[A-Za-z0-9_.-]+", lambda m: m.group(0).rsplit("/", 1)[0] + "/USER", text)
+    def repl(m):
+        name = m.group("name")
+        kept = name.rstrip(_TRAILING_PUNCT)
+        if not kept:  # nothing but punctuation ("/home/."), so there is no name to hide
+            return m.group(0)
+        return m.group("pre") + "USER" + name[len(kept):]
+
+    return _HOME_RE.sub(repl, text)
 
 
 def select(prs, lang, with_body=False):
