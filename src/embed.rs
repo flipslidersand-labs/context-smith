@@ -890,6 +890,38 @@ mod tests {
         }
     }
 
+    /// Ties, NaN rows and the `SEARCH_VECTORS_MAX` cap together: the result is the first
+    /// `top_n` of the non-NaN rows ordered by (score desc, file_id asc).
+    #[test]
+    fn search_vectors_orders_ties_nan_and_cap_like_a_full_sort() {
+        let conn = mem_db();
+        let total = 5_000i64;
+        let tx = conn.unchecked_transaction().unwrap();
+        for id in 1..=total {
+            // Score classes by `id % 4` (class 0 is the best); every third row is NaN.
+            let v = if id % 3 == 0 {
+                [f32::NAN, f32::NAN]
+            } else {
+                [1.0, (id % 4) as f32]
+            };
+            conn.execute(
+                "INSERT INTO embeddings (file_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![id, vec_to_blob(&v)],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let mut want: Vec<i64> = (1..=total).filter(|id| id % 3 != 0).collect();
+        want.sort_by_key(|&id| (id % 4, id));
+        for n in [0usize, 1, 7, 100, 1_000, 3_000, 3_001, usize::MAX] {
+            let got = search_vectors(&conn, &[1.0, 0.0], n).unwrap();
+            let ids: Vec<i64> = got.iter().map(|(id, _)| *id).collect();
+            let take = n.min(SEARCH_VECTORS_MAX).min(want.len());
+            assert_eq!(ids, want[..take], "top_n={n}");
+            assert!(got.windows(2).all(|w| w[0].1 >= w[1].1), "top_n={n}");
+        }
+    }
+
     #[test]
     fn rrf_fuse_nan_k_does_not_panic() {
         let r: Vec<(i64, f32)> = (1..=30).map(|i| (i, 1.0)).collect();
