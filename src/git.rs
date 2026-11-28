@@ -188,6 +188,18 @@ fn read_bytes_within_root_with(
 /// Linux the fd's resolved path (`/proc/self/fd`) must also equal `real`.
 /// Elsewhere this is a plain open (no TOCTOU hardening).
 fn open_verified(real: &Path, checked: &std::fs::Metadata) -> std::io::Result<std::fs::File> {
+    // O_NONBLOCK: if `real` was swapped for a FIFO after `checked` was taken, a
+    // plain open waits for a writer forever. A non-blocking open returns at once
+    // and the `is_file` check below refuses it. It does not affect regular files.
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(real)?
+    };
+    #[cfg(not(unix))]
     let file = std::fs::File::open(real)?;
     #[cfg(unix)]
     {
@@ -617,6 +629,35 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("read blocked on FIFO");
         assert!(res.is_err());
+    }
+
+    /// #617: a regular file swapped for a FIFO between the lstat and the open
+    /// must be refused without blocking (a plain `open(2)` of a FIFO with no
+    /// writer waits forever).
+    #[cfg(unix)]
+    #[test]
+    fn open_verified_refuses_file_swapped_for_fifo_without_blocking() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target = root.join("a.py");
+        std::fs::write(&target, "x = 1\n").unwrap();
+        // The lstat the scan took while `a.py` was still a regular file.
+        let meta = std::fs::symlink_metadata(&target).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        match std::process::Command::new("mkfifo").arg(&target).status() {
+            Ok(st) if st.success() => {}
+            _ => return, // mkfifo unavailable: skip
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = target.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(open_verified(&t, &meta).map(|_| ()));
+        });
+        let res = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("open_verified blocked on a FIFO swapped in after the check");
+        let err = res.unwrap_err();
+        assert!(is_path_escape(&err), "expected PathEscape, got {err}");
     }
 
     /// #543: the file checked by path must be the file actually opened. If the

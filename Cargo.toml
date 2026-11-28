@@ -37,6 +37,11 @@ ureq         = { version = "3", features = ["json"], optional = true }
 zeroize      = { version = "1", optional = true }
 tree-sitter-ruby = "0.23"
 
+# O_NONBLOCK for opening files without blocking on a swapped-in FIFO (already in the
+# tree via git2).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # bundled-sqlite: compile SQLite from source (zero system deps, works everywhere).
 # Disable with --no-default-features if you have libsqlite3-dev installed and want
