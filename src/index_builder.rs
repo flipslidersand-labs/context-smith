@@ -219,10 +219,10 @@ impl IndexDb {
             // A missing file also yields CANTOPEN; retrying immutable would be
             // pointless, so only retry when the file exists.
             Err(e) if is_readonly_error(&e) && path.exists() => {
-                eprintln!(
+                crate::path_kind::warn(&format!(
                     "warning: could not open {} normally ({e:#}); reopening read-only with immutable=1 (no locking)",
                     path.display()
-                );
+                ));
                 Self::open_read_only(path, true).or(Err(e))
             }
             Err(e) => Err(e),
@@ -803,9 +803,15 @@ fn build_index_with_scan(
                 // cap (#567): keep the files row and path FTS, drop the
                 // content-derived rows, retry on the next run.
                 if e.kind() == std::io::ErrorKind::InvalidData {
-                    eprintln!("warn: unreadable content {:?}: {e}", abs_path);
+                    crate::path_kind::warn(&format!(
+                        "warn: unreadable content {:?}: {e}",
+                        abs_path
+                    ));
                 } else {
-                    eprintln!("warn: skipping content of {:?}: {e}", abs_path);
+                    crate::path_kind::warn(&format!(
+                        "warn: skipping content of {:?}: {e}",
+                        abs_path
+                    ));
                 }
                 db.drop_content_keep_path(file_id, rel_path)?;
                 file_paths.remove(&file_id);
@@ -813,7 +819,7 @@ fn build_index_with_scan(
                 continue;
             }
             Err(e) => {
-                eprintln!("warn: skip {:?}: {e}", abs_path);
+                crate::path_kind::warn(&format!("warn: skip {:?}: {e}", abs_path));
                 // Drop stale rows (symbols/FTS/deps/embeddings/files) so
                 // search never returns content we can no longer read; the
                 // file is re-attempted on the next run (#286).

@@ -530,7 +530,7 @@ impl GitRepo {
                                 }
                             }
                             Err(e) if is_path_escape(&e) => {
-                                eprintln!("warn: skip {:?}: {e}", rel);
+                                crate::path_kind::warn(&format!("warn: skip {:?}: {e}", rel));
                                 continue;
                             }
                             // Missing/unreadable in the working tree: HEAD's sha
