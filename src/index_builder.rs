@@ -2255,6 +2255,60 @@ mod tests {
         assert_eq!(cap_symbols(v.clone(), 9), v);
     }
 
+    /// Documented per-file symbol limit (#567), written out so that changing
+    /// `MAX_SYMBOLS_PER_FILE` fails these tests instead of silently following it.
+    const LIMIT: usize = 10_000;
+
+    /// `n` one-line Rust functions `fn f0() {}` .. `fn f{n-1}() {}`.
+    fn rs_with_n_fns(n: usize) -> String {
+        (0..n).fold(String::new(), |mut s, i| {
+            s.push_str(&format!("fn f{i}() {{}}\n"));
+            s
+        })
+    }
+
+    /// #632: more than 10,000 symbols are cut to the first
+    /// 10,000, in both the symbols table and IndexStats.
+    #[test]
+    fn build_index_caps_symbols_of_file_over_limit() {
+        let n = LIMIT + 1;
+        let (_tmp, repo) = repo_with(&[("src/big.rs", &rs_with_n_fns(n))]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+
+        assert_eq!(stats.symbols_total, LIMIT);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols"), LIMIT as i64);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), LIMIT as i64);
+        // The first ones are kept, the overflow one is dropped.
+        let kept = |name: &str| {
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM symbols WHERE name = '{name}'"),
+            )
+        };
+        assert_eq!(kept("f0"), 1);
+        assert_eq!(kept(&format!("f{}", LIMIT - 1)), 1);
+        assert_eq!(kept(&format!("f{LIMIT}")), 0);
+    }
+
+    /// #632: exactly 10,000 symbols is not over the limit; all are kept.
+    #[test]
+    fn build_index_keeps_all_symbols_of_file_at_limit() {
+        let (_tmp, repo) = repo_with(&[("src/full.rs", &rs_with_n_fns(LIMIT))]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+
+        assert_eq!(stats.symbols_total, LIMIT);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols"), LIMIT as i64);
+        assert_eq!(
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM symbols WHERE name = 'f{}'", LIMIT - 1)
+            ),
+            1
+        );
+    }
+
     /// #567: a file that grows past MAX_FILE_BYTES keeps its files / path-FTS
     /// rows but loses every content-derived row, and is retried next run.
     #[test]
