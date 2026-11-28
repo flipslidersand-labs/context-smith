@@ -172,3 +172,41 @@ fn json_output_escapes_c1_and_line_separators_without_changing_the_value() {
         assert_eq!(doc["files"][0]["path"].as_str(), Some(name), "{stdout}");
     }
 }
+
+/// #652: a `warn:` line that embeds an error's Display text (here libgit2's, which carries the
+/// ref name) must be escaped too. C1 (U+009B) is a legal ref-name character; git rejects ESC.
+#[test]
+fn recent_diff_warning_escapes_controls_from_git_errors() {
+    let repo = repo_with_file("a.rs");
+    let d = repo.path();
+    git(d, &["branch", "-m", "main\u{9b}x"]);
+    let work = tempfile::tempdir().unwrap();
+    let db = work.path().join("idx.db");
+    let idx = bin(&[
+        "index",
+        "--repo",
+        d.to_str().unwrap(),
+        "--out",
+        db.to_str().unwrap(),
+    ]);
+    assert!(idx.status.success(), "index: {:?}", idx.stderr);
+    // Corrupt the ref HEAD points at, so recent_diff fails with a libgit2 error naming it.
+    std::fs::write(d.join(".git/refs/heads/main\u{9b}x"), "garbage\n").unwrap();
+    let bundle = work.path().join("o.md");
+    let out = bin(&[
+        "build",
+        "--repo",
+        d.to_str().unwrap(),
+        "--task",
+        "alpha_widget",
+        "--index",
+        db.to_str().unwrap(),
+        "--out",
+        bundle.to_str().unwrap(),
+        "--no-embed",
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("recent_diff failed"), "{err:?}");
+    assert_no_raw_controls(&err.replace('\n', ""));
+    assert!(err.contains("\\x9b"), "{err:?}");
+}

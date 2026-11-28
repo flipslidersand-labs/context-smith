@@ -124,13 +124,13 @@ fn report_selection(seed_mode: &SeedMode, skipped: &[(PathBuf, String)]) {
         SeedMode::NoUsableEmbeddings => {
             eprintln!("semantic: no usable embeddings; using BM25 seeds only")
         }
-        SeedMode::FallbackBm25(e) => {
-            eprintln!("semantic: embedding failed ({e}); falling back to BM25")
-        }
+        SeedMode::FallbackBm25(e) => warn(&format!(
+            "semantic: embedding failed ({e}); falling back to BM25"
+        )),
         _ => {}
     }
     for (abs, e) in skipped {
-        eprintln!("warn: skip {:?}: {e}", abs);
+        warn(&format!("warn: skip {:?}: {e}", abs));
     }
 }
 
@@ -241,7 +241,8 @@ fn resolve_index_output(repo: &GitRepo, out: Option<&str>) -> anyhow::Result<Pat
 /// untrusted `index.db` or repo cannot drive the terminal through an error message. Covers C0,
 /// DEL, C1 and U+2028/2029 (the same set as `escape_control`). Backslashes are left alone: many
 /// messages already hold paths escaped by `escape_control`, and doubling them again would garble
-/// those.
+/// those. The lib has a copy (`path_kind::sanitize_for_terminal`; the bin cannot call a
+/// `pub(crate)` item): keep the two identical.
 fn sanitize_for_terminal(s: &str) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(s.len());
@@ -259,6 +260,12 @@ fn sanitize_for_terminal(s: &str) -> String {
         }
     }
     out
+}
+
+/// Print one warning line to stderr with control characters escaped once; pass the whole line,
+/// prefix included. The lib has the same function (`path_kind::warn`) for its own warnings.
+fn warn(line: &str) {
+    eprintln!("{}", sanitize_for_terminal(line));
 }
 
 /// Render an error the way the Rust runtime prints `Result::Err` from `main` (`Error: ...` plus
@@ -337,7 +344,7 @@ fn run() -> anyhow::Result<()> {
             #[cfg(feature = "remote-embed")]
             match context_smith::embed_index(&repo, &db) {
                 Some(Ok(n)) => println!("embeddings: {n} files (remote-embed)"),
-                Some(Err(e)) => eprintln!("warning: embedding generation failed: {e}"),
+                Some(Err(e)) => warn(&format!("warning: embedding generation failed: {e}")),
                 None => eprintln!(
                     "note: remote-embed built but EMBEDDING_SVC_URL unset; skipping embeddings"
                 ),
@@ -365,7 +372,9 @@ fn run() -> anyhow::Result<()> {
             let diff_summary = match repo.recent_diff(diff_commits) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("warn: recent_diff failed ({e}); omitting diff from bundle");
+                    warn(&format!(
+                        "warn: recent_diff failed ({e}); omitting diff from bundle"
+                    ));
                     String::new()
                 }
             };

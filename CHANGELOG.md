@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The "has no commits yet" error from `index` no longer prints raw control characters in the repo path; they are shown as `\x1b`-style escapes (#585).
 - The nesting-depth warning (`warn: <path>: nesting deeper than ...`) and the `index` "has no commits yet" check in the CLI now escape control characters in the path too, so a crafted directory name can no longer write raw escape sequences to stderr (#599).
 - Names read from an `index.db` (e.g. a trigger name in the "unexpected schema object" error) no longer reach stderr as raw control characters: `main` now escapes every error message once (`\x1b`-style, backslashes left as they are). `query --format json` now writes DEL, C1 and U+2028/2029 inside strings as `\u009b`-style escapes; the parsed values are unchanged (#648).
+- The `warn:`, `warning:` and `semantic:` lines on stderr that embed an error's text (a git error naming a ref, an unreadable-file error, an embedding-service error) now escape control characters once, like the final error line; paths shown with `{:?}` were already safe (#652).
 
 ### Added
 - `GitRepo::ensure_has_commits` (public) returns the same "has no commits yet" error as `index` for a repo whose HEAD is unborn, so callers can check before creating any output (#599).

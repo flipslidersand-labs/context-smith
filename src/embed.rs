@@ -176,7 +176,7 @@ fn populate_embeddings_inner(
             let content = match git_repo.read_indexed(&git_index, std::path::Path::new(rel)) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("warn: skip {:?}: {e}", abs_path);
+                    crate::path_kind::warn(&format!("warn: skip {:?}: {e}", abs_path));
                     continue;
                 }
             };
