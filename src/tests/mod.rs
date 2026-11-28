@@ -422,3 +422,90 @@ fn bm25_path_weight_boosts_matching_filename() {
         "auth.rs (path match) should outscore util.rs: {auth_score} vs {util_score}"
     );
 }
+
+/// Query-text string (files, task) -> the `(path, score)` list `search_bm25` returns.
+fn ranked_paths(db: &IndexDb, task: &str) -> Vec<(String, f32)> {
+    use crate::search_index::search_bm25;
+    let conn = db.connection();
+    search_bm25(conn, task, 10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, score)| {
+            let path: String = conn
+                .query_row("SELECT path FROM files WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap();
+            (path, score)
+        })
+        .collect()
+}
+
+/// Corpus with ASCII-only files and files holding Japanese text.
+const MIXED_CORPUS: &[(&str, &str)] = &[
+    (
+        "src/auth.rs",
+        "pub fn authenticate(token: &str) -> bool { true }\n",
+    ),
+    (
+        "src/util.rs",
+        "pub fn helper_authenticate_call() {}\n// auth helper\n",
+    ),
+    (
+        "src/session.rs",
+        "fn start_session() {}\n// 認証エラーを修正する\n// auth session\n",
+    ),
+    (
+        "docs/notes.py",
+        "# メモ\n# 認証の処理を auth_user で確認する。認証エラーを修正する\n",
+    ),
+];
+
+/// #631 characterization: a task without CJK text must rank and score exactly as it did
+/// before CJK support was added, even though the index also holds Japanese text. Expected
+/// values were recorded from the code before the change.
+#[test]
+fn bm25_ascii_task_ranking_is_unchanged_by_cjk_files() {
+    let (_tmp, db) = build_index_for(MIXED_CORPUS);
+    let render = |task: &str| -> Vec<String> {
+        ranked_paths(&db, task)
+            .iter()
+            .map(|(p, s)| format!("{p}={s:.5}"))
+            .collect()
+    };
+    assert_eq!(
+        render("auth authenticate session"),
+        [
+            "src/session.rs=4.50000",
+            "src/auth.rs=3.00000",
+            "src/util.rs=0.00000",
+            "docs/notes.py=0.00000"
+        ]
+    );
+    assert_eq!(
+        render("auth_user helper"),
+        ["src/util.rs=1.50000", "docs/notes.py=0.76715"]
+    );
+}
+
+/// #631: an ASCII identifier followed by Japanese text in the task used to become one token
+/// that matched nothing.
+#[test]
+fn bm25_task_with_identifier_glued_to_japanese_finds_the_identifier() {
+    let (_tmp, db) = build_index_for(&[("src/lib.rs", "fn auth_user() {}\n")]);
+    let got = ranked_paths(&db, "auth_userの修正");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "src/lib.rs");
+}
+
+/// #631: unicode61 keeps a run of kana/han as one token, so only the whole run matched.
+#[test]
+fn bm25_japanese_task_matches_inside_a_japanese_comment() {
+    let (_tmp, db) = build_index_for(&[
+        ("src/lib.rs", "fn a() {}\n// 認証エラーを修正する\n"),
+        ("src/other.rs", "fn b() {}\n"),
+    ]);
+    for task in ["エラー", "修正する", "認証エラーを修正する", "修正"] {
+        let got = ranked_paths(&db, task);
+        let paths: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs"], "task {task:?}");
+    }
+}

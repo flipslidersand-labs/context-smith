@@ -1,6 +1,8 @@
+use crate::tokenizer::{cjk_grams, is_cjk, split_cjk_runs};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // BM25 signal weights (higher = stronger signal).
 // path: file-name/directory match is the strongest localization cue.
@@ -10,6 +12,9 @@ use std::collections::HashSet;
 const W_PATH: f64 = 3.0;
 const W_SYMBOLS: f64 = 0.5;
 const W_BODY: f64 = 1.0;
+// cjk: bigram table for CJK text (#631). Provisional: same weight as body, not tuned on a
+//   CJK benchmark.
+const W_CJK: f64 = 1.0;
 
 /// Keep only bareword characters (alphanumerics and `_`); everything else could be
 /// FTS5 query syntax and would cause a syntax error in MATCH queries.
@@ -35,14 +40,48 @@ pub(crate) fn sanitize_fts_query(query: &str) -> String {
             }
         })
         .collect();
-    stripped
-        .split_whitespace()
-        .map(|w| match w {
-            "AND" | "OR" | "NOT" | "NEAR" => w.to_lowercase(),
-            other => other.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ")
+    let mut terms: Vec<String> = Vec::new();
+    for w in stripped.split_whitespace() {
+        if !w.chars().any(is_cjk) {
+            // No CJK: exactly the pre-#631 term, so the query (and ranking) is unchanged.
+            terms.push(match w {
+                "AND" | "OR" | "NOT" | "NEAR" => w.to_lowercase(),
+                other => other.to_string(),
+            });
+            continue;
+        }
+        // unicode61 glues a CJK run (and an ASCII identifier written right before it) into
+        // one token. Split at script boundaries; for a CJK run search the run as written
+        // plus its bigrams, which `fts_cjk` holds (#631).
+        for (cjk, seg) in split_cjk_runs(w) {
+            if cjk {
+                terms.push(seg.to_string());
+                terms.extend(cjk_grams(seg).into_iter().filter(|g| g != seg));
+            } else if seg.chars().any(char::is_alphanumeric) {
+                terms.push(match seg {
+                    "AND" | "OR" | "NOT" | "NEAR" => seg.to_lowercase(),
+                    other => other.to_string(),
+                });
+            }
+        }
+    }
+    terms.join(" OR ")
+}
+
+/// Whether the (sanitized) query or term holds CJK text, i.e. needs `fts_cjk`.
+fn has_cjk(s: &str) -> bool {
+    s.chars().any(is_cjk)
+}
+
+/// Whether this index has the `fts_cjk` table. An index built before #631 lacks it until
+/// re-indexed; querying it must not fail.
+fn has_fts_cjk(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fts_cjk'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 /// Upper bound on distinct terms in one MATCH. With a plain OR-join a long task (an issue
@@ -50,11 +89,17 @@ pub(crate) fn sanitize_fts_query(query: &str) -> String {
 /// out of the top results (#135: recall 0.00 on 302-file axum with title+body tasks).
 pub(crate) const MAX_QUERY_TERMS: usize = 8;
 
-/// Number of (file, table) rows matching `term` across the three FTS tables — a cheap
-/// document-frequency proxy. `term` must be a sanitized bareword.
-fn term_doc_freq(conn: &Connection, term: &str) -> Result<i64> {
+/// Number of (file, table) rows matching `term` across the FTS tables — a cheap
+/// document-frequency proxy. `term` must be a sanitized bareword. `fts_cjk` counts only for
+/// a term with CJK text (an ASCII term never matches there) and only if the index has it.
+fn term_doc_freq(conn: &Connection, term: &str, with_cjk: bool) -> Result<i64> {
     let mut total = 0;
-    for table in ["fts_path", "fts_symbols", "fts_body"] {
+    let tables: &[&str] = if with_cjk && has_cjk(term) {
+        &["fts_path", "fts_symbols", "fts_body", "fts_cjk"]
+    } else {
+        &["fts_path", "fts_symbols", "fts_body"]
+    };
+    for table in tables {
         total += conn.query_row(
             &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
             params![term],
@@ -77,9 +122,10 @@ pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Resu
     if terms.len() <= k {
         return Ok(sanitized.to_string());
     }
+    let with_cjk = has_cjk(sanitized) && has_fts_cjk(conn);
     let mut scored: Vec<(i64, &str)> = Vec::with_capacity(terms.len());
     for t in terms {
-        let df = term_doc_freq(conn, t)?;
+        let df = term_doc_freq(conn, t, with_cjk)?;
         if df > 0 {
             scored.push((df, t));
         }
@@ -100,6 +146,56 @@ pub(crate) fn rarest_terms(conn: &Connection, sanitized: &str, k: usize) -> Resu
         .join(" OR "))
 }
 
+/// Fourth `UNION ALL` arm of [`search_bm25`]: the CJK bigram table, same shape as `fts_body`.
+fn cjk_branch_sql() -> String {
+    format!(
+        "
+             UNION ALL
+             SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * {W_CJK:?} AS score
+             FROM (SELECT file_id, rank FROM fts_cjk     WHERE content MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)"
+    )
+}
+
+/// True when the (sanitized) task holds CJK text but this index cannot search it: it has no
+/// `fts_cjk`, or `fts_cjk` is empty while the index was not stamped with the current
+/// `EXTRACT_VERSION` (an `index` run that failed before finishing leaves exactly that).
+/// An empty `fts_cjk` in an index of the current version just means no file has CJK text.
+fn stale_cjk_note_needed(conn: &Connection, sanitized: &str) -> bool {
+    if !has_cjk(sanitized) {
+        return false;
+    }
+    if !has_fts_cjk(conn) {
+        return true;
+    }
+    let empty = conn
+        .query_row("SELECT NOT EXISTS (SELECT 1 FROM fts_cjk)", [], |r| {
+            r.get::<_, bool>(0)
+        })
+        .unwrap_or(false);
+    if !empty {
+        return false;
+    }
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'extract_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    stored.as_deref() != Some(crate::index_builder::EXTRACT_VERSION.to_string().as_str())
+}
+
+/// Print the stale-index note once per process (`select` calls `search_bm25` more than once).
+fn warn_stale_cjk_index() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "note: this index has no CJK (Japanese/Chinese/Korean) search table; \
+             re-run 'contextsmith index' to match CJK text"
+        );
+    }
+}
+
 /// Upper bound applied to `top_n` in [`search_bm25`].
 const MAX_TOP_N: usize = 1000;
 
@@ -112,6 +208,20 @@ const MAX_TOP_N: usize = 1000;
 ///
 /// Returns an empty Vec when the sanitized query is blank (nothing to match).
 pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(i64, f32)>> {
+    let (rows, note) = search_bm25_noted(conn, query, top_n)?;
+    if note {
+        warn_stale_cjk_index();
+    }
+    Ok(rows)
+}
+
+/// [`search_bm25`] plus whether the task needs CJK search this index cannot do (see
+/// [`stale_cjk_note_needed`]), so the decision can be tested without capturing stderr.
+fn search_bm25_noted(
+    conn: &Connection,
+    query: &str,
+    top_n: usize,
+) -> Result<(Vec<(i64, f32)>, bool)> {
     let sanitized = sanitize_fts_query(query);
     // Guard: an empty MATCH expression is a SQLite FTS5 syntax error.
     if sanitized.is_empty() {
@@ -119,7 +229,17 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
             "task string is empty or contains only punctuation — please provide at least one word"
         );
     }
+    // Decided on the full task: `rarest_terms` drops CJK terms an old index cannot match, which
+    // would otherwise hide the note for a long mixed task.
+    let note = stale_cjk_note_needed(conn, &sanitized);
     let sanitized = rarest_terms(conn, &sanitized, MAX_QUERY_TERMS)?;
+    // The bigram table joins in only for a CJK task on an index that has it. Any other task
+    // runs the same three-table SQL as before #631.
+    let cjk_branch = if has_cjk(&sanitized) && has_fts_cjk(conn) {
+        cjk_branch_sql()
+    } else {
+        String::new()
+    };
 
     // Each sub-query: normalize raw BM25 rank to [0,1] then apply the weight.
     // `rank` in FTS5 is ≤ 0 (more negative = better); dividing by MIN(rank) (the most
@@ -142,7 +262,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
     // SQLite LIMIT means unlimited, defeating the sub-query cap).
     let top_n = top_n.min(MAX_TOP_N);
     let sub_limit = (top_n * 3) as i64;
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT file_id, COALESCE(SUM(score), 0) AS total
          FROM (
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?1 AS score
@@ -152,12 +272,13 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
              FROM (SELECT file_id, MIN(rank) AS rank FROM fts_symbols WHERE name    MATCH ?4 GROUP BY file_id ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
              UNION ALL
              SELECT file_id, (rank / NULLIF(MIN(rank) OVER (), 0)) * ?3 AS score
-             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5)
+             FROM (SELECT file_id, rank FROM fts_body    WHERE content MATCH ?4 ORDER BY rank, (SELECT path FROM files WHERE files.id = file_id), file_id LIMIT ?5){cjk_branch}
          )
          GROUP BY file_id
          ORDER BY total DESC, (SELECT path FROM files WHERE files.id = file_id), file_id
-         LIMIT ?6",
-    )?;
+         LIMIT ?6"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows: Vec<(i64, f32)> = stmt
         .query_map(
             params![
@@ -171,7 +292,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)? as f32)),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    Ok((rows, note))
 }
 
 #[cfg(test)]
@@ -314,6 +435,145 @@ mod tests {
             .unwrap();
         }
         conn
+    }
+
+    fn fts_conn_cjk(docs: &[(i64, &str)]) -> rusqlite::Connection {
+        let conn = fts_conn(docs);
+        conn.execute_batch("CREATE VIRTUAL TABLE fts_cjk USING fts5(file_id UNINDEXED, content);")
+            .unwrap();
+        for (id, text) in docs {
+            let grams = crate::tokenizer::cjk_index_text(text);
+            if !grams.is_empty() {
+                conn.execute(
+                    "INSERT INTO fts_cjk (file_id, content) VALUES (?1, ?2)",
+                    rusqlite::params![id, grams],
+                )
+                .unwrap();
+            }
+        }
+        conn
+    }
+
+    #[test]
+    fn sanitize_ascii_query_is_unchanged_by_cjk_support() {
+        assert_eq!(
+            sanitize_fts_query("AND foo_bar ＡＢＣ"),
+            "and OR foo_bar OR ＡＢＣ"
+        );
+        assert_eq!(sanitize_fts_query("ＡＢＣ"), "ＡＢＣ");
+    }
+
+    #[test]
+    fn sanitize_splits_ascii_identifier_from_following_japanese() {
+        assert_eq!(
+            sanitize_fts_query("auth_userの修正"),
+            "auth_user OR の修正 OR の修 OR 修正"
+        );
+        assert_eq!(sanitize_fts_query("AND修正"), "and OR 修正");
+    }
+
+    #[test]
+    fn sanitize_cjk_run_lengths() {
+        assert_eq!(sanitize_fts_query("の"), "の");
+        assert_eq!(sanitize_fts_query("修正"), "修正"); // 2 chars: the bigram is the run
+        assert_eq!(sanitize_fts_query("ー"), "ー");
+        assert_eq!(sanitize_fts_query("エラー"), "エラー OR エラ OR ラー");
+        assert_eq!(sanitize_fts_query("、。「」"), "");
+    }
+
+    #[test]
+    fn sanitize_cjk_mixed_with_underscore_and_other_scripts() {
+        assert_eq!(
+            sanitize_fts_query("認証_エラー"),
+            "認証 OR エラー OR エラ OR ラー"
+        );
+        assert_eq!(
+            sanitize_fts_query("인증오류"),
+            "인증오류 OR 인증 OR 증오 OR 오류"
+        );
+        assert_eq!(sanitize_fts_query("ｴﾗｰ"), "ｴﾗｰ OR ｴﾗ OR ﾗｰ");
+    }
+
+    #[test]
+    fn cjk_task_matches_through_fts_cjk() {
+        let conn = fts_conn_cjk(&[
+            (1, "fn auth_user() {}"),
+            (2, "// 認証エラーを修正する"),
+            (3, "unrelated"),
+        ]);
+        let ids = |q: &str| -> Vec<i64> {
+            search_bm25(&conn, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect()
+        };
+        assert_eq!(ids("auth_userの修正"), [1, 2]);
+        assert_eq!(ids("エラー"), [2]);
+        assert_eq!(ids("修正する"), [2]);
+        assert_eq!(ids("認証_エラー"), [2]);
+    }
+
+    /// An index built before `fts_cjk` existed must still answer, ASCII part included.
+    #[test]
+    fn cjk_task_on_index_without_fts_cjk_still_runs() {
+        let conn = fts_conn(&[(1, "fn auth_user() {}"), (2, "// 認証エラーを修正する")]);
+        let hits = search_bm25(&conn, "auth_userの修正", 10).unwrap();
+        assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [1]);
+        // more than MAX_QUERY_TERMS terms goes through the document-frequency lookup too
+        assert!(search_bm25(&conn, "auth_user 認証エラーを修正する必要がある", 10).is_ok());
+    }
+
+    fn note_for(conn: &rusqlite::Connection, task: &str) -> bool {
+        search_bm25_noted(conn, task, 10).unwrap().1
+    }
+
+    /// The note is decided on the whole task: a long mixed task is cut to its rarest terms,
+    /// which on an old index leaves only the ASCII ones.
+    #[test]
+    fn stale_note_is_needed_for_a_long_mixed_task_on_an_index_without_fts_cjk() {
+        let conn = fts_conn(&[(1, "fn auth_user() {}")]);
+        let long = "auth_user 認証エラーを修正する";
+        assert!(sanitize_fts_query(long).split(" OR ").count() > MAX_QUERY_TERMS);
+        assert!(note_for(&conn, long));
+        assert!(note_for(&conn, "修正"));
+        assert!(!note_for(&conn, "auth_user"));
+    }
+
+    #[test]
+    fn stale_note_only_when_fts_cjk_cannot_serve_the_task() {
+        let version = crate::index_builder::EXTRACT_VERSION.to_string();
+        // table with rows: fine
+        let conn = fts_conn_cjk(&[(1, "// 認証エラー")]);
+        assert!(!note_for(&conn, "認証"));
+        // empty table, current version (no file has CJK text): fine
+        let conn = fts_conn_cjk(&[(1, "fn a() {}")]);
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('extract_version', ?1)",
+            [&version],
+        )
+        .unwrap();
+        assert!(!note_for(&conn, "認証"));
+        // empty table, version never stamped or older (an index run that failed): note
+        conn.execute("UPDATE meta SET value = '1'", []).unwrap();
+        assert!(note_for(&conn, "認証"));
+        conn.execute("DELETE FROM meta", []).unwrap();
+        assert!(note_for(&conn, "認証"));
+    }
+
+    proptest::proptest! {
+        /// Same guarantee as above with the CJK table present.
+        #[test]
+        fn search_bm25_with_fts_cjk_only_fails_on_blank_task(
+            task in "[ -~あ-んア-ン一-龥ｱ-ﾝ가-힣ーＡ、。_]{0,40}"
+        ) {
+            let conn = fts_conn_cjk(&[(1, "login auth 認証エラー")]);
+            let blank = super::sanitize_fts_query(&task).trim().is_empty();
+            let res = super::search_bm25(&conn, &task, 10);
+            proptest::prop_assert_eq!(res.is_err(), blank, "task {:?}: {:?}", task, res.err());
+        }
     }
 
     /// #311: files that tie on score must be cut at the limit by `path`, not by `file_id`
