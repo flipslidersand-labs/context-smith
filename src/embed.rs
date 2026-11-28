@@ -463,10 +463,10 @@ pub fn fuse_seeds_with_status(
     // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
     let vec_candidates = top_n.saturating_mul(3);
     let mut vector = search_vectors(conn, &query_vec, vec_candidates)?;
-    // Every stored vector was left out (all from older versions of their files):
-    // no vector ranking took part, so this is BM25 only (#644).
+    // Every stored vector was left out (from an older version of its file, or
+    // non-finite): no vector ranking took part, so this is BM25 only (#644).
     if vector.is_empty() && vec_candidates > 0 {
-        eprintln!("warn: no usable stored vector (all are stale); using BM25 seeds only");
+        eprintln!("warn: no usable stored vector (stale or non-finite); using BM25 seeds only");
         return Ok((bm25.to_vec(), false));
     }
     vector.retain(|&(id, _)| usable(id));
@@ -1489,6 +1489,48 @@ mod tests {
         let err = populate_embeddings(dir.path(), &e, &db).unwrap_err();
         assert!(err.to_string().contains("dimension"), "{err}");
         assert!(!has_embeddings(db.connection()).unwrap());
+    }
+
+    /// #644: once the first batch has replaced the old vectors, later batches
+    /// only add; a failing later batch keeps what was written and never brings
+    /// back or re-deletes vectors.
+    #[test]
+    fn populate_embeddings_replaces_only_once_across_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..2 * EMBED_BATCH + 1)
+            .map(|i| format!("f{i:03}.rs"))
+            .collect();
+        for n in &names {
+            std::fs::write(dir.path().join(n), "fn a() {}").unwrap();
+        }
+        track_all(dir.path());
+        let rows: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "sha")).collect();
+        let db = index_db_with_files(&rows);
+        let c = db.connection();
+        let total = names.len();
+        assert_eq!(
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            total
+        );
+
+        // Batches 1 and 2 succeed (new dimension 8), batch 3 fails.
+        let e = FlakyEmbedder::new("m2", 8, 2);
+        populate_embeddings(dir.path(), &e, &db).unwrap_err();
+        let kept = stored_vectors(c);
+        assert_eq!(kept.len(), 2 * EMBED_BATCH, "batch 1 was deleted again");
+        assert!(
+            kept.iter().all(|r| r.1.len() == 32),
+            "an old vector is back"
+        );
+        assert_eq!(get_meta(c, EMBED_MODEL_KEY).unwrap().as_deref(), Some("m2"));
+        assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("8"));
+
+        // The next run only fills in the missing file.
+        assert_eq!(
+            populate_embeddings(dir.path(), &IdEmbedder("m2", 8), &db).unwrap(),
+            1
+        );
+        assert_eq!(stored_vectors(c).len(), total);
     }
 
     #[test]
