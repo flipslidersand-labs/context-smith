@@ -54,54 +54,62 @@ enum Command {
     },
     /// Build a context bundle for a task
     Build {
-        /// Path to the target Git repository
-        #[arg(long, value_parser = non_empty_string)]
-        repo: String,
-        /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
-        #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
-        task: String,
-        #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
-        budget: usize,
+        #[command(flatten)]
+        sel: SelectArgs,
         #[arg(long, default_value = "context.bundle", value_parser = non_empty_string)]
         out: String,
-        /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
-        #[arg(long)]
-        index: Option<String>,
         /// Include relevance score annotations in task.md
         #[arg(long)]
         explain: bool,
         /// Number of recent commits to include as diff context
         #[arg(long, default_value_t = 3)]
         diff_commits: usize,
-        /// Disable semantic (embedding) seeds even when the index has them; BM25 only
-        #[arg(long)]
-        no_embed: bool,
     },
     /// Select task-relevant files and print to stdout (no files written).
     /// Designed for scripts and pipelines: `--format json` for machine-readable
     /// output, `--format md` for the task.md-style summary.
     Query {
-        /// Path to the target Git repository
-        #[arg(long, value_parser = non_empty_string)]
-        repo: String,
-        /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
-        #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
-        task: String,
-        #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
-        budget: usize,
-        /// Path to index db (default: {repo}/.contextsmith/index.db)
-        #[arg(long)]
-        index: Option<String>,
+        #[command(flatten)]
+        sel: SelectArgs,
         /// Output format
         #[arg(long, value_enum, default_value_t = QueryFormat::Json)]
         format: QueryFormat,
         /// Include relevance score annotations (md format only)
         #[arg(long)]
         explain: bool,
-        /// Disable semantic (embedding) seeds even when the index has them; BM25 only
-        #[arg(long)]
-        no_embed: bool,
     },
+}
+
+/// Arguments that `build` and `query` share: which repository, index and task to select for.
+#[derive(clap::Args)]
+struct SelectArgs {
+    /// Path to the target Git repository
+    #[arg(long, value_parser = non_empty_string)]
+    repo: String,
+    /// Task description. May start with `-` (e.g. an issue title such as "--files is slow").
+    #[arg(long, value_parser = non_empty_string, allow_hyphen_values = true)]
+    task: String,
+    #[arg(long, default_value_t = 30000, value_parser = positive_usize)]
+    budget: usize,
+    /// Path to index db (default: {repo}/.contextsmith/index.db); use when index was built with --out
+    #[arg(long)]
+    index: Option<String>,
+    /// Disable semantic (embedding) seeds even when the index has them; BM25 only
+    #[arg(long)]
+    no_embed: bool,
+}
+
+impl SelectArgs {
+    /// Open the repository and its index (read-only), then select candidates for the task.
+    fn select(&self) -> anyhow::Result<(GitRepo, Vec<Candidate>)> {
+        let repo = GitRepo::new(&self.repo)?;
+        let db_path = resolve_index_path(&repo, self.index.clone())?;
+        let db = IndexDb::open_for_read(&db_path)?;
+        warn_if_foreign_index(&repo, &db);
+        let selected =
+            select_and_report(&repo, &db, &self.task, &opts(self.budget, self.no_embed))?;
+        Ok((repo, selected))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -345,21 +353,12 @@ fn run() -> anyhow::Result<()> {
         }
 
         Command::Build {
-            repo,
-            task,
-            budget,
+            sel,
             out,
-            index,
             explain,
             diff_commits,
-            no_embed,
         } => {
-            let repo = GitRepo::new(&repo)?;
-            let db_path = resolve_index_path(&repo, index)?;
-            let db = IndexDb::open_for_read(&db_path)?;
-            warn_if_foreign_index(&repo, &db);
-
-            let selected = select_and_report(&repo, &db, &task, &opts(budget, no_embed))?;
+            let (repo, selected) = sel.select()?;
 
             // Recent diff, then write the bundle to disk.
             let diff_summary = match repo.recent_diff(diff_commits) {
@@ -370,32 +369,30 @@ fn run() -> anyhow::Result<()> {
                 }
             };
             let out_path = PathBuf::from(&out);
-            let stats = write_bundle(&task, budget, &selected, &diff_summary, &out_path, explain)?;
+            let stats = write_bundle(
+                &sel.task,
+                sel.budget,
+                &selected,
+                &diff_summary,
+                &out_path,
+                explain,
+            )?;
 
             println!(
                 "bundle: {} files, {}/{} tokens → {}",
                 stats.files,
                 stats.used,
-                budget,
+                sel.budget,
                 out_path.display(),
             );
         }
 
         Command::Query {
-            repo,
-            task,
-            budget,
-            index,
+            sel,
             format,
             explain,
-            no_embed,
         } => {
-            let repo = GitRepo::new(&repo)?;
-            let db_path = resolve_index_path(&repo, index)?;
-            let db = IndexDb::open_for_read(&db_path)?;
-            warn_if_foreign_index(&repo, &db);
-
-            let selected = select_and_report(&repo, &db, &task, &opts(budget, no_embed))?;
+            let (_, selected) = sel.select()?;
             let used: usize = selected.iter().map(|c| c.tokens()).sum();
 
             match format {
@@ -412,8 +409,8 @@ fn run() -> anyhow::Result<()> {
                         })
                         .collect();
                     let doc = serde_json::json!({
-                        "task": task,
-                        "budget": budget,
+                        "task": sel.task,
+                        "budget": sel.budget,
                         "used_tokens": used,
                         "files": files,
                     });
@@ -424,7 +421,10 @@ fn run() -> anyhow::Result<()> {
                 }
                 QueryFormat::Md => {
                     // No diff in query output — keep it focused on the selection.
-                    print!("{}", render_task_md(&task, budget, &selected, "", explain));
+                    print!(
+                        "{}",
+                        render_task_md(&sel.task, sel.budget, &selected, "", explain)
+                    );
                 }
             }
         }
