@@ -577,7 +577,7 @@ impl IndexDb {
         let symbols_total = raw_syms.len();
         // (id, name) of non-import symbols, in insertion order, for fts_symbols.
         let mut fts_syms: Vec<(i64, String)> = Vec::new();
-        for (name, kind, _line) in raw_syms {
+        for (name, kind) in raw_syms {
             let is_import = kind == SymbolKind::Import;
             let sym = Symbol {
                 file_id,

@@ -61,12 +61,12 @@ pub fn add(a: i32, b: i32) -> i32 { a + b }
     let syms =
         SymbolExtractor::extract(std::path::Path::new("test.rs"), src, Language::Rust).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"MyStruct"), "expected struct MyStruct");
     assert!(names.contains(&"new"), "expected fn new");
     assert!(names.contains(&"add"), "expected fn add");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(kinds.contains(&&SymbolKind::Import), "expected use import");
     assert!(kinds.contains(&&SymbolKind::Struct));
     assert!(kinds.contains(&&SymbolKind::Function));
@@ -93,12 +93,12 @@ func main() {
     let syms =
         SymbolExtractor::extract(std::path::Path::new("main.go"), src, Language::Go).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"NewPoint"), "expected func NewPoint");
     assert!(names.contains(&"main"), "expected func main");
     assert!(names.contains(&"Point"), "expected type Point");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(kinds.contains(&&SymbolKind::Import));
     assert!(kinds.contains(&&SymbolKind::Function));
 }
@@ -118,7 +118,7 @@ def standalone():
     let syms =
         SymbolExtractor::extract(std::path::Path::new("test.py"), src, Language::Python).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"MyClass"), "expected class MyClass");
     assert!(names.contains(&"method"), "expected def method");
     assert!(names.contains(&"standalone"), "expected def standalone");
@@ -148,7 +148,7 @@ const arrow = (x: number): number => x + 1;
     let syms = SymbolExtractor::extract(std::path::Path::new("svc.ts"), src, Language::TypeScript)
         .unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"User"), "expected interface User");
     assert!(names.contains(&"Id"), "expected type alias Id");
     assert!(names.contains(&"Service"), "expected class Service");
@@ -156,7 +156,7 @@ const arrow = (x: number): number => x + 1;
     assert!(names.contains(&"standalone"), "expected fn standalone");
     assert!(names.contains(&"arrow"), "expected arrow-fn const arrow");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(kinds.contains(&&SymbolKind::Import), "expected es import");
     assert!(kinds.contains(&&SymbolKind::Class));
     assert!(kinds.contains(&&SymbolKind::Struct), "interface -> struct");
@@ -177,13 +177,13 @@ const handler = () => {};
     let syms = SymbolExtractor::extract(std::path::Path::new("app.js"), src, Language::JavaScript)
         .unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"Widget"), "expected class Widget");
     assert!(names.contains(&"render"), "expected method render");
     assert!(names.contains(&"main"), "expected fn main");
     assert!(names.contains(&"handler"), "expected arrow-fn handler");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(
         kinds.contains(&&SymbolKind::Import),
         "expected require import"
@@ -315,12 +315,12 @@ pub type Result<T> = std::result::Result<T, String>;
     let syms =
         SymbolExtractor::extract(std::path::Path::new("test.rs"), src, Language::Rust).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"Color"), "expected enum Color");
     assert!(names.contains(&"Shape"), "expected trait Shape");
     assert!(names.contains(&"Result"), "expected type alias Result");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(
         kinds.contains(&&SymbolKind::Struct),
         "enum/type should be Struct kind"
@@ -353,13 +353,13 @@ end
     let syms =
         SymbolExtractor::extract(std::path::Path::new("parser.rb"), src, Language::Ruby).unwrap();
 
-    let names: Vec<&str> = syms.iter().map(|(n, _, _)| n.as_str()).collect();
+    let names: Vec<&str> = syms.iter().map(|(n, _)| n.as_str()).collect();
     assert!(names.contains(&"Parser"), "expected class Parser");
     assert!(names.contains(&"Util"), "expected module Util");
     assert!(names.contains(&"initialize"), "expected method initialize");
     assert!(names.contains(&"parse"), "expected method parse");
 
-    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k, _)| k).collect();
+    let kinds: Vec<&SymbolKind> = syms.iter().map(|(_, k)| k).collect();
     assert!(
         kinds.contains(&&SymbolKind::Import),
         "expected require as Import"
