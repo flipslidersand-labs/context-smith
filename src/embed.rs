@@ -130,14 +130,27 @@ pub fn populate_embeddings(
     let conn = db.connection();
     // BEGIN / INSERT / COMMIT can all hit SQLITE_BUSY when another process
     // holds the write lock; present the same friendly message as `build_index`.
-    populate_embeddings_inner(repo_root, embedder, db)
+    populate_embeddings_inner(repo_root, embedder, db, false)
         .map_err(|e| crate::index_builder::friendly_lock_error(conn, e))
 }
 
+/// Drop every stored vector and record `model` as the one that makes the next
+/// ones. Run inside the transaction that writes the first replacement batch.
+fn replace_all_vectors_for(conn: &Connection, model: &str) -> Result<()> {
+    conn.execute("DELETE FROM embeddings", [])?;
+    crate::index_builder::IndexDb::upsert_meta_on(conn, EMBED_MODEL_KEY, model)?;
+    Ok(())
+}
+
+/// `replace_all`: the stored vectors are to be replaced (they come from another
+/// model or dimension). Nothing is deleted until a new batch has been embedded;
+/// that batch then replaces all old vectors in one transaction, so a failing
+/// embedder leaves the old index (and its model id) untouched (#644).
 fn populate_embeddings_inner(
     repo_root: &std::path::Path,
     embedder: &dyn Embedder,
     db: &crate::index_builder::IndexDb,
+    replace_all: bool,
 ) -> Result<usize> {
     let conn = db.connection();
     // Query only the files that actually need (re-)embedding — avoids the
@@ -146,13 +159,27 @@ fn populate_embeddings_inner(
     // A different embedding model than the one that produced the stored vectors
     // invalidates all of them, even for files whose content is unchanged.
     let model = embedder.model_id();
-    if has_embeddings(conn)? && get_meta(conn, EMBED_MODEL_KEY)?.as_deref() != Some(model.as_str())
-    {
-        conn.execute("DELETE FROM embeddings", [])?;
+    let mut replace_all = replace_all
+        || (has_embeddings(conn)?
+            && get_meta(conn, EMBED_MODEL_KEY)?.as_deref() != Some(model.as_str()));
+    if !replace_all {
+        db.upsert_meta(EMBED_MODEL_KEY, &model)?;
     }
-    db.upsert_meta(EMBED_MODEL_KEY, &model)?;
-    let stale_files = db.files_needing_embed()?;
+    let stale_files = if replace_all {
+        db.all_files_for_embed()?
+    } else {
+        db.files_needing_embed()?
+    };
     if stale_files.is_empty() {
+        if replace_all {
+            // No file left to embed: the old vectors have nothing to be replaced by.
+            let tx = rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            replace_all_vectors_for(conn, &model)?;
+            tx.commit()?;
+        }
         return Ok(0);
     }
     // Paths come from index.db, which may be untrusted (e.g. shipped in the
@@ -215,18 +242,21 @@ fn populate_embeddings_inner(
         }
         let stored_dim = get_meta(conn, EMBED_DIM_KEY)?;
         if written == 0
+            && !replace_all
             && stored_dim.as_deref() != Some(dim.to_string().as_str())
             && has_embeddings(conn)?
         {
-            conn.execute("DELETE FROM embeddings", [])?;
-            db.upsert_meta(EMBED_DIM_KEY, &dim.to_string())?;
-            return populate_embeddings_inner(repo_root, embedder, db);
+            // Start over with every file; the old vectors go with the first batch.
+            return populate_embeddings_inner(repo_root, embedder, db, true);
         }
 
         // Persist each vector with its content_sha in a single transaction.
         let tx =
             rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
         // An early `?` return drops `tx`, which rolls back.
+        if replace_all {
+            replace_all_vectors_for(conn, &model)?;
+        }
         crate::index_builder::IndexDb::upsert_meta_on(conn, EMBED_DIM_KEY, &dim.to_string())?;
         for ((id, sha), v) in ids.iter().zip(shas.iter()).zip(vecs.iter()) {
             conn.execute(
@@ -239,6 +269,7 @@ fn populate_embeddings_inner(
             )?;
         }
         tx.commit()?;
+        replace_all = false;
         written += ids.len();
     }
 
@@ -401,6 +432,12 @@ pub fn fuse_seeds_with_status(
     // in fusion. The final result is still truncated to `top_n` by rrf_fuse.
     let vec_candidates = top_n.saturating_mul(3);
     let mut vector = search_vectors(conn, &query_vec, vec_candidates)?;
+    // Every stored vector was left out (from an older version of its file, or
+    // non-finite): no vector ranking took part, so this is BM25 only (#644).
+    if vector.is_empty() && vec_candidates > 0 {
+        eprintln!("warn: no usable stored vector (stale or non-finite); using BM25 seeds only");
+        return Ok((bm25.to_vec(), false));
+    }
     vector.retain(|&(id, _)| usable(id));
     Ok((rrf_fuse(&[bm25, &vector], 60.0, top_n), true))
 }
@@ -998,6 +1035,34 @@ mod tests {
         conn
     }
 
+    /// #644: when every stored vector is from an older version of its file, none
+    /// is ranked, so fusion did not happen and must not be reported.
+    #[test]
+    fn fuse_seeds_with_status_not_fused_when_all_vectors_are_stale() {
+        let conn = mem_db();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, lang, blob_sha) VALUES (1, 'a.rs', 'rust', 'new');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO embeddings (file_id, vector, content_sha) VALUES (1, ?1, 'old')",
+            [vec_to_blob(&[1.0, 0.0])],
+        )
+        .unwrap();
+        let bm25 = vec![(7i64, 1.0f32)];
+        let (out, fused) = fuse_seeds_with_status(
+            &conn,
+            &FixedEmbedder(vec![1.0, 0.0]),
+            "t",
+            &bm25,
+            10,
+            &|_| true,
+        )
+        .unwrap();
+        assert!(!fused);
+        assert_eq!(out, bm25);
+    }
+
     #[test]
     fn fuse_seeds_drops_vector_seeds_rejected_by_usable() {
         // #564: id 1 is the best vector match but is blank/unreadable, so it must not be a seed.
@@ -1297,6 +1362,103 @@ mod tests {
         );
     }
 
+    /// Succeeds for the first `ok_calls` calls, then fails like a dropped connection.
+    struct FlakyEmbedder {
+        model: &'static str,
+        dim: usize,
+        ok_calls: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl FlakyEmbedder {
+        fn new(model: &'static str, dim: usize, ok_calls: usize) -> Self {
+            Self {
+                model,
+                dim,
+                ok_calls,
+                calls: Default::default(),
+            }
+        }
+    }
+    impl Embedder for FlakyEmbedder {
+        fn embed(&self, texts: &[String], _mode: EmbedMode) -> Result<Vec<Vec<f32>>> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n >= self.ok_calls {
+                anyhow::bail!("fake network error");
+            }
+            Ok(texts.iter().map(|_| vec![1.0; self.dim]).collect())
+        }
+        fn model_id(&self) -> String {
+            self.model.to_string()
+        }
+    }
+
+    fn stored_vectors(c: &Connection) -> Vec<(i64, Vec<u8>, Option<String>)> {
+        c.prepare("SELECT file_id, vector, content_sha FROM embeddings ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// #644: a model change must not drop the old vectors until the new model has
+    /// produced something to replace them.
+    #[test]
+    fn populate_embeddings_keeps_old_vectors_when_first_reembed_fails() {
+        let (dir, db) = two_file_db();
+        let c = db.connection();
+        populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap();
+        let before = stored_vectors(c);
+        assert_eq!(before.len(), 2);
+
+        let err =
+            populate_embeddings(dir.path(), &FlakyEmbedder::new("m2", 4, 0), &db).unwrap_err();
+        assert!(err.to_string().contains("fake network error"), "{err}");
+        assert_eq!(stored_vectors(c), before, "old vectors were lost");
+        // The old vectors still belong to m1; the model id must not claim m2.
+        assert_eq!(get_meta(c, EMBED_MODEL_KEY).unwrap().as_deref(), Some("m1"));
+        // Going back to the old model finds everything up to date.
+        assert_eq!(
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            0
+        );
+    }
+
+    /// #644: the model and the dimension change together; the old vectors are
+    /// replaced in one transaction with the first new batch.
+    #[test]
+    fn populate_embeddings_replaces_vectors_when_model_and_dim_change() {
+        let (dir, db) = two_file_db();
+        let c = db.connection();
+        populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap();
+        let e = FlakyEmbedder::new("m2", 8, 1);
+        assert_eq!(populate_embeddings(dir.path(), &e, &db).unwrap(), 2);
+        let rows = stored_vectors(c);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.1.len() == 32), "{rows:?}");
+        assert_eq!(get_meta(c, EMBED_MODEL_KEY).unwrap().as_deref(), Some("m2"));
+        assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("8"));
+    }
+
+    /// #644: same hazard when only the dimension changes (found after one batch).
+    #[test]
+    fn populate_embeddings_keeps_old_vectors_when_dim_change_reembed_fails() {
+        let (dir, db) = two_file_db();
+        let c = db.connection();
+        populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap();
+        let before = stored_vectors(c);
+        c.execute(
+            "UPDATE files SET blob_sha = 'sha-a2' WHERE path = 'a.rs'",
+            [],
+        )
+        .unwrap();
+        // One call shows the new dimension, the re-embed of everything fails.
+        let e = FlakyEmbedder::new("m1", 8, 1);
+        populate_embeddings(dir.path(), &e, &db).unwrap_err();
+        assert_eq!(stored_vectors(c), before, "old vectors were lost");
+        assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("4"));
+    }
+
     /// Returns `dims[i]`-long vectors for call `i` (last entry repeats); with `mixed`, the
     /// first vector of every batch gets the first dim and the rest the second.
     struct DimsEmbedder {
@@ -1328,6 +1490,48 @@ mod tests {
         let err = populate_embeddings(dir.path(), &e, &db).unwrap_err();
         assert!(err.to_string().contains("dimension"), "{err}");
         assert!(!has_embeddings(db.connection()).unwrap());
+    }
+
+    /// #644: once the first batch has replaced the old vectors, later batches
+    /// only add; a failing later batch keeps what was written and never brings
+    /// back or re-deletes vectors.
+    #[test]
+    fn populate_embeddings_replaces_only_once_across_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..2 * EMBED_BATCH + 1)
+            .map(|i| format!("f{i:03}.rs"))
+            .collect();
+        for n in &names {
+            std::fs::write(dir.path().join(n), "fn a() {}").unwrap();
+        }
+        track_all(dir.path());
+        let rows: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "sha")).collect();
+        let db = index_db_with_files(&rows);
+        let c = db.connection();
+        let total = names.len();
+        assert_eq!(
+            populate_embeddings(dir.path(), &IdEmbedder("m1", 4), &db).unwrap(),
+            total
+        );
+
+        // Batches 1 and 2 succeed (new dimension 8), batch 3 fails.
+        let e = FlakyEmbedder::new("m2", 8, 2);
+        populate_embeddings(dir.path(), &e, &db).unwrap_err();
+        let kept = stored_vectors(c);
+        assert_eq!(kept.len(), 2 * EMBED_BATCH, "batch 1 was deleted again");
+        assert!(
+            kept.iter().all(|r| r.1.len() == 32),
+            "an old vector is back"
+        );
+        assert_eq!(get_meta(c, EMBED_MODEL_KEY).unwrap().as_deref(), Some("m2"));
+        assert_eq!(get_meta(c, EMBED_DIM_KEY).unwrap().as_deref(), Some("8"));
+
+        // The next run only fills in the missing file.
+        assert_eq!(
+            populate_embeddings(dir.path(), &IdEmbedder("m2", 8), &db).unwrap(),
+            1
+        );
+        assert_eq!(stored_vectors(c).len(), total);
     }
 
     #[test]

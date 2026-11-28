@@ -415,15 +415,26 @@ impl IndexDb {
     /// Return `(file_id, path, blob_sha)` for files that need (re-)embedding:
     /// those where no embedding exists yet, or where `content_sha != blob_sha`.
     pub(crate) fn files_needing_embed(&self) -> Result<Vec<(i64, String, String)>> {
+        self.embeddable_files(false)
+    }
+
+    /// Like [`Self::files_needing_embed`], but every embeddable file regardless of
+    /// its stored vector: used when all vectors are to be replaced (#644).
+    pub(crate) fn all_files_for_embed(&self) -> Result<Vec<(i64, String, String)>> {
+        self.embeddable_files(true)
+    }
+
+    fn embeddable_files(&self, all: bool) -> Result<Vec<(i64, String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT f.id, f.path, f.blob_sha
              FROM files f
              LEFT JOIN embeddings e ON e.file_id = f.id
              WHERE f.lang != ?1
-               AND (e.file_id IS NULL OR e.content_sha IS NULL OR e.content_sha != f.blob_sha)",
+               AND (?2 OR e.file_id IS NULL OR e.content_sha IS NULL
+                    OR e.content_sha != f.blob_sha)",
         )?;
         let rows = stmt
-            .query_map([Language::Unknown.as_str()], |row| {
+            .query_map(params![Language::Unknown.as_str(), all], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,

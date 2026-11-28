@@ -52,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - If a file changes between the scan hashing it and `index` reading its text, the text is no longer recorded as indexed under the old hash (which made later runs skip the file); the content rows are dropped and the file is retried on the next `index` (#617).
 - With `remote-embed`, a stored vector made from an older version of a file (its `content_sha` differs from the file's current `blob_sha`) is no longer ranked in semantic search, so a failed re-embed after an edit no longer leaves pre-edit content in the results (#617).
 - `select_candidates` with `SelectOptions::new(0)` now fails with "budget must be >= 1" (as `seed_count == 0` already did) instead of returning an empty selection; the CLI `--budget` already refused 0 (#629).
+- With `remote-embed`, changing the embedding model (or its vector dimension) no longer deletes the stored vectors before the new model has embedded anything: they are replaced together with the first new batch, so a failing first request (network or auth error) keeps the old semantic index (#644).
+- With `remote-embed`, `query` no longer reports vector fusion when every stored vector is from an older version of its file; it falls back to BM25 and says so (#644).
 - `bench/fetch_cands.py --with-body` now also replaces non-ASCII home-directory names (`/home/josé` used to leak its last character) and Windows `C:\Users\<name>` / `C:/Users/<name>` paths, and keeps the sentence punctuation after a name; a name with a space is still cut at the space (#641).
 
 ## [0.6.0] - 2026-11-23
