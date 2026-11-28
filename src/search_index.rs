@@ -156,6 +156,35 @@ fn cjk_branch_sql() -> String {
     )
 }
 
+/// True when the (sanitized) task holds CJK text but this index cannot search it: it has no
+/// `fts_cjk`, or `fts_cjk` is empty while the index was not stamped with the current
+/// `EXTRACT_VERSION` (an `index` run that failed before finishing leaves exactly that).
+/// An empty `fts_cjk` in an index of the current version just means no file has CJK text.
+fn stale_cjk_note_needed(conn: &Connection, sanitized: &str) -> bool {
+    if !has_cjk(sanitized) {
+        return false;
+    }
+    if !has_fts_cjk(conn) {
+        return true;
+    }
+    let empty = conn
+        .query_row("SELECT NOT EXISTS (SELECT 1 FROM fts_cjk)", [], |r| {
+            r.get::<_, bool>(0)
+        })
+        .unwrap_or(false);
+    if !empty {
+        return false;
+    }
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'extract_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    stored.as_deref() != Some(crate::index_builder::EXTRACT_VERSION.to_string().as_str())
+}
+
 /// Print the stale-index note once per process (`select` calls `search_bm25` more than once).
 fn warn_stale_cjk_index() {
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -179,6 +208,20 @@ const MAX_TOP_N: usize = 1000;
 ///
 /// Returns an empty Vec when the sanitized query is blank (nothing to match).
 pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(i64, f32)>> {
+    let (rows, note) = search_bm25_noted(conn, query, top_n)?;
+    if note {
+        warn_stale_cjk_index();
+    }
+    Ok(rows)
+}
+
+/// [`search_bm25`] plus whether the task needs CJK search this index cannot do (see
+/// [`stale_cjk_note_needed`]), so the decision can be tested without capturing stderr.
+fn search_bm25_noted(
+    conn: &Connection,
+    query: &str,
+    top_n: usize,
+) -> Result<(Vec<(i64, f32)>, bool)> {
     let sanitized = sanitize_fts_query(query);
     // Guard: an empty MATCH expression is a SQLite FTS5 syntax error.
     if sanitized.is_empty() {
@@ -186,15 +229,15 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
             "task string is empty or contains only punctuation — please provide at least one word"
         );
     }
+    // Decided on the full task: `rarest_terms` drops CJK terms an old index cannot match, which
+    // would otherwise hide the note for a long mixed task.
+    let note = stale_cjk_note_needed(conn, &sanitized);
     let sanitized = rarest_terms(conn, &sanitized, MAX_QUERY_TERMS)?;
     // The bigram table joins in only for a CJK task on an index that has it. Any other task
     // runs the same three-table SQL as before #631.
-    let cjk_branch = if !has_cjk(&sanitized) {
-        String::new()
-    } else if has_fts_cjk(conn) {
+    let cjk_branch = if has_cjk(&sanitized) && has_fts_cjk(conn) {
         cjk_branch_sql()
     } else {
-        warn_stale_cjk_index();
         String::new()
     };
 
@@ -249,7 +292,7 @@ pub fn search_bm25(conn: &Connection, query: &str, top_n: usize) -> Result<Vec<(
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)? as f32)),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    Ok((rows, note))
 }
 
 #[cfg(test)]
@@ -479,6 +522,45 @@ mod tests {
         assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [1]);
         // more than MAX_QUERY_TERMS terms goes through the document-frequency lookup too
         assert!(search_bm25(&conn, "auth_user 認証エラーを修正する必要がある", 10).is_ok());
+    }
+
+    fn note_for(conn: &rusqlite::Connection, task: &str) -> bool {
+        search_bm25_noted(conn, task, 10).unwrap().1
+    }
+
+    /// The note is decided on the whole task: a long mixed task is cut to its rarest terms,
+    /// which on an old index leaves only the ASCII ones.
+    #[test]
+    fn stale_note_is_needed_for_a_long_mixed_task_on_an_index_without_fts_cjk() {
+        let conn = fts_conn(&[(1, "fn auth_user() {}")]);
+        let long = "auth_user 認証エラーを修正する";
+        assert!(sanitize_fts_query(long).split(" OR ").count() > MAX_QUERY_TERMS);
+        assert!(note_for(&conn, long));
+        assert!(note_for(&conn, "修正"));
+        assert!(!note_for(&conn, "auth_user"));
+    }
+
+    #[test]
+    fn stale_note_only_when_fts_cjk_cannot_serve_the_task() {
+        let version = crate::index_builder::EXTRACT_VERSION.to_string();
+        // table with rows: fine
+        let conn = fts_conn_cjk(&[(1, "// 認証エラー")]);
+        assert!(!note_for(&conn, "認証"));
+        // empty table, current version (no file has CJK text): fine
+        let conn = fts_conn_cjk(&[(1, "fn a() {}")]);
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('extract_version', ?1)",
+            [&version],
+        )
+        .unwrap();
+        assert!(!note_for(&conn, "認証"));
+        // empty table, version never stamped or older (an index run that failed): note
+        conn.execute("UPDATE meta SET value = '1'", []).unwrap();
+        assert!(note_for(&conn, "認証"));
+        conn.execute("DELETE FROM meta", []).unwrap();
+        assert!(note_for(&conn, "認証"));
     }
 
     proptest::proptest! {
