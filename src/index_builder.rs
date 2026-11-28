@@ -1670,6 +1670,112 @@ mod tests {
         idx.write().unwrap();
     }
 
+    /// Length `truncate_fts_body` must return for `s`, computed without
+    /// `is_char_boundary`: the longest whole-char prefix of at most the cap.
+    fn expected_cut_len(s: &str) -> usize {
+        s.char_indices()
+            .map(|(i, c)| i + c.len_utf8())
+            .take_while(|&end| end <= FTS_BODY_MAX_BYTES)
+            .last()
+            .unwrap_or(0)
+    }
+
+    fn assert_truncated_to(s: &str, expected_len: usize) {
+        let out = truncate_fts_body(s);
+        assert_eq!(out.len(), expected_len);
+        assert!(out.len() <= FTS_BODY_MAX_BYTES);
+        assert!(s.starts_with(out));
+        assert!(s.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn truncate_fts_body_keeps_ascii_of_exactly_the_cap() {
+        let s = "a".repeat(FTS_BODY_MAX_BYTES);
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES);
+    }
+
+    #[test]
+    fn truncate_fts_body_cuts_ascii_one_byte_over_the_cap() {
+        let s = "a".repeat(FTS_BODY_MAX_BYTES + 1);
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES);
+    }
+
+    #[test]
+    fn truncate_fts_body_keeps_short_and_empty_input() {
+        assert_eq!(truncate_fts_body(""), "");
+        assert_eq!(truncate_fts_body("日本語"), "日本語");
+    }
+
+    #[test]
+    fn truncate_fts_body_backs_up_when_multibyte_char_straddles_the_cap() {
+        // A run of `ch` starting at byte `start`, long enough to pass the cap.
+        // Every start offset around the cap is covered, so the cut lands on
+        // each possible position inside the char (and on both boundaries).
+        for ch in ['é', '日', '😀'] {
+            let w = ch.len_utf8();
+            for start in (FTS_BODY_MAX_BYTES - w)..=(FTS_BODY_MAX_BYTES + 1) {
+                let mut s = "a".repeat(start);
+                s.push_str(&ch.to_string().repeat(3));
+                assert_truncated_to(&s, expected_cut_len(&s));
+            }
+        }
+        // The 3-byte char starting 1 / 2 bytes before the cap loses 1 / 2 bytes of it.
+        let mut s = "a".repeat(FTS_BODY_MAX_BYTES - 1);
+        s.push('日');
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES - 1);
+        let mut s = "a".repeat(FTS_BODY_MAX_BYTES - 2);
+        s.push('日');
+        assert_truncated_to(&s, FTS_BODY_MAX_BYTES - 2);
+        // The 4-byte char starting 1 / 2 / 3 bytes before the cap loses 1 / 2 / 3 bytes.
+        for back in 1..=3 {
+            let mut s = "a".repeat(FTS_BODY_MAX_BYTES - back);
+            s.push('😀');
+            assert_truncated_to(&s, FTS_BODY_MAX_BYTES - back);
+        }
+    }
+
+    #[test]
+    fn truncate_fts_body_handles_text_made_only_of_multibyte_chars() {
+        // 512 KiB is not a multiple of 3, so the cut always falls inside a '日'.
+        assert_ne!(FTS_BODY_MAX_BYTES % 3, 0);
+        let s = "日".repeat(FTS_BODY_MAX_BYTES / 3 + 2);
+        assert!(s.len() > FTS_BODY_MAX_BYTES);
+        let expected = expected_cut_len(&s);
+        assert_eq!(expected, FTS_BODY_MAX_BYTES / 3 * 3);
+        assert_truncated_to(&s, expected);
+
+        // 512 KiB is a multiple of 4, so 4-byte chars end exactly on the cap.
+        assert_eq!(FTS_BODY_MAX_BYTES % 4, 0);
+        let s = "😀".repeat(FTS_BODY_MAX_BYTES / 4 + 2);
+        let expected = expected_cut_len(&s);
+        assert_eq!(expected, FTS_BODY_MAX_BYTES);
+        assert_truncated_to(&s, expected);
+    }
+
+    #[test]
+    fn build_index_truncates_fts_body_of_large_file_at_char_boundary() {
+        // 600 KiB Rust file: one line comment whose '日' straddles the cap.
+        let head = "fn big() {}\n// ";
+        let mut src = String::from(head);
+        src.push_str(&"x".repeat(FTS_BODY_MAX_BYTES - 1 - head.len()));
+        src.push('日');
+        src.push_str(&"y".repeat(600 * 1024 - src.len()));
+        assert!(src.len() > FTS_BODY_MAX_BYTES);
+
+        let (_tmp, repo) = repo_with(&[("big.rs", &src)]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+
+        let body: String = db
+            .connection()
+            .query_row("SELECT content FROM fts_body", [], |r| r.get(0))
+            .unwrap();
+        // '日' starts 1 byte before the cap, so it is dropped whole.
+        assert_eq!(body.len(), FTS_BODY_MAX_BYTES - 1);
+        assert!(src.starts_with(&body));
+        assert!(body.ends_with('x'));
+    }
+
     #[test]
     fn build_index_does_not_store_body_of_file_removed_from_git_index() {
         let (tmp, repo) = repo_with(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
@@ -2147,6 +2253,60 @@ mod tests {
         assert_eq!(cap_symbols(v.clone(), 2), vec![1, 2]);
         assert_eq!(cap_symbols(v.clone(), 5), v);
         assert_eq!(cap_symbols(v.clone(), 9), v);
+    }
+
+    /// Documented per-file symbol limit (#567), written out so that changing
+    /// `MAX_SYMBOLS_PER_FILE` fails these tests instead of silently following it.
+    const LIMIT: usize = 10_000;
+
+    /// `n` one-line Rust functions `fn f0() {}` .. `fn f{n-1}() {}`.
+    fn rs_with_n_fns(n: usize) -> String {
+        (0..n).fold(String::new(), |mut s, i| {
+            s.push_str(&format!("fn f{i}() {{}}\n"));
+            s
+        })
+    }
+
+    /// #632: more than 10,000 symbols are cut to the first
+    /// 10,000, in both the symbols table and IndexStats.
+    #[test]
+    fn build_index_caps_symbols_of_file_over_limit() {
+        let n = LIMIT + 1;
+        let (_tmp, repo) = repo_with(&[("src/big.rs", &rs_with_n_fns(n))]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+
+        assert_eq!(stats.symbols_total, LIMIT);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols"), LIMIT as i64);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_symbols"), LIMIT as i64);
+        // The first ones are kept, the overflow one is dropped.
+        let kept = |name: &str| {
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM symbols WHERE name = '{name}'"),
+            )
+        };
+        assert_eq!(kept("f0"), 1);
+        assert_eq!(kept(&format!("f{}", LIMIT - 1)), 1);
+        assert_eq!(kept(&format!("f{LIMIT}")), 0);
+    }
+
+    /// #632: exactly 10,000 symbols is not over the limit; all are kept.
+    #[test]
+    fn build_index_keeps_all_symbols_of_file_at_limit() {
+        let (_tmp, repo) = repo_with(&[("src/full.rs", &rs_with_n_fns(LIMIT))]);
+        let db = mem_db();
+        let stats = build_index(&repo, &db, false).unwrap();
+
+        assert_eq!(stats.symbols_total, LIMIT);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM symbols"), LIMIT as i64);
+        assert_eq!(
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM symbols WHERE name = 'f{}'", LIMIT - 1)
+            ),
+            1
+        );
     }
 
     /// #567: a file that grows past MAX_FILE_BYTES keeps its files / path-FTS

@@ -644,6 +644,14 @@ mod tests {
     }
 
     #[test]
+    fn select_candidates_rejects_zero_budget() {
+        let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
+        let o = opts(0, true);
+        let err = select_candidates(&repo, &db, "alpha_widget", &o).unwrap_err();
+        assert!(err.to_string().contains("budget must be >= 1"), "{err}");
+    }
+
+    #[test]
     fn select_candidates_clamps_huge_seed_count() {
         let (_t, repo, _d, db) = indexed_repo(&["a.rs"]);
         let mut o = opts(10_000, true);
