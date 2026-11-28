@@ -549,6 +549,14 @@ mod tests {
         assert!(!names(&out, SymbolKind::Import).is_empty());
     }
 
+    /// `.tsx` uses the TSX grammar, so JSX parses cleanly and symbols inside it are found.
+    #[test]
+    fn extract_tsx_parses_jsx() {
+        let jsx = "const el = <div>hi</div>;\nfunction App() { return <b>{[1].map(function inner() { return <i/>; })}</b>; }\n";
+        let tsx = SymbolExtractor::extract(Path::new("a.tsx"), jsx, Language::TypeScript).unwrap();
+        assert_eq!(names(&tsx, SymbolKind::Function), vec!["App"]);
+    }
+
     #[test]
     fn extract_rust_empty_source() {
         let out = SymbolExtractor::extract(Path::new("a.rs"), "", Language::Rust).unwrap();
