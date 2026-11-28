@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `remote-embed`, changing the embedding model (or its vector dimension) no longer deletes the stored vectors before the new model has embedded anything: they are replaced together with the first new batch, so a failing first request (network or auth error) keeps the old semantic index (#644).
 - With `remote-embed`, `query` no longer reports vector fusion when every stored vector is from an older version of its file; it falls back to BM25 and says so (#644).
 - `bench/fetch_cands.py --with-body` now also replaces non-ASCII home-directory names (`/home/josé` used to leak its last character) and Windows `C:\Users\<name>` / `C:/Users/<name>` paths, and keeps the sentence punctuation after a name; a name with a space is still cut at the space (#641).
+- `bench/cands-*.json` no longer contain Windows home-directory paths that the old `private_paths_scrubbed` left in issue bodies; they were replaced in place with the current function, without re-fetching (#641).
 
 ## [0.6.0] - 2026-11-23
 
