@@ -3,7 +3,6 @@
 //! `bfs-capped` (default since the #293 bench) caps each file's neighbours so hub files do not
 //! collect score. `bfs` is the earlier plain [`bfs_expand`].
 
-use crate::dep_builder::bfs_expand;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
@@ -60,8 +59,13 @@ pub(crate) fn placeholders(n: usize) -> String {
         .join(",")
 }
 
-/// Undirected, de-duplicated neighbour lists (self-loops removed) for `ids`.
-fn neighbors(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<i64>>> {
+/// Undirected, de-duplicated neighbour lists (self-loops removed) for `ids`, leaving out any
+/// neighbour in `exclude`.
+fn neighbors(
+    conn: &Connection,
+    ids: &[i64],
+    exclude: &HashSet<i64>,
+) -> Result<HashMap<i64, Vec<i64>>> {
     let mut sets: HashMap<i64, HashSet<i64>> = HashMap::new();
     for chunk in ids.chunks(CHUNK) {
         let ph = placeholders(chunk.len());
@@ -77,7 +81,9 @@ fn neighbors(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<i64>>> {
             })?;
             for row in rows {
                 let (a, b) = row?;
-                sets.entry(a).or_default().insert(b);
+                if !exclude.contains(&b) {
+                    sets.entry(a).or_default().insert(b);
+                }
             }
         }
     }
@@ -130,6 +136,60 @@ pub(crate) fn dedup_seeds(seeds: &[(i64, f32)]) -> HashMap<i64, f32> {
     m
 }
 
+/// BFS-expand from seed files through the deps graph (bidirectional, score decay × 0.5/hop).
+///
+/// Each depth level fetches the whole frontier's neighbours in 2 SQL queries per chunk of
+/// `CHUNK` ids (outgoing and incoming edges), instead of 2 per node. (#91) Edges inside the
+/// frontier are not expanded, so the BFS does not re-visit it.
+pub fn bfs_expand(
+    conn: &Connection,
+    seeds: &[(i64, f32)],
+    max_depth: u8,
+) -> Result<HashMap<i64, f32>> {
+    let mut scores = dedup_seeds(seeds);
+
+    // Build the frontier from the deduplicated max scores so duplicate seeds cannot
+    // overwrite each other (last-wins) when collected into a map below. (#274)
+    let mut frontier: Vec<(i64, f32)> = scores.iter().map(|(&id, &s)| (id, s)).collect();
+
+    for _depth in 0..max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+
+        let ids: Vec<i64> = frontier.iter().map(|&(id, _)| id).collect();
+        let in_frontier: HashSet<i64> = ids.iter().copied().collect();
+        let nbrs = neighbors(conn, &ids, &in_frontier)?;
+
+        // Each neighbour gets the decayed score of its own best parent. (It used to get the
+        // decayed score of the best node in the whole frontier, so every neighbour of any
+        // seed outranked the weaker seeds. #135)
+        let mut best: HashMap<i64, f32> = HashMap::new();
+        for &(parent, score) in &frontier {
+            let decayed = score * 0.5;
+            for &neighbor in nbrs.get(&parent).into_iter().flatten() {
+                let e = best.entry(neighbor).or_insert(f32::NEG_INFINITY);
+                if decayed > *e {
+                    *e = decayed;
+                }
+            }
+        }
+
+        let mut next_frontier: Vec<(i64, f32)> = Vec::new();
+        for (neighbor_id, decayed) in best {
+            let prev = scores.entry(neighbor_id).or_insert(0.0);
+            if decayed > *prev {
+                *prev = decayed;
+                next_frontier.push((neighbor_id, decayed));
+            }
+        }
+
+        frontier = next_frontier;
+    }
+
+    Ok(scores)
+}
+
 /// BFS where each parent expands to at most `CAP_K` neighbours (lowest degree first, then id),
 /// and a neighbour's score is `parent * 0.5 / sqrt(max(1, deg(neighbour)))`. Neighbours in the
 /// current frontier, or already scored at least as high as this parent would give, are skipped
@@ -146,14 +206,14 @@ pub fn bfs_capped(
             break;
         }
         let ids: Vec<i64> = frontier.iter().map(|&(i, _)| i).collect();
-        let nbrs = neighbors(conn, &ids)?;
+        let in_frontier: HashSet<i64> = ids.iter().copied().collect();
+        // Like `bfs_expand`, edges inside the current frontier are not expanded (a seed is
+        // never re-scored from a neighbouring seed) and do not use up a parent's K slots.
+        let nbrs = neighbors(conn, &ids, &in_frontier)?;
         let mut all: Vec<i64> = nbrs.values().flatten().copied().collect();
         all.sort_unstable();
         all.dedup();
         let deg = degrees(conn, &all)?;
-        // Like `bfs_expand`, edges inside the current frontier are not expanded (a seed is
-        // never re-scored from a neighbouring seed) and do not use up a parent's K slots.
-        let in_frontier: std::collections::HashSet<i64> = ids.iter().copied().collect();
         let mut best: HashMap<i64, f32> = HashMap::new();
         for &(parent, ps) in &frontier {
             let Some(list) = nbrs.get(&parent) else {
@@ -163,7 +223,6 @@ pub fn bfs_capped(
             // take a K slot but never enter `scores`/`next`, crowding out real neighbours.
             let mut picked: Vec<(usize, i64)> = list
                 .iter()
-                .filter(|n| !in_frontier.contains(n))
                 .map(|&n| (deg.get(&n).copied().unwrap_or(1), n))
                 .filter(|&(d, n)| match scores.get(&n) {
                     Some(&prev) => ps * 0.5 / (d.max(1) as f32).sqrt() > prev,
@@ -337,7 +396,7 @@ mod tests {
             // Hub last, so it lands in the final chunk; leaves straddle every boundary.
             let mut ids: Vec<i64> = (1..=n).collect();
             ids.push(0);
-            let nb = neighbors(&conn, &ids).unwrap();
+            let nb = neighbors(&conn, &ids, &HashSet::new()).unwrap();
             let deg = degrees(&conn, &ids).unwrap();
             assert_eq!(nb.len(), ids.len(), "n={n}");
             assert_eq!(nb[&0], (1..=n).collect::<Vec<_>>(), "n={n}");
@@ -355,6 +414,43 @@ mod tests {
                 assert_eq!(deg[&i], want.len(), "n={n} leaf {i}");
             }
         }
+    }
+
+    #[test]
+    fn neighbors_empty_ids_returns_empty() {
+        let conn = graph(&[(1, 2)]);
+        assert!(neighbors(&conn, &[], &HashSet::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn neighbors_returns_both_directions_and_excludes_given_ids() {
+        let conn = graph(&[(1, 2), (3, 1), (1, 4), (1, 5)]);
+        let ex: HashSet<i64> = [1, 4].into();
+        let nb = neighbors(&conn, &[1, 4], &ex).unwrap();
+        // (1,4) is internal to the excluded set and dropped; 4's only neighbour is 1.
+        assert_eq!(nb.get(&1), Some(&vec![2, 3, 5]));
+        assert!(!nb.contains_key(&4));
+    }
+
+    #[test]
+    fn neighbors_handles_ids_over_sqlite_variable_limit() {
+        let n: i64 = 40_000; // > SQLite's 32766 bound-variable limit
+        let edges: Vec<(i64, i64)> = (1..=n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    (i, 100_000 + i)
+                } else {
+                    (100_000 + i, i)
+                }
+            })
+            .collect();
+        let conn = graph(&edges);
+        let ids: Vec<i64> = (1..=n).collect();
+        let ex: HashSet<i64> = ids.iter().copied().collect();
+        let nb = neighbors(&conn, &ids, &ex).unwrap();
+        assert_eq!(nb.len(), n as usize);
+        assert_eq!(nb[&n], vec![100_000 + n]);
+        assert_eq!(nb[&1], vec![100_001]);
     }
 
     #[test]
@@ -381,5 +477,70 @@ mod tests {
         assert!((d2[&2] - want).abs() < 1e-4);
         // Nothing improved on hop 2, so the frontier is empty and further depth changes nothing.
         assert_eq!(bfs_capped(&conn, &seeds, 5).unwrap(), d2);
+    }
+}
+
+#[cfg(test)]
+mod bfs_tests {
+    use super::*;
+
+    /// In-memory graph with the given `from -> to` import edges.
+    fn graph(edges: &[(i64, i64)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE deps (from_file INTEGER NOT NULL, to_file INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for (a, b) in edges {
+            conn.execute("INSERT INTO deps VALUES (?1, ?2)", [a, b])
+                .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn neighbour_gets_half_of_its_own_parent_score_not_the_best_seed() {
+        // #135: file 3 is only linked to the weak seed 2. It used to get half of the *best*
+        // seed's score (5.0) and outrank real seeds; it must get half of seed 2's (0.5).
+        let conn = graph(&[(2, 3)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 1).unwrap();
+        assert!((s[&3] - 0.5).abs() < 1e-6, "got {}", s[&3]);
+        assert!((s[&1] - 10.0).abs() < 1e-6 && (s[&2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn incoming_edge_counts_too() {
+        // 3 imports seed 2: the edge is 3 -> 2, so 3 is a neighbour via an incoming edge.
+        let conn = graph(&[(3, 2)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 1).unwrap();
+        assert!((s[&3] - 0.5).abs() < 1e-6, "got {}", s[&3]);
+    }
+
+    #[test]
+    fn neighbour_of_two_seeds_takes_the_higher_decayed_score() {
+        let conn = graph(&[(1, 3), (2, 3)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 4.0)], 1).unwrap();
+        assert!((s[&3] - 5.0).abs() < 1e-6, "got {}", s[&3]);
+    }
+
+    #[test]
+    fn score_halves_again_on_the_second_hop() {
+        let conn = graph(&[(1, 2), (2, 3)]);
+        let s = bfs_expand(&conn, &[(1, 8.0)], 2).unwrap();
+        assert!(
+            (s[&2] - 4.0).abs() < 1e-6 && (s[&3] - 2.0).abs() < 1e-6,
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn seeds_linked_to_each_other_keep_their_own_scores() {
+        // Expansion only scores files outside the current frontier; it never rewrites a seed.
+        let conn = graph(&[(1, 2)]);
+        let s = bfs_expand(&conn, &[(1, 10.0), (2, 1.0)], 2).unwrap();
+        assert!(
+            (s[&1] - 10.0).abs() < 1e-6 && (s[&2] - 1.0).abs() < 1e-6,
+            "{s:?}"
+        );
     }
 }
