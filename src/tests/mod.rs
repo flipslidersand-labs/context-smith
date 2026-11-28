@@ -485,3 +485,27 @@ fn bm25_ascii_task_ranking_is_unchanged_by_cjk_files() {
         ["src/util.rs=1.50000", "docs/notes.py=0.76715"]
     );
 }
+
+/// #631: an ASCII identifier followed by Japanese text in the task used to become one token
+/// that matched nothing.
+#[test]
+fn bm25_task_with_identifier_glued_to_japanese_finds_the_identifier() {
+    let (_tmp, db) = build_index_for(&[("src/lib.rs", "fn auth_user() {}\n")]);
+    let got = ranked_paths(&db, "auth_userの修正");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "src/lib.rs");
+}
+
+/// #631: unicode61 keeps a run of kana/han as one token, so only the whole run matched.
+#[test]
+fn bm25_japanese_task_matches_inside_a_japanese_comment() {
+    let (_tmp, db) = build_index_for(&[
+        ("src/lib.rs", "fn a() {}\n// 認証エラーを修正する\n"),
+        ("src/other.rs", "fn b() {}\n"),
+    ]);
+    for task in ["エラー", "修正する", "認証エラーを修正する", "修正"] {
+        let got = ranked_paths(&db, task);
+        let paths: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs"], "task {task:?}");
+    }
+}

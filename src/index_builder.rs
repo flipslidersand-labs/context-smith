@@ -92,7 +92,7 @@ fn immutable_uri(path: &Path) -> Option<String> {
 }
 
 /// Table names `init_schema` creates with `CREATE ... IF NOT EXISTS`.
-const KNOWN_TABLES: [&str; 8] = [
+const KNOWN_TABLES: [&str; 9] = [
     "files",
     "symbols",
     "deps",
@@ -101,6 +101,7 @@ const KNOWN_TABLES: [&str; 8] = [
     "fts_path",
     "fts_symbols",
     "fts_body",
+    "fts_cjk",
 ];
 
 /// An index.db may come from an untrusted clone. Right after opening, turn off
@@ -372,6 +373,9 @@ impl IndexDb {
                 USING fts5(file_id UNINDEXED, name);
             CREATE VIRTUAL TABLE IF NOT EXISTS fts_body
                 USING fts5(file_id UNINDEXED, content);
+            -- Bigrams of CJK text only (#631); no row for a file without any.
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_cjk
+                USING fts5(file_id UNINDEXED, content);
             CREATE TABLE IF NOT EXISTS embeddings (
                 file_id INTEGER PRIMARY KEY REFERENCES files(id),
                 vector  BLOB NOT NULL
@@ -530,6 +534,7 @@ impl IndexDb {
         self.delete_symbol_rows(file_id)?;
         for sql in [
             "DELETE FROM fts_body    WHERE rowid = ?1",
+            "DELETE FROM fts_cjk     WHERE rowid = ?1",
             "DELETE FROM deps WHERE from_file = ?1 OR to_file = ?1",
             "DELETE FROM embeddings WHERE file_id = ?1",
         ] {
@@ -604,6 +609,17 @@ impl IndexDb {
             "INSERT INTO fts_body (rowid, file_id, content) VALUES (?1, ?1, ?2)",
             params![file_id, truncate_fts_body(source)],
         )?;
+        // unicode61 does not split CJK runs; their bigrams go to a separate table so the
+        // body column (and the BM25 of tasks without CJK) is untouched (#631).
+        self.conn
+            .execute("DELETE FROM fts_cjk WHERE rowid = ?1", params![file_id])?;
+        let cjk = crate::tokenizer::cjk_index_text(truncate_fts_body(source));
+        if !cjk.is_empty() {
+            self.conn.execute(
+                "INSERT INTO fts_cjk (rowid, file_id, content) VALUES (?1, ?1, ?2)",
+                params![file_id, cjk],
+            )?;
+        }
 
         self.mark_indexed(file_id)?;
         Ok(symbols_total)
@@ -653,7 +669,7 @@ impl IndexDb {
 /// change alters what is stored: symbols/deps/FTS extraction or the index
 /// format. An index built with a different value (or none) is rebuilt in full.
 /// Deliberately not the crate version, so unrelated releases keep the index.
-pub const EXTRACT_VERSION: u32 = 11;
+pub const EXTRACT_VERSION: u32 = 12;
 
 const EXTRACT_VERSION_KEY: &str = "extract_version";
 
@@ -737,7 +753,7 @@ fn build_index_with_scan(
     // dropping `tx` rolls everything back.
     if wipe_fts {
         db.connection().execute_batch(
-            "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body;",
+            "DELETE FROM fts_path; DELETE FROM fts_symbols; DELETE FROM fts_body; DELETE FROM fts_cjk;",
         )?;
         // A table from an older layout keeps its extra NOT NULL columns
         // (`CREATE TABLE IF NOT EXISTS` leaves it alone), which would fail
@@ -1011,6 +1027,7 @@ mod tests {
             "fts_path",
             "fts_symbols",
             "fts_body",
+            "fts_cjk",
             "embeddings",
         ] {
             let n = count(
@@ -1982,6 +1999,7 @@ mod tests {
             "fts_path",
             "fts_symbols",
             "fts_body",
+            "fts_cjk",
             "deps",
         ];
         let before: Vec<i64> = tables
@@ -2014,10 +2032,13 @@ mod tests {
     /// #480: a failed migration rebuild must not leave the FTS tables wiped.
     #[test]
     fn build_index_failed_version_rebuild_keeps_old_fts() {
-        let (_tmp, repo) = repo_with(&[("a.rs", "fn alpha() {}\n"), ("b.rs", "fn beta() {}\n")]);
+        let (_tmp, repo) = repo_with(&[
+            ("a.rs", "fn alpha() {}\n// 認証\n"),
+            ("b.rs", "fn beta() {}\n"),
+        ]);
         let db = mem_db();
         build_index(&repo, &db, false).unwrap();
-        let fts = ["fts_path", "fts_symbols", "fts_body"];
+        let fts = ["fts_path", "fts_symbols", "fts_body", "fts_cjk"];
         let before: Vec<i64> = fts
             .iter()
             .map(|t| count(&db, &format!("SELECT COUNT(*) FROM {t}")))
@@ -2577,6 +2598,90 @@ mod tests {
         let bytes = count(&db, "SELECT length(CAST(content AS BLOB)) FROM fts_body");
         assert!(bytes <= 512 * 1024, "stored {bytes} bytes");
         assert!(bytes > 512 * 1024 - 3);
+    }
+
+    /// #631: only a file with CJK text gets a bigram row, holding the grams of its runs.
+    #[test]
+    fn build_index_stores_cjk_bigrams_only_for_files_with_cjk() {
+        let (_tmp, repo) = repo_with(&[
+            ("a.py", "def a():\n    pass\n# 認証エラー\n"),
+            ("b.py", "def b():\n    pass\n"),
+        ]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_body"), 2);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 1);
+        let (path, grams): (String, String) = db
+            .connection()
+            .query_row(
+                "SELECT f.path, c.content FROM fts_cjk c JOIN files f ON f.id = c.file_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(path, "a.py");
+        assert_eq!(grams, "認証 証エ エラ ラー");
+        // the body column is stored as written, not with grams added
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM fts_body WHERE content LIKE '%認証 証エ%'"
+            ),
+            0
+        );
+    }
+
+    /// #631: re-indexing a file whose CJK text is gone, deleting the file, and dropping its
+    /// content must each remove the bigram row.
+    #[test]
+    fn fts_cjk_row_is_removed_with_the_content() {
+        let (tmp, repo) = repo_with(&[("a.py", "# 認証\n"), ("b.py", "# 修正\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 2);
+        // a.py loses its Japanese text, b.py is deleted
+        commit_files(tmp.path(), &[("a.py", "# auth\n")], &["b.py"]);
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 0);
+        // delete_content_records (used when the content cannot be indexed)
+        commit_files(tmp.path(), &[("a.py", "# 認証\n")], &[]);
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 1);
+        let id = count(&db, "SELECT id FROM files WHERE path = 'a.py'");
+        db.delete_content_records(id).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 0);
+    }
+
+    /// #631: an index of an older extractor version is rebuilt, and stale bigram rows go.
+    #[test]
+    fn extract_version_change_wipes_and_rebuilds_fts_cjk() {
+        let (_tmp, repo) = repo_with(&[("a.py", "# 認証\n")]);
+        let db = mem_db();
+        build_index(&repo, &db, false).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO fts_cjk (rowid, file_id, content) VALUES (999, 999, 'stale')",
+                [],
+            )
+            .unwrap();
+        db.upsert_meta(EXTRACT_VERSION_KEY, "11").unwrap();
+        build_index(&repo, &db, false).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM fts_cjk WHERE rowid = 999"),
+            0
+        );
+    }
+
+    /// #631: an index.db that predates `fts_cjk` gets the table from `init_schema`.
+    #[test]
+    fn init_schema_adds_fts_cjk_to_an_older_index() {
+        let db = mem_db();
+        db.connection()
+            .execute_batch("DROP TABLE fts_cjk;")
+            .unwrap();
+        db.init_schema().unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM fts_cjk"), 0);
     }
 
     #[test]
