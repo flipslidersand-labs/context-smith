@@ -159,7 +159,9 @@ mod tests {
             assert!(is_cjk(c), "{c:?}");
         }
         // full-width Latin/digits, punctuation and ASCII are not CJK
-        for c in ['\u{3099}', 'Ａ', '１', '、', '。', '「', '・', 'a', '1', '_', ' '] {
+        for c in [
+            '\u{3099}', 'Ａ', '１', '、', '。', '「', '・', 'a', '1', '_', ' ',
+        ] {
             assert!(!is_cjk(c), "{c:?}");
         }
     }
