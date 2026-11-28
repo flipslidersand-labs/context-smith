@@ -12,15 +12,44 @@ impl SymbolExtractor {
         source: &str,
         lang: Language,
     ) -> Result<Vec<(String, SymbolKind)>> {
-        match lang {
-            Language::Rust => Self::extract_rust(path, source),
-            Language::Python => Self::extract_python(path, source),
-            Language::Go => Self::extract_go(path, source),
-            Language::TypeScript => Self::extract_typescript(path, source),
-            Language::JavaScript => Self::extract_javascript(path, source),
-            Language::Ruby => Self::extract_ruby(path, source),
-            Language::Unknown => Ok(vec![]),
-        }
+        type Collect = fn(tree_sitter::Node, &[u8], &Path) -> Vec<(String, SymbolKind)>;
+        // (grammar, label for error messages, collector)
+        let (grammar, name, collect): (tree_sitter::Language, &str, Collect) = match lang {
+            Language::Rust => (
+                tree_sitter_rust::LANGUAGE.into(),
+                "Rust",
+                collect_rust_symbols,
+            ),
+            Language::Python => (
+                tree_sitter_python::LANGUAGE.into(),
+                "Python",
+                collect_python_symbols,
+            ),
+            Language::Go => (tree_sitter_go::LANGUAGE.into(), "Go", collect_go_symbols),
+            Language::TypeScript => {
+                // TSX is not a superset of TS: `<T>x` assertions and `<T>(x) => x` parse as JSX
+                // there. Use the TSX grammar only for `.tsx`; `.ts`/`.mts`/`.cts` use plain TS.
+                let grammar = if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
+                    tree_sitter_typescript::LANGUAGE_TSX
+                } else {
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+                };
+                (grammar.into(), "TypeScript", collect_ecma_symbols)
+            }
+            Language::JavaScript => (
+                tree_sitter_javascript::LANGUAGE.into(),
+                "JavaScript",
+                collect_ecma_symbols,
+            ),
+            Language::Ruby => (
+                tree_sitter_ruby::LANGUAGE.into(),
+                "Ruby",
+                collect_ruby_symbols,
+            ),
+            Language::Unknown => return Ok(vec![]),
+        };
+        let tree = Self::parse(path, source, grammar, name)?;
+        Ok(collect(tree.root_node(), source.as_bytes(), path))
     }
 
     /// Parse `source` with `grammar`; `name` only labels error messages.
@@ -37,72 +66,6 @@ impl SymbolExtractor {
         parser
             .parse(source, None)
             .with_context(|| format!("{name} parse failed"))
-    }
-
-    fn extract_rust(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind)>> {
-        let tree = Self::parse(path, source, tree_sitter_rust::LANGUAGE.into(), "Rust")?;
-        Ok(collect_rust_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_python(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind)>> {
-        let tree = Self::parse(path, source, tree_sitter_python::LANGUAGE.into(), "Python")?;
-        Ok(collect_python_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_go(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind)>> {
-        let tree = Self::parse(path, source, tree_sitter_go::LANGUAGE.into(), "Go")?;
-        Ok(collect_go_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_typescript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind)>> {
-        // TSX is not a superset of TS: `<T>x` assertions and `<T>(x) => x` parse as JSX
-        // there. Use the TSX grammar only for `.tsx`; `.ts`/`.mts`/`.cts` use plain TS.
-        let grammar = if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
-            tree_sitter_typescript::LANGUAGE_TSX
-        } else {
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT
-        };
-        let tree = Self::parse(path, source, grammar.into(), "TypeScript")?;
-        Ok(collect_ecma_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_javascript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind)>> {
-        let tree = Self::parse(
-            path,
-            source,
-            tree_sitter_javascript::LANGUAGE.into(),
-            "JavaScript",
-        )?;
-        Ok(collect_ecma_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_ruby(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind)>> {
-        let tree = Self::parse(path, source, tree_sitter_ruby::LANGUAGE.into(), "Ruby")?;
-        Ok(collect_ruby_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
     }
 }
 
