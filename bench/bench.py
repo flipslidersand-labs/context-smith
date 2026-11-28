@@ -122,6 +122,8 @@ for c in cands:
             cov[b][m].append(budget_coverage(inc, {g: est(files[g]) for g in gt}))
 
 n = len(res[BUDGETS[0]]["cs"])
+if n == 0:  # every task was skipped: averaging below would divide by zero (and a fake 0.00 must not reach the README)
+    sys.exit(f"no task measured (skipped {skipped}, cs query errors {errs}); check CSBIN, REPO and the candidates file")
 print(f"repo={os.path.basename(os.path.normpath(REPO))} task={MODE} metric={METRIC}")
 print(f"tasks measured: {n} (skipped {skipped}, cs query errors {errs}) in {time.time()-t0:.0f}s")
 print(f"searchable corpus (avg est tokens): {sum(corpus)//max(1,len(corpus))}")
