@@ -44,6 +44,11 @@ CREATE VIRTUAL TABLE fts_symbols USING fts5(file_id UNINDEXED, name);
 -- content にはオリジナルのファイル内容をそのまま格納
 CREATE VIRTUAL TABLE fts_body USING fts5(file_id UNINDEXED, content);
 
+-- BM25 検索（CJK の bigram）。unicode61 は CJK を分かち書きしないため、本文中の CJK の連続を
+-- 2 文字ずつ(1 文字ならそのまま)空白区切りにして格納する。CJK を含まないファイルは行を作らない。
+-- クエリ側は CJK の連続と、その bigram を OR で検索する(tokenizer.rs の cjk_grams を両側で共有)。
+CREATE VIRTUAL TABLE fts_cjk USING fts5(file_id UNINDEXED, content);
+
 -- 各テーブルの重みは src/search_index.rs の W_PATH / W_SYMBOLS / W_BODY を参照
 ```
 
@@ -104,7 +109,7 @@ pub struct Citation {
 
 ```
 タスク文字列
-  → [FTS5 3テーブル BM25] パス + シンボル名 + 本文のテーブル別スコアを重み付き合算
+  → [FTS5 3テーブル(CJK を含むタスクでは fts_cjk も)BM25] パス + シンボル名 + 本文のテーブル別スコアを重み付き合算
       （実装: src/search_index.rs の search_bm25。重みは W_PATH / W_SYMBOLS / W_BODY）
       各テーブルの rank（負値）を MIN(rank) で割って 0〜1 に正規化してから重みを掛ける
       fts_symbols は 1 シンボル 1 行なので file_id 単位に MIN(rank) で畳んでから使う

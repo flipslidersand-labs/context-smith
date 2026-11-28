@@ -33,7 +33,7 @@ contextsmith query --repo ./project --task "認証エラーを調査" --format j
 ## インデックスの格納場所
 
 `contextsmith index` は `{repo}/.contextsmith/index.db` に SQLite ファイルを生成する。
-このファイルには files / symbols / deps / meta / fts_path / fts_symbols / fts_body がすべて含まれる(テーブルの定義は [data-model.md](./data-model.md))。
+このファイルには files / symbols / deps / meta / fts_path / fts_symbols / fts_body / fts_cjk がすべて含まれる(テーブルの定義は [data-model.md](./data-model.md))。
 
 小規模リポジトリ（目安: ソースコード 10MB 以下）であれば `index.db` を git 管理対象にして
 チームで共有できる。大規模リポジトリの場合は `.gitignore` に追加することを推奨する。
