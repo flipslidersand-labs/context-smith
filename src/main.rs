@@ -237,7 +237,80 @@ fn resolve_index_output(repo: &GitRepo, out: Option<&str>) -> anyhow::Result<Pat
     }
 }
 
-fn main() -> anyhow::Result<()> {
+/// Replace raw terminal control characters with visible escapes, so a name that came from an
+/// untrusted `index.db` or repo cannot drive the terminal through an error message. Covers C0,
+/// DEL, C1 and U+2028/2029 (the same set as `escape_control`). Backslashes are left alone: many
+/// messages already hold paths escaped by `escape_control`, and doubling them again would garble
+/// those.
+fn sanitize_for_terminal(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\u{00}'..='\u{1f}' | '\u{7f}'..='\u{9f}' => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            '\u{2028}' | '\u{2029}' => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render an error the way the Rust runtime prints `Result::Err` from `main` (`Error: ...` plus
+/// a `Caused by:` list), with every message passed through [`sanitize_for_terminal`] once.
+fn format_error(err: &anyhow::Error) -> String {
+    use std::fmt::Write;
+    let mut chain = err.chain();
+    let head = chain.next().map(|e| e.to_string()).unwrap_or_default();
+    let mut out = format!("Error: {}", sanitize_for_terminal(&head));
+    let causes: Vec<String> = chain
+        .map(|e| sanitize_for_terminal(&e.to_string()))
+        .collect();
+    if !causes.is_empty() {
+        out.push_str("\n\nCaused by:");
+        for (i, cause) in causes.iter().enumerate() {
+            if causes.len() == 1 {
+                let _ = write!(out, "\n    {cause}");
+            } else {
+                let _ = write!(out, "\n    {i}: {cause}");
+            }
+        }
+    }
+    out
+}
+
+/// `serde_json` escapes C0 but leaves DEL, C1 and U+2028/2029 raw. Those can only occur inside
+/// string literals (the structure is ASCII), so rewriting them as `\u00XX` changes no parsed value.
+fn escape_json_controls(json: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", format_error(&e));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Index { repo, out, force } => {
@@ -344,7 +417,10 @@ fn main() -> anyhow::Result<()> {
                         "used_tokens": used,
                         "files": files,
                     });
-                    println!("{}", serde_json::to_string_pretty(&doc)?);
+                    println!(
+                        "{}",
+                        escape_json_controls(&serde_json::to_string_pretty(&doc)?)
+                    );
                 }
                 QueryFormat::Md => {
                     // No diff in query output — keep it focused on the selection.
@@ -354,6 +430,51 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod output_escape_tests {
+    use super::*;
+    use anyhow::Context;
+
+    #[test]
+    fn format_error_matches_the_runtime_layout_for_plain_text() {
+        let single = anyhow::anyhow!("boom");
+        assert_eq!(format_error(&single), format!("Error: {single:?}"));
+        let one: anyhow::Error = Err::<(), _>(anyhow::anyhow!("low"))
+            .context("high")
+            .unwrap_err();
+        assert_eq!(format_error(&one), format!("Error: {one:?}"));
+        let two: anyhow::Error = Err::<(), _>(anyhow::anyhow!("low"))
+            .context("mid")
+            .context("high")
+            .unwrap_err();
+        assert_eq!(format_error(&two), format!("Error: {two:?}"));
+    }
+
+    #[test]
+    fn format_error_escapes_controls_in_every_message_but_not_backslashes() {
+        let e: anyhow::Error = Err::<(), _>(anyhow::anyhow!("c\u{9b}\u{2028}"))
+            .context("a\u{1b}[2J\nb \\x1b")
+            .unwrap_err();
+        assert_eq!(
+            format_error(&e),
+            "Error: a\\x1b[2J\\nb \\x1b\n\nCaused by:\n    c\\x9b\\u{2028}"
+        );
+    }
+
+    #[test]
+    fn escape_json_controls_rewrites_only_del_c1_and_separators() {
+        let raw = "{\"p\": \"a\u{7f}\u{80}\u{9b}\u{9f}\u{2028}\u{2029}\u{a0}\u{e9}\"}";
+        let out = escape_json_controls(raw);
+        assert_eq!(
+            out,
+            "{\"p\": \"a\\u007f\\u0080\\u009b\\u009f\\u2028\\u2029\u{a0}\u{e9}\"}"
+        );
+        let a: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(a, b);
+    }
 }
 
 #[cfg(all(test, unix))]
