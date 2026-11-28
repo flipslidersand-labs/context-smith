@@ -1,4 +1,4 @@
-import os, sys, unittest
+import os, sys, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fetch_cands import is_source, private_paths_scrubbed, select
@@ -42,6 +42,85 @@ class PrivatePathsScrubbed(unittest.TestCase):
         # e.g. "/usr/home/x" becomes "/usr/home/USER". Over-scrubbing is the safe direction
         # for a privacy filter; this pins the current behaviour rather than endorsing it.
         self.assertEqual(private_paths_scrubbed("/usr/home/x"), "/usr/home/USER")
+
+
+class PrivatePathsScrubbedNonAscii(unittest.TestCase):
+    """Cases from the original report: names the old ASCII-only pattern missed or half-replaced."""
+
+    def test_non_ascii_username_replaced(self):
+        self.assertEqual(private_paths_scrubbed("/home/日本/x"), "/home/USER/x")
+        self.assertEqual(private_paths_scrubbed("/Users/日本/x"), "/Users/USER/x")
+
+    def test_username_starting_ascii_then_non_ascii_leaks_nothing(self):
+        # The old pattern gave "/home/USERé/x": the tail of the name leaked.
+        self.assertEqual(private_paths_scrubbed("/home/josé/x"), "/home/USER/x")
+        self.assertEqual(private_paths_scrubbed("/home/aé日/x"), "/home/USER/x")
+
+    def test_username_without_trailing_component_non_ascii(self):
+        self.assertEqual(private_paths_scrubbed("/home/日本"), "/home/USER")
+        self.assertEqual(private_paths_scrubbed("/home/josé"), "/home/USER")
+
+    def test_sentence_punctuation_after_name_is_kept(self):
+        for p in ".,;:!?)]}'\"`>":
+            self.assertEqual(private_paths_scrubbed("see /home/alice" + p), "see /home/USER" + p, p)
+        self.assertEqual(private_paths_scrubbed("see /home/alice.."), "see /home/USER..")
+        self.assertEqual(private_paths_scrubbed("(see /home/alice/x.)"), "(see /home/USER/x.)")
+        self.assertEqual(private_paths_scrubbed("see /home/alice.\nnext"), "see /home/USER.\nnext")
+        self.assertEqual(private_paths_scrubbed("see /home/日本。"), "see /home/USER。")
+        self.assertEqual(private_paths_scrubbed("/home/alice, /Users/bob.smith."), "/home/USER, /Users/USER.")
+
+    def test_dots_inside_name_still_part_of_name(self):
+        self.assertEqual(private_paths_scrubbed("/Users/bob.smith."), "/Users/USER.")
+        self.assertEqual(private_paths_scrubbed("/home/.hidden/x"), "/home/USER/x")
+
+    def test_name_made_only_of_punctuation_unchanged(self):
+        self.assertEqual(private_paths_scrubbed("/home/."), "/home/.")
+        self.assertEqual(private_paths_scrubbed("see /home/..."), "see /home/...")
+
+    def test_windows_backslash_path(self):
+        self.assertEqual(private_paths_scrubbed("C:\\Users\\alice\\x"), "C:\\Users\\USER\\x")
+        self.assertEqual(private_paths_scrubbed("d:\\Users\\日本\\x"), "d:\\Users\\USER\\x")
+        self.assertEqual(private_paths_scrubbed("C:\\Users\\alice"), "C:\\Users\\USER")
+
+    def test_windows_forward_slash_path(self):
+        self.assertEqual(private_paths_scrubbed("C:/Users/alice/x"), "C:/Users/USER/x")
+        self.assertEqual(private_paths_scrubbed("C:/Users/josé/x"), "C:/Users/USER/x")
+
+    def test_windows_doubled_backslashes_as_in_json_or_string_literals(self):
+        self.assertEqual(private_paths_scrubbed("C:\\\\Users\\\\alice\\\\x"), "C:\\\\Users\\\\USER\\\\x")
+
+    def test_windows_is_case_insensitive_and_keeps_punctuation(self):
+        self.assertEqual(private_paths_scrubbed("c:\\users\\alice\\x"), "c:\\users\\USER\\x")
+        self.assertEqual(private_paths_scrubbed("see C:\\Users\\alice."), "see C:\\Users\\USER.")
+
+    def test_windows_lookalikes_unchanged(self):
+        self.assertEqual(private_paths_scrubbed("C:\\Usersx\\y"), "C:\\Usersx\\y")
+        self.assertEqual(private_paths_scrubbed("C:\\Users"), "C:\\Users")
+        self.assertEqual(private_paths_scrubbed("C:\\Users\\"), "C:\\Users\\")
+        self.assertEqual(private_paths_scrubbed("C:\\Program Files\\x"), "C:\\Program Files\\x")
+
+    def test_username_with_space_is_cut_at_the_space(self):
+        # Where a name with a space ends cannot be told from the text, so only the part before
+        # the first space is replaced ("john smith" leaks "smith"). Known limit, not a goal.
+        self.assertEqual(private_paths_scrubbed("/home/john smith/x"), "/home/USER smith/x")
+        self.assertEqual(private_paths_scrubbed("C:\\Users\\john smith\\x"), "C:\\Users\\USER smith\\x")
+
+    def test_idempotent_for_every_form(self):
+        for t in ("/home/日本/x", "/home/josé/x", "see /home/alice.", "C:\\Users\\alice\\x", "C:/Users/alice/x"):
+            once = private_paths_scrubbed(t)
+            self.assertEqual(private_paths_scrubbed(once), once, t)
+
+    def test_long_input_finishes_quickly(self):
+        # Issue bodies are third-party input; no input shape may take super-linear time.
+        n = 200_000
+        for t in ("/home/" * n, "/home/" + "a" * n, "/home/" + "日" * n, "C:" + "/" * n, "C:/Users/" + "\\" * n,
+                  "C:/Users" + "/" * n + "x", "a:/" * n, "/home/a" + "." * n, "/home/" + "a." * n):
+            t0 = time.monotonic()
+            private_paths_scrubbed(t)
+            self.assertLess(time.monotonic() - t0, 5.0, t[:20])
+
+    def test_long_name_fully_replaced(self):
+        self.assertEqual(private_paths_scrubbed("/home/" + "日" * 5000 + "/x"), "/home/USER/x")
 
 
 class IsSource(unittest.TestCase):
@@ -150,6 +229,10 @@ class Select(unittest.TestCase):
     def test_with_body_scrubs_home_paths(self):
         c = select([pr(body="fails in /home/alice/x and /Users/bob.smith/y")], "rust", with_body=True)[0]
         self.assertEqual(c["body"], "fails in /home/USER/x and /Users/USER/y")
+
+    def test_with_body_scrubs_non_ascii_and_windows_paths(self):
+        c = select([pr(body="in /home/josé/x, C:\\Users\\bob\\y and /Users/日本.")], "rust", with_body=True)[0]
+        self.assertEqual(c["body"], "in /home/USER/x, C:\\Users\\USER\\y and /Users/USER.")
 
     def test_with_body_none_becomes_empty_string(self):
         self.assertEqual(select([pr(body=None)], "rust", with_body=True)[0]["body"], "")
