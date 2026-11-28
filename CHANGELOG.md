@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paths in `query --format md` output (the `task.md` list and `<!-- path -->`), the `meta.repo_root` index warning and the unreadable/empty-match errors no longer print raw control characters (ESC, BEL, DEL, C1, U+2028/2029); they are shown as `\x1b`-style escapes, so a crafted file name cannot retitle the terminal, erase lines or write the clipboard (#566).
 - The "has no commits yet" error from `index` no longer prints raw control characters in the repo path; they are shown as `\x1b`-style escapes (#585).
 - The nesting-depth warning (`warn: <path>: nesting deeper than ...`) and the `index` "has no commits yet" check in the CLI now escape control characters in the path too, so a crafted directory name can no longer write raw escape sequences to stderr (#599).
+- Names read from an `index.db` (e.g. a trigger name in the "unexpected schema object" error) no longer reach stderr as raw control characters: `main` now escapes every error message once (`\x1b`-style, backslashes left as they are). `query --format json` now writes DEL, C1 and U+2028/2029 inside strings as `\u009b`-style escapes; the parsed values are unchanged (#648).
 
 ### Added
 - `GitRepo::ensure_has_commits` (public) returns the same "has no commits yet" error as `index` for a repo whose HEAD is unborn, so callers can check before creating any output (#599).
@@ -45,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A file with an unresolved merge conflict (no stage-0 entry in the git index) is no longer dropped from the bundle as unreadable; it is read from the working tree, conflict markers included. Files removed with `git rm --cached` are still refused. The "could not be read" error no longer says re-running `contextsmith index` fixes it, and points at the `warn: skip` lines instead (#563).
 - Re-running `select` over an existing bundle now deletes the previous `relevant-code/*.md` only after the new files are written, so a failed write (e.g. disk full) no longer leaves a bundle with both the old and the new files missing (#645).
 - `select` now also removes `.<name>.md.tmp-<pid>` temp files that a killed run (SIGKILL, power loss) left in `relevant-code/` (#645).
+- `select_candidates` with `SelectOptions::new(0)` now fails with "budget must be >= 1" (as `seed_count == 0` already did) instead of returning an empty selection; the CLI `--budget` already refused 0 (#629).
 
 ## [0.6.0] - 2026-11-23
 

@@ -1296,6 +1296,131 @@ mod tests {
         assert_eq!(v[1]["truncated"], false);
     }
 
+    /// Parse `[truncated: first N of M tokens]` out of `text` as `(N, M)`.
+    fn parse_truncation_note(text: &str) -> (usize, usize) {
+        let rest = text
+            .split("[truncated: first ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no truncation note in:\n{text}"));
+        let mut it = rest.split(' ');
+        let n = it.next().unwrap().parse().unwrap();
+        assert_eq!(it.next(), Some("of"));
+        let m = it.next().unwrap().parse().unwrap();
+        (n, m)
+    }
+
+    fn truncated_cand(path: &str, content: &str, original_tokens: usize) -> Candidate {
+        let mut c = cand(path, 1.0, content);
+        c.truncated = true;
+        c.original_tokens = original_tokens;
+        c
+    }
+
+    #[test]
+    fn shrink_selection_zero_eff_returns_empty() {
+        let sel = vec![cand("src/a.rs", 1.0, "fn a() {}")];
+        assert!(shrink_selection(&sel, 0).is_empty());
+    }
+
+    #[test]
+    fn shrink_selection_within_eff_returns_selection_unchanged() {
+        let sel = vec![
+            truncated_cand("src/a.rs", &"a".repeat(40), 5000),
+            cand("src/b.rs", 0.5, &"b".repeat(40)),
+        ];
+        let total: usize = sel.iter().map(|c| c.tokens()).sum();
+        assert_eq!(total, 20);
+        for eff in [total, total + 1, 1000] {
+            let out = shrink_selection(&sel, eff);
+            assert_eq!(out.len(), 2, "eff={eff}");
+            for (o, s) in out.iter().zip(&sel) {
+                assert_eq!(o.path, s.path, "eff={eff}");
+                assert_eq!(o.content, s.content, "eff={eff}");
+                assert_eq!(o.truncated, s.truncated, "eff={eff}");
+                assert_eq!(o.original_tokens, s.original_tokens, "eff={eff}");
+            }
+        }
+    }
+
+    #[test]
+    fn shrink_selection_keeps_original_tokens_of_already_truncated_file() {
+        // `a` was already cut (500 tokens kept of 5000). Shrinking to 200 cuts it again;
+        // the note must still say "of 5000", not "of 500" (the size before this cut).
+        let sel = vec![truncated_cand("src/a.rs", &"a".repeat(2000), 5000)];
+        let out = shrink_selection(&sel, 200);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].truncated);
+        assert_eq!(out[0].tokens(), 200);
+        assert_eq!(out[0].original_tokens, 5000);
+    }
+
+    #[test]
+    fn shrink_selection_sets_original_tokens_of_whole_file_it_cuts() {
+        // A file that was whole before gets its size from the cut itself (b). The
+        // truncated sibling (a) still fits after the shrink, so `allocate` leaves its
+        // original_tokens alone; the `prev.truncated` carry-over is not what the `a`
+        // asserts exercise. That is pinned by
+        // `shrink_selection_keeps_original_tokens_of_already_truncated_file`.
+        let sel = vec![
+            truncated_cand("src/a.rs", &"a".repeat(400), 5000), // 100 tokens, high score
+            cand("src/b.rs", 0.5, &"b".repeat(400)),            // 100 tokens, whole
+        ];
+        let out = shrink_selection(&sel, 150);
+        let by_path = |p: &str| out.iter().find(|c| c.path == Path::new(p)).unwrap();
+        let a = by_path("src/a.rs");
+        assert!(a.truncated);
+        assert_eq!(a.tokens(), 100);
+        assert_eq!(a.original_tokens, 5000);
+        let b = by_path("src/b.rs");
+        assert!(b.truncated);
+        assert_eq!(b.tokens(), 50);
+        assert_eq!(b.original_tokens, 100);
+    }
+
+    #[test]
+    fn write_bundle_shrink_keeps_original_tokens_of_truncated_file_in_notes() {
+        // The file arrives already cut (500 of 5000 tokens). The budget is far below
+        // that, and the fixed overhead (header, list, wrapper) lowers the body budget
+        // further, so `render_bundle` re-cuts it via `shrink_selection`.
+        const M: usize = 5000;
+        const BUDGET: usize = 200;
+        let sel = vec![truncated_cand("src/a.rs", &"a".repeat(2000), M)];
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("b");
+        write_bundle("t", BUDGET, &sel, "", &out, false).unwrap();
+
+        let task_md = std::fs::read_to_string(out.join("task.md")).unwrap();
+        let file_md = std::fs::read_to_string(out.join("relevant-code/src_a_rs.md")).unwrap();
+        let (n_task, m_task) = parse_truncation_note(&task_md);
+        let (n_file, m_file) = parse_truncation_note(&file_md);
+        assert_eq!(m_task, M, "task.md note lost the original size:\n{task_md}");
+        assert_eq!(m_file, M, "file note lost the original size:\n{file_md}");
+
+        // The re-cut really happened, and N matches the body actually written.
+        let body = file_md.lines().nth(2).unwrap();
+        assert!(body.chars().all(|ch| ch == 'a'), "{file_md}");
+        let body_tokens = estimate_tokens(body);
+        assert!(
+            0 < body_tokens && body_tokens < 500,
+            "body was not shrunk: {body_tokens}"
+        );
+        assert_eq!(n_file, body_tokens);
+        assert_eq!(n_task, body_tokens);
+        assert!(task_md.contains(&format!("— {body_tokens} tokens [truncated")));
+
+        let cj = std::fs::read_to_string(out.join("citations.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cj).unwrap();
+        assert_eq!(v[0]["tokens"], body_tokens);
+        assert_eq!(v[0]["truncated"], true);
+
+        let total = written_tokens(&out);
+        assert!(total <= BUDGET, "total={total}");
+        assert!(
+            task_md.contains(&format!("**Used:** {total} tokens")),
+            "{task_md}"
+        );
+    }
+
     fn big_diff() -> String {
         (0..20000)
             .map(|i| format!("+line {i} of a very large diff\n"))

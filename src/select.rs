@@ -282,6 +282,9 @@ fn select_inner(
     if opts.seed_count == 0 {
         anyhow::bail!("seed_count must be >= 1");
     }
+    if opts.budget == 0 {
+        anyhow::bail!("budget must be >= 1");
+    }
     let seed_count = opts.seed_count.min(MAX_SEED_COUNT);
 
     // Step 1: BM25 search → top-`seed_count` seeds, optionally RRF-fused with semantic
