@@ -247,11 +247,8 @@ fn populate_embeddings_inner(
 
 /// Cosine-rank stored file vectors against a query vector, best-first.
 ///
-/// Streams rows from the DB one at a time and maintains a min-heap of size
-/// `top_n` to avoid loading the full `embeddings` table into RAM.
-/// At 768 dims (e5) each vector is ~3 KiB; a 100 k-file repo would otherwise
-/// consume ~300 MB in a single allocation. The heap keeps peak memory
-/// proportional to `top_n`, not to the total number of stored embeddings.
+/// Streams rows from the DB one at a time and keeps only a `(file_id, score)` pair per row,
+/// so the full `embeddings` table (~3 KiB per vector at 768 dims) is never loaded into RAM.
 ///
 /// Vectors made from an older version of the file (`content_sha` differs from
 /// `files.blob_sha`) are not ranked.
@@ -260,35 +257,9 @@ fn populate_embeddings_inner(
 /// callers cannot accidentally request unbounded results. Use
 /// `fuse_seeds`, which sets `top_n * 3`, for higher-recall RRF pre-filtering.
 pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<Vec<(i64, f32)>> {
-    use std::cmp::Ordering;
-    use std::collections::BinaryHeap;
-
-    // Ordered by score ascending so the smallest score is always at the top
-    // of the min-heap, making eviction O(log top_n) instead of O(n).
-    struct MinEntry(f32, i64); // (score, file_id)
-                               // Derive-free so Eq agrees with Ord (f32 `==` treats 0.0 and -0.0 as equal
-                               // while `total_cmp` does not).
-    impl PartialEq for MinEntry {
-        fn eq(&self, other: &Self) -> bool {
-            self.cmp(other) == Ordering::Equal
-        }
-    }
-    impl Eq for MinEntry {}
-    impl PartialOrd for MinEntry {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-    impl Ord for MinEntry {
-        fn cmp(&self, other: &Self) -> Ordering {
-            // Reverse: smaller score → higher priority in BinaryHeap (min-heap).
-            other.0.total_cmp(&self.0).then(self.1.cmp(&other.1))
-        }
-    }
-
-    // Cap `top_n` to prevent pathologically large heaps.
+    // Cap `top_n` to prevent pathologically large results.
     let effective_n = top_n.min(SEARCH_VECTORS_MAX);
-    let mut heap: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(effective_n + 1);
+    let mut scored: Vec<(i64, f32)> = Vec::new();
 
     // A vector whose `content_sha` differs from the file's current `blob_sha`
     // was made from older text: leave it out until the next embed replaces it
@@ -313,15 +284,12 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
         if score.is_nan() {
             continue;
         }
-        heap.push(MinEntry(score, fid));
-        if heap.len() > effective_n {
-            heap.pop(); // evict the lowest-score entry
-        }
+        scored.push((fid, score));
     }
 
-    // Drain into a vec and sort descending (best first).
-    let mut scored: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.1, e.0)).collect();
+    // Best first; ties go to the lower file_id.
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    scored.truncate(effective_n);
     Ok(scored)
 }
 
