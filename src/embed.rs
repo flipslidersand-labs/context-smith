@@ -247,11 +247,8 @@ fn populate_embeddings_inner(
 
 /// Cosine-rank stored file vectors against a query vector, best-first.
 ///
-/// Streams rows from the DB one at a time and maintains a min-heap of size
-/// `top_n` to avoid loading the full `embeddings` table into RAM.
-/// At 768 dims (e5) each vector is ~3 KiB; a 100 k-file repo would otherwise
-/// consume ~300 MB in a single allocation. The heap keeps peak memory
-/// proportional to `top_n`, not to the total number of stored embeddings.
+/// Streams rows from the DB one at a time and keeps only a `(file_id, score)` pair per row,
+/// so the full `embeddings` table (~3 KiB per vector at 768 dims) is never loaded into RAM.
 ///
 /// Vectors made from an older version of the file (`content_sha` differs from
 /// `files.blob_sha`) are not ranked.
@@ -260,35 +257,9 @@ fn populate_embeddings_inner(
 /// callers cannot accidentally request unbounded results. Use
 /// `fuse_seeds`, which sets `top_n * 3`, for higher-recall RRF pre-filtering.
 pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<Vec<(i64, f32)>> {
-    use std::cmp::Ordering;
-    use std::collections::BinaryHeap;
-
-    // Ordered by score ascending so the smallest score is always at the top
-    // of the min-heap, making eviction O(log top_n) instead of O(n).
-    struct MinEntry(f32, i64); // (score, file_id)
-                               // Derive-free so Eq agrees with Ord (f32 `==` treats 0.0 and -0.0 as equal
-                               // while `total_cmp` does not).
-    impl PartialEq for MinEntry {
-        fn eq(&self, other: &Self) -> bool {
-            self.cmp(other) == Ordering::Equal
-        }
-    }
-    impl Eq for MinEntry {}
-    impl PartialOrd for MinEntry {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-    impl Ord for MinEntry {
-        fn cmp(&self, other: &Self) -> Ordering {
-            // Reverse: smaller score → higher priority in BinaryHeap (min-heap).
-            other.0.total_cmp(&self.0).then(self.1.cmp(&other.1))
-        }
-    }
-
-    // Cap `top_n` to prevent pathologically large heaps.
+    // Cap `top_n` to prevent pathologically large results.
     let effective_n = top_n.min(SEARCH_VECTORS_MAX);
-    let mut heap: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(effective_n + 1);
+    let mut scored: Vec<(i64, f32)> = Vec::new();
 
     // A vector whose `content_sha` differs from the file's current `blob_sha`
     // was made from older text: leave it out until the next embed replaces it
@@ -309,27 +280,25 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
             continue;
         }
         let score = cosine(query, &blob_to_vec(&blob));
-        // A NaN score has no rank and would break the heap's total order; skip it.
+        // A NaN score has no rank and would break the total order that `sort_by` relies on; skip it.
         if score.is_nan() {
             continue;
         }
-        heap.push(MinEntry(score, fid));
-        if heap.len() > effective_n {
-            heap.pop(); // evict the lowest-score entry
-        }
+        scored.push((fid, score));
     }
 
-    // Drain into a vec and sort descending (best first).
-    let mut scored: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.1, e.0)).collect();
+    // Best first; ties go to the lower file_id.
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    scored.truncate(effective_n);
     Ok(scored)
 }
 
 /// Maximum number of results `search_vectors` will return.
 ///
-/// This guards against callers requesting unbounded top-k results; at 768
-/// dims each heap slot costs ~3 KiB so 3 000 entries ≈ 9 MB — well within
-/// reason while still giving RRF plenty of candidates to fuse.
+/// This caps the number of results returned, so callers cannot request unbounded top-k
+/// output; it does not bound memory while ranking. Every scored row is collected as a
+/// 16-byte `(i64, f32)` pair before the sort, so 1 M stored vectors need about 16 MB.
+/// 3 000 results still give RRF plenty of candidates to fuse.
 const SEARCH_VECTORS_MAX: usize = 3_000;
 
 /// Generate embeddings for the indexed files via the remote embedding service.
@@ -887,6 +856,38 @@ mod tests {
                 .map(|(id, _)| *id)
                 .collect();
             assert_eq!(cut, vec![1, 2, 3, 4]);
+        }
+    }
+
+    /// Ties, NaN rows and the `SEARCH_VECTORS_MAX` cap together: the result is the first
+    /// `top_n` of the non-NaN rows ordered by (score desc, file_id asc).
+    #[test]
+    fn search_vectors_orders_ties_nan_and_cap_like_a_full_sort() {
+        let conn = mem_db();
+        let total = 5_000i64;
+        let tx = conn.unchecked_transaction().unwrap();
+        for id in 1..=total {
+            // Score classes by `id % 4` (class 0 is the best); every third row is NaN.
+            let v = if id % 3 == 0 {
+                [f32::NAN, f32::NAN]
+            } else {
+                [1.0, (id % 4) as f32]
+            };
+            conn.execute(
+                "INSERT INTO embeddings (file_id, vector) VALUES (?1, ?2)",
+                rusqlite::params![id, vec_to_blob(&v)],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let mut want: Vec<i64> = (1..=total).filter(|id| id % 3 != 0).collect();
+        want.sort_by_key(|&id| (id % 4, id));
+        for n in [0usize, 1, 7, 100, 1_000, 3_000, 3_001, usize::MAX] {
+            let got = search_vectors(&conn, &[1.0, 0.0], n).unwrap();
+            let ids: Vec<i64> = got.iter().map(|(id, _)| *id).collect();
+            let take = n.min(SEARCH_VECTORS_MAX).min(want.len());
+            assert_eq!(ids, want[..take], "top_n={n}");
+            assert!(got.windows(2).all(|w| w[0].1 >= w[1].1), "top_n={n}");
         }
     }
 

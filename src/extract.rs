@@ -11,16 +11,45 @@ impl SymbolExtractor {
         path: &Path,
         source: &str,
         lang: Language,
-    ) -> Result<Vec<(String, SymbolKind, u32)>> {
-        match lang {
-            Language::Rust => Self::extract_rust(path, source),
-            Language::Python => Self::extract_python(path, source),
-            Language::Go => Self::extract_go(path, source),
-            Language::TypeScript => Self::extract_typescript(path, source),
-            Language::JavaScript => Self::extract_javascript(path, source),
-            Language::Ruby => Self::extract_ruby(path, source),
-            Language::Unknown => Ok(vec![]),
-        }
+    ) -> Result<Vec<(String, SymbolKind)>> {
+        type Collect = fn(tree_sitter::Node, &[u8], &Path) -> Vec<(String, SymbolKind)>;
+        // (grammar, label for error messages, collector)
+        let (grammar, name, collect): (tree_sitter::Language, &str, Collect) = match lang {
+            Language::Rust => (
+                tree_sitter_rust::LANGUAGE.into(),
+                "Rust",
+                collect_rust_symbols,
+            ),
+            Language::Python => (
+                tree_sitter_python::LANGUAGE.into(),
+                "Python",
+                collect_python_symbols,
+            ),
+            Language::Go => (tree_sitter_go::LANGUAGE.into(), "Go", collect_go_symbols),
+            Language::TypeScript => {
+                // TSX is not a superset of TS: `<T>x` assertions and `<T>(x) => x` parse as JSX
+                // there. Use the TSX grammar only for `.tsx`; `.ts`/`.mts`/`.cts` use plain TS.
+                let grammar = if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
+                    tree_sitter_typescript::LANGUAGE_TSX
+                } else {
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+                };
+                (grammar.into(), "TypeScript", collect_ecma_symbols)
+            }
+            Language::JavaScript => (
+                tree_sitter_javascript::LANGUAGE.into(),
+                "JavaScript",
+                collect_ecma_symbols,
+            ),
+            Language::Ruby => (
+                tree_sitter_ruby::LANGUAGE.into(),
+                "Ruby",
+                collect_ruby_symbols,
+            ),
+            Language::Unknown => return Ok(vec![]),
+        };
+        let tree = Self::parse(path, source, grammar, name)?;
+        Ok(collect(tree.root_node(), source.as_bytes(), path))
     }
 
     /// Parse `source` with `grammar`; `name` only labels error messages.
@@ -37,72 +66,6 @@ impl SymbolExtractor {
         parser
             .parse(source, None)
             .with_context(|| format!("{name} parse failed"))
-    }
-
-    fn extract_rust(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let tree = Self::parse(path, source, tree_sitter_rust::LANGUAGE.into(), "Rust")?;
-        Ok(collect_rust_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_python(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let tree = Self::parse(path, source, tree_sitter_python::LANGUAGE.into(), "Python")?;
-        Ok(collect_python_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_go(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let tree = Self::parse(path, source, tree_sitter_go::LANGUAGE.into(), "Go")?;
-        Ok(collect_go_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_typescript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        // TSX is not a superset of TS: `<T>x` assertions and `<T>(x) => x` parse as JSX
-        // there. Use the TSX grammar only for `.tsx`; `.ts`/`.mts`/`.cts` use plain TS.
-        let grammar = if path.extension().and_then(|e| e.to_str()) == Some("tsx") {
-            tree_sitter_typescript::LANGUAGE_TSX
-        } else {
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT
-        };
-        let tree = Self::parse(path, source, grammar.into(), "TypeScript")?;
-        Ok(collect_ecma_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_javascript(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let tree = Self::parse(
-            path,
-            source,
-            tree_sitter_javascript::LANGUAGE.into(),
-            "JavaScript",
-        )?;
-        Ok(collect_ecma_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
-    }
-
-    fn extract_ruby(path: &Path, source: &str) -> Result<Vec<(String, SymbolKind, u32)>> {
-        let tree = Self::parse(path, source, tree_sitter_ruby::LANGUAGE.into(), "Ruby")?;
-        Ok(collect_ruby_symbols(
-            tree.root_node(),
-            source.as_bytes(),
-            path,
-        ))
     }
 }
 
@@ -134,7 +97,7 @@ fn collect_rust_symbols(
     root: tree_sitter::Node,
     src: &[u8],
     path: &Path,
-) -> Vec<(String, SymbolKind, u32)> {
+) -> Vec<(String, SymbolKind)> {
     let mut out = Vec::new();
     let mut truncated = false;
     traverse_rust(root, src, &mut out, 0, &mut truncated);
@@ -145,7 +108,7 @@ fn collect_rust_symbols(
 fn traverse_rust(
     node: tree_sitter::Node,
     src: &[u8],
-    out: &mut Vec<(String, SymbolKind, u32)>,
+    out: &mut Vec<(String, SymbolKind)>,
     depth: usize,
     truncated: &mut bool,
 ) {
@@ -153,31 +116,30 @@ fn traverse_rust(
         *truncated = true;
         return;
     }
-    let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_item" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Function));
             }
         }
         "struct_item" | "enum_item" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Struct, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Struct));
             }
         }
         "trait_item" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Class, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Class));
             }
         }
         "type_item" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Struct, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Struct));
             }
         }
         "impl_item" => {
             if let Some(ty) = node.child_by_field_name("type") {
-                out.push((node_text(ty, src).to_owned(), SymbolKind::Impl, line));
+                out.push((node_text(ty, src).to_owned(), SymbolKind::Impl));
             }
         }
         "use_declaration" => {
@@ -187,7 +149,7 @@ fn traverse_rust(
             if let Some(arg) = node.child_by_field_name("argument") {
                 let text = node_text(arg, src).trim();
                 if !text.is_empty() {
-                    out.push((text.to_owned(), SymbolKind::Import, line));
+                    out.push((text.to_owned(), SymbolKind::Import));
                 }
             }
         }
@@ -198,11 +160,7 @@ fn traverse_rust(
             let top_level = node.parent().is_some_and(|p| p.kind() == "source_file");
             if top_level && node.child_by_field_name("body").is_none() {
                 if let Some(name) = node.child_by_field_name("name") {
-                    out.push((
-                        format!("mod {}", node_text(name, src)),
-                        SymbolKind::Import,
-                        line,
-                    ));
+                    out.push((format!("mod {}", node_text(name, src)), SymbolKind::Import));
                 }
             }
         }
@@ -219,7 +177,7 @@ fn collect_python_symbols(
     root: tree_sitter::Node,
     src: &[u8],
     path: &Path,
-) -> Vec<(String, SymbolKind, u32)> {
+) -> Vec<(String, SymbolKind)> {
     let mut out = Vec::new();
     let mut truncated = false;
     collect_python_node(root, src, &mut out, 0, &mut truncated);
@@ -230,7 +188,7 @@ fn collect_python_symbols(
 fn collect_python_node(
     node: tree_sitter::Node,
     src: &[u8],
-    out: &mut Vec<(String, SymbolKind, u32)>,
+    out: &mut Vec<(String, SymbolKind)>,
     depth: usize,
     truncated: &mut bool,
 ) {
@@ -238,20 +196,19 @@ fn collect_python_node(
         *truncated = true;
         return;
     }
-    let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_definition" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Function));
             }
         }
         "class_definition" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Class, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Class));
             }
         }
         "import_statement" | "import_from_statement" => {
-            out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+            out.push((node_text(node, src).to_owned(), SymbolKind::Import));
         }
         _ => {}
     }
@@ -268,7 +225,7 @@ fn collect_ecma_symbols(
     root: tree_sitter::Node,
     src: &[u8],
     path: &Path,
-) -> Vec<(String, SymbolKind, u32)> {
+) -> Vec<(String, SymbolKind)> {
     let mut out = Vec::new();
     let mut truncated = false;
     collect_ecma_node(root, src, &mut out, 0, &mut truncated);
@@ -279,7 +236,7 @@ fn collect_ecma_symbols(
 fn collect_ecma_node(
     node: tree_sitter::Node,
     src: &[u8],
-    out: &mut Vec<(String, SymbolKind, u32)>,
+    out: &mut Vec<(String, SymbolKind)>,
     depth: usize,
     truncated: &mut bool,
 ) {
@@ -287,25 +244,24 @@ fn collect_ecma_node(
         *truncated = true;
         return;
     }
-    let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_declaration"
         | "generator_function_declaration"
         | "function_signature"
         | "method_definition" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Function));
             }
         }
         "class_declaration" | "abstract_class_declaration" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Class, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Class));
             }
         }
         // TypeScript-only type declarations map to Struct.
         "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Struct, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Struct));
             }
         }
         // `const foo = () => {}` / `const foo = function () {}`
@@ -318,24 +274,24 @@ fn collect_ecma_node(
                     value.kind(),
                     "arrow_function" | "function" | "function_expression"
                 ) {
-                    out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                    out.push((node_text(name, src).to_owned(), SymbolKind::Function));
                 }
             }
         }
         "import_statement" => {
-            out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+            out.push((node_text(node, src).to_owned(), SymbolKind::Import));
         }
         // Re-exports (`export ... from './x'`) are dependencies; plain `export { a }` is not.
         "export_statement" => {
             if node.child_by_field_name("source").is_some() {
-                out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+                out.push((node_text(node, src).to_owned(), SymbolKind::Import));
             }
         }
         // CommonJS `require('./x')` — recorded as an import for dependency resolution.
         "call_expression" => {
             if let Some(func) = node.child_by_field_name("function") {
                 if node_text(func, src) == "require" {
-                    out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+                    out.push((node_text(node, src).to_owned(), SymbolKind::Import));
                 }
             }
         }
@@ -352,7 +308,7 @@ fn collect_go_symbols(
     root: tree_sitter::Node,
     src: &[u8],
     path: &Path,
-) -> Vec<(String, SymbolKind, u32)> {
+) -> Vec<(String, SymbolKind)> {
     let mut out = Vec::new();
     let mut truncated = false;
     collect_go_node(root, src, &mut out, 0, &mut truncated);
@@ -363,7 +319,7 @@ fn collect_go_symbols(
 fn collect_go_node(
     node: tree_sitter::Node,
     src: &[u8],
-    out: &mut Vec<(String, SymbolKind, u32)>,
+    out: &mut Vec<(String, SymbolKind)>,
     depth: usize,
     truncated: &mut bool,
 ) {
@@ -371,11 +327,10 @@ fn collect_go_node(
         *truncated = true;
         return;
     }
-    let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "function_declaration" | "method_declaration" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Function));
             }
         }
         "type_declaration" => {
@@ -384,19 +339,14 @@ fn collect_go_node(
                     if matches!(spec.kind(), "type_spec" | "type_alias") {
                         if let Some(name) = spec.child_by_field_name("name") {
                             // Use the spec's own row so grouped `type ( ... )` entries point at their definition.
-                            let spec_line = spec.start_position().row as u32 + 1;
-                            out.push((
-                                node_text(name, src).to_owned(),
-                                SymbolKind::Struct,
-                                spec_line,
-                            ));
+                            out.push((node_text(name, src).to_owned(), SymbolKind::Struct));
                         }
                     }
                 }
             }
         }
         "import_declaration" => {
-            out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+            out.push((node_text(node, src).to_owned(), SymbolKind::Import));
         }
         _ => {}
     }
@@ -411,7 +361,7 @@ fn collect_ruby_symbols(
     root: tree_sitter::Node,
     src: &[u8],
     path: &Path,
-) -> Vec<(String, SymbolKind, u32)> {
+) -> Vec<(String, SymbolKind)> {
     let mut out = Vec::new();
     let mut truncated = false;
     collect_ruby_node(root, src, &mut out, 0, &mut truncated);
@@ -422,7 +372,7 @@ fn collect_ruby_symbols(
 fn collect_ruby_node(
     node: tree_sitter::Node,
     src: &[u8],
-    out: &mut Vec<(String, SymbolKind, u32)>,
+    out: &mut Vec<(String, SymbolKind)>,
     depth: usize,
     truncated: &mut bool,
 ) {
@@ -430,21 +380,20 @@ fn collect_ruby_node(
         *truncated = true;
         return;
     }
-    let line = node.start_position().row as u32 + 1;
     match node.kind() {
         "method" | "singleton_method" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Function, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Function));
             }
         }
         "class" | "singleton_class" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Class, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Class));
             }
         }
         "module" => {
             if let Some(name) = node.child_by_field_name("name") {
-                out.push((node_text(name, src).to_owned(), SymbolKind::Struct, line));
+                out.push((node_text(name, src).to_owned(), SymbolKind::Struct));
             }
         }
         // require / require_relative calls
@@ -455,7 +404,7 @@ fn collect_ruby_node(
                 if (m == "require" || m == "require_relative")
                     && node.child_by_field_name("receiver").is_none()
                 {
-                    out.push((node_text(node, src).to_owned(), SymbolKind::Import, line));
+                    out.push((node_text(node, src).to_owned(), SymbolKind::Import));
                 }
             }
         }
@@ -472,10 +421,10 @@ fn collect_ruby_node(
 mod tests {
     use super::*;
 
-    fn names(syms: &[(String, SymbolKind, u32)], kind: SymbolKind) -> Vec<&str> {
+    fn names(syms: &[(String, SymbolKind)], kind: SymbolKind) -> Vec<&str> {
         syms.iter()
-            .filter(|(_, k, _)| *k == kind)
-            .map(|(n, _, _)| n.as_str())
+            .filter(|(_, k)| *k == kind)
+            .map(|(n, _)| n.as_str())
             .collect()
     }
 
@@ -506,9 +455,9 @@ mod tests {
         assert_eq!(names(&out, SymbolKind::Struct), vec!["S", "E", "Alias"]);
         assert_eq!(names(&out, SymbolKind::Class), vec!["T"]);
         assert_eq!(names(&out, SymbolKind::Impl), vec!["S"]);
-        // `use ` prefix and trailing `;` are trimmed; line numbers are 1-based.
-        assert_eq!(out[0], ("std::fmt".to_string(), SymbolKind::Import, 1));
-        assert!(out.contains(&("run".to_string(), SymbolKind::Function, 7)));
+        // `use ` prefix and trailing `;` are trimmed.
+        assert_eq!(out[0], ("std::fmt".to_string(), SymbolKind::Import));
+        assert!(out.contains(&("run".to_string(), SymbolKind::Function)));
     }
 
     #[test]
@@ -563,6 +512,14 @@ mod tests {
         assert!(!names(&out, SymbolKind::Import).is_empty());
     }
 
+    /// `.tsx` uses the TSX grammar, so JSX parses cleanly and symbols inside it are found.
+    #[test]
+    fn extract_tsx_parses_jsx() {
+        let jsx = "const el = <div>hi</div>;\nfunction App() { return <b>{[1].map(function inner() { return <i/>; })}</b>; }\n";
+        let tsx = SymbolExtractor::extract(Path::new("a.tsx"), jsx, Language::TypeScript).unwrap();
+        assert_eq!(names(&tsx, SymbolKind::Function), vec!["App"]);
+    }
+
     #[test]
     fn extract_rust_empty_source() {
         let out = SymbolExtractor::extract(Path::new("a.rs"), "", Language::Rust).unwrap();
@@ -601,19 +558,17 @@ mod tests {
             "    pass\n",
         );
         let out = SymbolExtractor::extract(Path::new("a.py"), src, Language::Python).unwrap();
-        let got: Vec<(&str, SymbolKind, u32)> = out
-            .iter()
-            .map(|(n, k, l)| (n.as_str(), k.clone(), *l))
-            .collect();
+        let got: Vec<(&str, SymbolKind)> =
+            out.iter().map(|(n, k)| (n.as_str(), k.clone())).collect();
         assert_eq!(
             got,
             vec![
-                ("decorated", SymbolKind::Function, 4),
-                ("inner", SymbolKind::Function, 5),
-                ("InnerCls", SymbolKind::Class, 7),
-                ("Decorated", SymbolKind::Class, 11),
-                ("am", SymbolKind::Function, 12),
-                ("top_async", SymbolKind::Function, 15),
+                ("decorated", SymbolKind::Function),
+                ("inner", SymbolKind::Function),
+                ("InnerCls", SymbolKind::Class),
+                ("Decorated", SymbolKind::Class),
+                ("am", SymbolKind::Function),
+                ("top_async", SymbolKind::Function),
             ]
         );
     }
@@ -622,18 +577,13 @@ mod tests {
     fn extract_python_import_forms() {
         let src = "import a.b as c\nfrom . import x\nfrom .. import y\nfrom a import (b,\n    c)\n\"\"\"\nimport in_doc\n\"\"\"\n# import in_comment\n";
         let out = SymbolExtractor::extract(Path::new("a.py"), src, Language::Python).unwrap();
-        let got: Vec<(&str, u32)> = out
-            .iter()
-            .filter(|(_, k, _)| *k == SymbolKind::Import)
-            .map(|(n, _, l)| (n.as_str(), *l))
-            .collect();
         assert_eq!(
-            got,
+            names(&out, SymbolKind::Import),
             vec![
-                ("import a.b as c", 1),
-                ("from . import x", 2),
-                ("from .. import y", 3),
-                ("from a import (b,\n    c)", 4),
+                "import a.b as c",
+                "from . import x",
+                "from .. import y",
+                "from a import (b,\n    c)",
             ]
         );
     }
@@ -652,12 +602,6 @@ mod tests {
         let src = "package p\n\ntype (\n    A struct{}\n    B interface{}\n    C = A\n)\n\ntype D struct{}\n";
         let out = SymbolExtractor::extract(Path::new("a.go"), src, Language::Go).unwrap();
         assert_eq!(names(&out, SymbolKind::Struct), vec!["A", "B", "C", "D"]);
-        let lines: Vec<u32> = out
-            .iter()
-            .filter(|(_, k, _)| *k == SymbolKind::Struct)
-            .map(|(_, _, l)| *l)
-            .collect();
-        assert_eq!(lines, vec![4, 5, 6, 9]);
     }
 
     #[test]
@@ -762,11 +706,7 @@ mod tests {
 
     /// Run extraction on a thread with a small stack: an unbounded recursive walk
     /// overflows it (SIGABRT) on deeply nested input, while a depth-capped walk does not.
-    fn extract_small_stack(
-        file: &str,
-        src: String,
-        lang: Language,
-    ) -> Vec<(String, SymbolKind, u32)> {
+    fn extract_small_stack(file: &str, src: String, lang: Language) -> Vec<(String, SymbolKind)> {
         let file = file.to_owned();
         std::thread::Builder::new()
             .stack_size(1 << 20)
