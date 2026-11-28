@@ -280,7 +280,7 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
             continue;
         }
         let score = cosine(query, &blob_to_vec(&blob));
-        // A NaN score has no rank and would break the heap's total order; skip it.
+        // A NaN score has no rank and would break the total order that `sort_by` relies on; skip it.
         if score.is_nan() {
             continue;
         }
@@ -295,9 +295,10 @@ pub fn search_vectors(conn: &Connection, query: &[f32], top_n: usize) -> Result<
 
 /// Maximum number of results `search_vectors` will return.
 ///
-/// This guards against callers requesting unbounded top-k results; at 768
-/// dims each heap slot costs ~3 KiB so 3 000 entries ≈ 9 MB — well within
-/// reason while still giving RRF plenty of candidates to fuse.
+/// This caps the number of results returned, so callers cannot request unbounded top-k
+/// output; it does not bound memory while ranking. Every scored row is collected as a
+/// 16-byte `(i64, f32)` pair before the sort, so 1 M stored vectors need about 16 MB.
+/// 3 000 results still give RRF plenty of candidates to fuse.
 const SEARCH_VECTORS_MAX: usize = 3_000;
 
 /// Generate embeddings for the indexed files via the remote embedding service.
